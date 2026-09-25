@@ -1,0 +1,62 @@
+polling:
+  github_minutes: 5
+  linkedin_minutes: 45
+  handshake_minutes: 45
+jobs:
+  max_listing_age_days: 30
+  target_season: Summer 2027
+discovery:
+  max_results_per_query: 250
+  max_pages_per_query: 5
+browser:
+  headless: false
+  timeout_ms: 30000
+  channel: null
+cursor:
+  backend: playwright # Or cdp (Chromium only).
+  mode: restricted
+  owned_origins: [] # Exact origins required for owned_test presentation variation.
+  target_strategy: SAFE_CENTER
+  noise_enabled: false
+  overshoot_enabled: false
+  timing_variation: false
+  curve_variation: false
+application:
+  auto_submit: true
+  delay_seconds: 60
+  min_confidence: 0.98
+  max_pages: 12
+  confirmation_timeout_seconds: 15
+processing:
+  max_retries: 3
+  max_applications_per_day: 100
+discord:
+  enabled: true
+gmail:
+  enabled: true
+  # Exact expected sender domains must be verified for each employer.
+  sender_domains: {}
+ai:
+  enabled: true
+  allow_paid: false
+  # Add legitimate browser providers in data/private/config.yaml. See README.
+  providers: []
+github_sources:
+  - url: https://github.com/SimplifyJobs/Summer2027-Internships
+  - url: https://github.com/speedyapply/2027-SWE-College-Jobs
+  - url: https://github.com/vanshb03/Summer2027-Internships
+linkedin:
+  enabled: false
+  search_urls:
+    - https://www.linkedin.com/jobs/search/?keywords=technical%20internship&location=United%20States&f_TPR=r2592000
+handshake:
+  enabled: false
+  # Paste search URLs from your school's authenticated Handshake session.
+  search_urls: []
+locations:
+  preferred_groups:
+    - [San Francisco, San Jose, Mountain View, Sunnyvale, Palo Alto, San Diego, Los Angeles, CA, California]
+    - [New York, NYC, NY]
+    - [Seattle, Boston, Austin, Chicago, Denver, Atlanta]
+    - [College Park, Washington, DC, Maryland, MD]
+    - [Virginia, VA, Pennsylvania, PA, Delaware, DE, New Jersey, NJ]

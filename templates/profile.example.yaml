@@ -1,0 +1,53 @@
+# Only enter verified information. Null means unknown, never "No".
+identity:
+  first_name: null
+  last_name: null
+  full_name: null
+contact:
+  email: null
+  phone: null
+  address: null
+  city: null
+  state: null
+  postal_code: null
+  country: null
+education:
+  school: null
+  degree: null
+  major: null
+  school_year: null
+  graduation_date: null
+  gpa: null
+  currently_enrolled: null
+citizenship:
+  us_citizen: null
+  citizen_since_birth: null
+work_authorization:
+  us_authorized: null
+  sponsorship_now: null
+  sponsorship_future: null
+employment: []
+projects: []
+skills: []
+qualifications:
+  programming_experience: null
+availability: {}
+locations:
+  willing_to_relocate: null
+links:
+  github: null
+  personal_website: null
+  linkedin: null
+application_preferences:
+  office_five_days: null
+  discovery_source: null
+  race: decline
+  gender: decline
+  disability: decline
+  veteran: null
+  compensation_text: Negotiable / market competitive
+common_answers: {}
+# Explicit user assertions only; supported IDs/meanings are in autoapply/standing.py.
+eligibility_assertions: []
+# Factual building blocks for writing: identifier -> exact verified fact.
+verified_facts: {}

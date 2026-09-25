@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fixture internship</title></head>
+<body><main><h1>Software Engineering Intern Summer 2027</h1>
+<div id="job-description">Software engineering internship for undergraduate students in New York, NY.</div>
+<form id="application">
+  <label for="first">First Name *</label><input id="first" name="first_name" required>
+  <label for="last">Last Name *</label><input id="last" required>
+  <label for="email">Email *</label><input id="email" type="email" required>
+  <label for="phone">Phone *</label><input id="phone" type="tel" required>
+  <label for="sponsor">Will you now or in the future require sponsorship? *</label>
+  <select id="sponsor" required><option value="">Select</option><option>Yes</option><option>No</option></select>
+  <fieldset><legend>Are you authorized to work in the United States? *</legend>
+    <label><input type="radio" name="auth" value="yes" required>Yes</label>
+    <label><input type="radio" name="auth" value="no">No</label>
+  </fieldset>
+  <label for="resume">Resume *</label><input id="resume" type="file" accept=".pdf" required>
+  <label for="writing">Describe a technical challenge *</label><textarea id="writing" required maxlength="200"></textarea>
+  <label><input id="newsletter" type="checkbox">Subscribe to marketing updates</label>
+  <button type="submit">Submit application</button>
+</form></main>
+<script>
+document.cookie = 'fixture_session=persisted; path=/; max-age=3600';
+document.querySelector('form').addEventListener('submit', async e => {
+ e.preventDefault();
+ const data = {first:document.querySelector('#first').value, last:document.querySelector('#last').value,
+   email:document.querySelector('#email').value, sponsorship:document.querySelector('#sponsor').value,
+   auth:document.querySelector('input[name=auth]:checked').value,
+   resume:document.querySelector('#resume').files[0].name, writing:document.querySelector('#writing').value,
+   marketing:document.querySelector('#newsletter').checked};
+ await fetch('/submit', {method:'POST',body:JSON.stringify(data)});
+ if (!location.search.includes('no-confirmation')) document.querySelector('main').innerHTML = '<h1>Thank you for applying</h1><p>Your application has been submitted successfully.</p>';
+});
+</script></body></html>

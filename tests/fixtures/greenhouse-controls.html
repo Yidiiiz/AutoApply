@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><body>
+<form id="application">
+ <label id="school-label" for="school">School *</label>
+ <div class="select-shell">
+  <div><span id="selection"></span><div><input id="school" role="combobox" aria-labelledby="school-label" aria-required="true" aria-controls="school-options" autocomplete="off"></div></div>
+  <input aria-hidden="true" tabindex="-1" required value="">
+ </div>
+ <div id="school-options" role="listbox" hidden></div>
+ <div class="file-upload"><p class="label">Resume/CV *</p><div><label for="resume">Attach</label><input id="resume" type="file" hidden></div></div>
+ <button>Submit application</button>
+</form>
+<script>
+ const input=document.querySelector('#school'), menu=document.querySelector('#school-options');
+ input.addEventListener('input',()=>{
+  menu.hidden=false; menu.innerHTML='';
+  const option=document.createElement('div'); option.setAttribute('role','option');
+  option.textContent='Example University';
+  option.addEventListener('click',()=>{
+   input.value='';document.querySelector('#selection').textContent=option.textContent;
+   document.querySelector('[aria-hidden=true]').value='verified-id';menu.hidden=true;
+  });menu.appendChild(option);
+ });
+</script></body></html>
