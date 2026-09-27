@@ -92,7 +92,15 @@ class ScrollController:
                         await handle.evaluate("e => {if(!e.hasAttribute('tabindex')) {e.setAttribute('tabindex','-1'); e.dataset.autoapplyScrollFocus='1'} e.focus({preventScroll:true})}")
                         await self.page.keyboard.press("PageDown" if direction == "DOWN" else "PageUp")
                         await handle.evaluate("e => {if(e.dataset.autoapplyScrollFocus){e.removeAttribute('tabindex');delete e.dataset.autoapplyScrollFocus}}")
-                    await asyncio.sleep(.08)
+                    # Wheel/PageDown delivery is asynchronous. Finish when the
+                    # owned container moves, with the former 80ms bound.
+                    await handle.evaluate('''(e, before) => new Promise(resolve => {
+                      const end=performance.now()+80;
+                      setTimeout(resolve,80);
+                      const sample=()=>Math.abs(e.scrollTop-before)>.5||performance.now()>=end
+                        ? resolve() : requestAnimationFrame(sample);
+                      sample();
+                    })''', before['top'])
                     await self._check()
                     after = await handle.evaluate(METRICS)
                     event = dict(container=before['container'], direction=direction, strategy=strategy,

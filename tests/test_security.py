@@ -29,7 +29,6 @@ def test_confirmation_sentence_scope(text,confirmed):
 
 @pytest.fixture
 async def security_browser(config, monkeypatch):
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(ROOT / "data/private/playwright"))
     config.data["application"]["confirmation_timeout_seconds"] = 1
     browser = Browser(config)
     await browser.start()
@@ -265,6 +264,8 @@ def test_duplicate_history_blocks_alternate_url(config, db, listing):
     db.claim()
     db.transition(1, State.SUBMITTED, confirmation_text="Thank you for applying")
     db.ingest(replace(listing, url='https://jobs.lever.co/example/alternate-id'), config)
+    assert db.submission_conflict(2) is None  # Distinct, fully identified requisition.
+    db.execute('UPDATE jobs SET canonical_url=? WHERE id=2', (listing.url + '/apply',))
     assert db.submission_conflict(2)["id"] == 1
 
 
@@ -378,6 +379,8 @@ def test_unresolved_duplicate_protects_new_alias(config, db, listing, earlier_st
     db.ingest(listing, config); db.claim()
     db.transition(1, earlier_state)
     db.ingest(replace(listing, url='https://jobs.lever.co/example/alternate-id'), config)
+    assert db.submission_conflict(2) is None
+    db.execute('UPDATE jobs SET canonical_url=? WHERE id=2', (listing.url + '/apply',))
     assert db.submission_conflict(2)['id'] == 1
 
 

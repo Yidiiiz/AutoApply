@@ -1,6 +1,7 @@
 """Conservative identity, freshness, location and eligibility rules."""
 import hashlib
 import re
+import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -9,7 +10,7 @@ from .models import Eligibility
 
 
 def normalize(text):
-    return re.sub(r"[^\w]+", " ", str(text).casefold()).strip()
+    return re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', str(text)).casefold()).strip()
 
 
 def canonical_url(url):

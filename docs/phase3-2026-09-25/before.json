@@ -1,0 +1,91 @@
+{
+  "python": "3.14.3",
+  "sqlite": "3.50.4",
+  "method": "Synthetic temporary data; timings are single samples, not production throughput.",
+  "samples": [
+    {
+      "listings": 100,
+      "unchanged_cleanup": {
+        "seconds": 0.013037,
+        "database_execute_calls": {
+          "SELECT": 204,
+          "BEGIN": 2,
+          "UPDATE": 100,
+          "observation_writes": 100,
+          "COMMIT": 2,
+          "statistics_refreshes": 1
+        },
+        "sqlite_total_changes_including_triggers": 100
+      },
+      "plans_before": {
+        "identity_or_url": [
+          "SCAN jobs"
+        ],
+        "events_by_app": [
+          "SCAN events"
+        ],
+        "sources_by_job": [
+          "SCAN job_sources"
+        ],
+        "written_reuse": [
+          "SCAN written_responses"
+        ],
+        "known_answer": [
+          "SEARCH known_answers USING INDEX sqlite_autoindex_known_answers_1 (normalized_question=? AND scope=?)"
+        ],
+        "daily_count": [
+          "SCAN applications"
+        ],
+        "queue": [
+          "SEARCH j USING INDEX listing_active_idx (listing_active=?)",
+          "SEARCH a USING INDEX sqlite_autoindex_applications_1 (job_id=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH s USING INDEX sqlite_autoindex_settings_1 (key=?)",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      }
+    },
+    {
+      "listings": 1000,
+      "unchanged_cleanup": {
+        "seconds": 0.044984,
+        "database_execute_calls": {
+          "SELECT": 2004,
+          "BEGIN": 2,
+          "UPDATE": 1000,
+          "observation_writes": 1000,
+          "COMMIT": 2,
+          "statistics_refreshes": 1
+        },
+        "sqlite_total_changes_including_triggers": 1000
+      },
+      "plans_before": {
+        "identity_or_url": [
+          "SCAN jobs"
+        ],
+        "events_by_app": [
+          "SCAN events"
+        ],
+        "sources_by_job": [
+          "SCAN job_sources"
+        ],
+        "written_reuse": [
+          "SCAN written_responses"
+        ],
+        "known_answer": [
+          "SEARCH known_answers USING INDEX sqlite_autoindex_known_answers_1 (normalized_question=? AND scope=?)"
+        ],
+        "daily_count": [
+          "SCAN applications"
+        ],
+        "queue": [
+          "SEARCH j USING INDEX listing_active_idx (listing_active=?)",
+          "SEARCH a USING INDEX sqlite_autoindex_applications_1 (job_id=?)",
+          "CORRELATED SCALAR SUBQUERY 1",
+          "SEARCH s USING INDEX sqlite_autoindex_settings_1 (key=?)",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      }
+    }
+  ]
+}

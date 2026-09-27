@@ -12,7 +12,7 @@ from .ai import AIManager, ProviderUnavailable
 from .answers import AnswerResolver, validate_answer, written_reuse, is_writing_question
 from .applications import UnsupportedForm, adapter_for
 from .archive import archive_application
-from .browser import Browser, page_condition
+from .browser import Browser, page_condition, classify_page_condition
 from .control import Controller
 from .jobs import eligibility
 from .models import Answer, Question, State, now
@@ -43,6 +43,7 @@ class Engine:
             from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
             self.browser.max_active_application_tabs = MAX_ACTIVE_APPLICATION_TABS
         self.retained_pages = {}
+        self.resume_snapshot = None
 
     def interrupted(self, app_id):
         if self.fill_only:
@@ -80,8 +81,9 @@ class Engine:
         if state == State.CLOSED:
             self.db.mark_listing_closed(self.db.application(app_id)["job_id"])
             reason = "LISTING_CLOSED: " + reason
-        self.db.transition(app_id, state, reason, **evidence)
-        self.db.event(app_id, "hold", reason)
+        with self.db.transaction():
+            self.db.transition(app_id, state, reason, **evidence)
+            self.db.event(app_id, "hold", reason)
 
     def daily_count(self):
         # Count intent, not only confirmations: uncertain submissions also consume the ceiling.
@@ -91,13 +93,13 @@ class Engine:
         if self.fill_only:
             from .fill_batch import discover
             return discover(self.db, self.config)
-        self.db.cleanup_stale_listings()
+        self.db.maintain_listings()
         self.db._discovery_batch = True
         try:
             return await self._scan(force)
         finally:
             self.db._discovery_batch = False
-            self.db.cleanup_stale_listings()
+            self.db.refresh_listing_statistics()
 
     async def _scan(self, force=False):
         counts = await scan_github(self.config, self.db, force)
@@ -124,7 +126,6 @@ class Engine:
                 self.db.event(None, "source_error", name + ": " + type(exc).__name__)
                 self.db.notify("source:" + name, {"message": f"{name} scan failed. Restore authentication or inspect source layout."})
         for row in self.db.rows("SELECT id FROM applications WHERE stage='' AND status IN ('INVALID','CLOSED','NEEDS_INPUT')"):
-            archive_application(self.config, self.db, row["id"])
             self.db.execute("UPDATE applications SET stage='discovery' WHERE id=?", (row["id"],))
         for row in self.db.rows("SELECT DISTINCT q.application_id FROM questions q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id WHERE j.listing_active=1 AND q.status='PENDING' AND a.status='NEEDS_INPUT'"):
             self.handoff.notify(row['application_id'], "Required information is pending")
@@ -149,8 +150,8 @@ class Engine:
             log.info("[SECURITY] application=%s provider=%s state=%s", app_id, s.provider, s.state)
         return result
 
-    async def security_gate(self, app_id, page):
-        result = await self.inspect_security(app_id, page)
+    async def security_gate(self, app_id, page, *, result=None):
+        result = result or await self.inspect_security(app_id, page)
         if result.security.blocking:
             if result.security.state == "RATE_LIMITED" and not self.db.application(app_id)["submit_intent_at"]:
                 self.db.fail(app_id, result.security.message, self.config["processing"]["max_retries"], ErrorCategory.RATE_LIMIT)
@@ -221,6 +222,8 @@ class Engine:
     async def process_one(self, application_id=None):
         async with self.processing_lock:
             if self.fill_only:
+                from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
+                await self.browser.enforce_application_limit(MAX_ACTIVE_APPLICATION_TABS)
                 if self.retained_pages or self.handoff.pages:
                     raise RuntimeError('BATCH_TAB_LIMIT_VIOLATION: release previous application first')
                 self.browser.check_tab_limit(opening=True)
@@ -250,6 +253,22 @@ class Engine:
             app_id = app["id"]
             if not self.db.guard_listing(app_id):
                 return True
+            from .candidate_policy import preflight
+            from .fill_batch import EXCLUDED
+            snapshot = self.resolver.refresh()
+            decision = preflight(self.db, self.config, app, snapshot=snapshot,
+                                 mode='fill_only' if self.fill_only else 'ordinary',
+                                 historical_exclusions=EXCLUDED if self.fill_only else ())
+            if not decision.proceed:
+                state = (State.MANUAL_REVIEW if decision.status == 'HOLD' else
+                         State.CLOSED if decision.reason == 'confirmed_closed' else
+                         State.INVALID if decision.reason == 'stale_listing' else State.INELIGIBLE)
+                self.hold(app_id, state, 'Candidate preflight: ' + decision.reason)
+                self.db.event(app_id, 'CANDIDATE_PREFLIGHT', json.dumps(asdict(decision)))
+                return True
+            if self.fill_only:
+                from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
+                await self.browser.enforce_application_limit(MAX_ACTIVE_APPLICATION_TABS)
             page = page or await self.browser.new_page()
             if preserved_page:
                 state, evidence = await page_condition(page)
@@ -291,7 +310,7 @@ class Engine:
                 if listing[key] and (key == "title" or app[key] == "Unknown employer"):
                     self.db.execute(f"UPDATE jobs SET {key}=? WHERE id=?", (listing[key], app["job_id"]))
             app = self.db.application(app_id)
-            check = eligibility(app, self.config.profile)
+            check = eligibility(app, self.config.profile_snapshot().facts)
             self.db.execute("UPDATE jobs SET eligibility_json=? WHERE id=?", (json.dumps(asdict(check)), app["job_id"]))
             for match in check.standing_matches:
                 self.db.event(app_id, "standing_eligibility_answer", json.dumps(match))
@@ -309,9 +328,10 @@ class Engine:
             self.db.transition(app_id, State.APPLYING, stage="opening form")
             if not preserved_page or app["stage"] == "checking":
                 await adapter.begin()
-            if await self.security_gate(app_id, page):
+            boundary = await self.inspect_security(app_id, page)
+            if await self.security_gate(app_id, page, result=boundary):
                 return True
-            existing_confirmation = await adapter.verify_submission()
+            existing_confirmation = boundary.confirmation
             if existing_confirmation:
                 self.hold(app_id, State.ALREADY_APPLIED, "Existing confirmation was visible before AutoApply submitted: " + existing_confirmation)
                 return True
@@ -319,16 +339,17 @@ class Engine:
             saved_answers = {r['field_key']: r for r in self.db.rows(
                 "SELECT * FROM questions WHERE application_id=? AND status='ANSWERED' AND field_type='combobox'", (app_id,))}
             adapter.answer_hints = saved_answers
-            adapter.profile = self.config.profile
-            if adapter.name == 'smartrecruiters':
+            adapter.profile = self.config.profile_snapshot().facts
+            if adapter.structured_inventory:
                 adapter.emit = lambda kind, detail: self.adapter_event(app_id, kind, detail)
-                adapter.mapper.cache = self.db.setting('field_mapping_cache:smartrecruiters', {})
+                adapter.mapper.cache = self.db.setting('field_mapping_cache:' + adapter.name, {})
                 self.db.event(app_id, 'PROFILE_PREFLIGHT', json.dumps({'missing':self.config.setup_issues()}))
             for step in range(self.config["application"]["max_pages"]):
                 if self.interrupted(app_id):
                     return True
-                state, evidence = await page_condition(page)
-                if await self.security_gate(app_id, page):
+                boundary = await self.inspect_security(app_id, page)
+                state, evidence = classify_page_condition(boundary.security, boundary.snapshot)
+                if await self.security_gate(app_id, page, result=boundary):
                     return True
                 if state:
                     if state in {State.MANUAL_REVIEW, State.AUTH_REQUIRED}:
@@ -338,17 +359,19 @@ class Engine:
                     return True
                 self.db.execute("UPDATE applications SET stage=? WHERE id=?", (f"form page {step + 1}", app_id))
                 questions = await adapter.get_questions(app)
-                if adapter.name == 'smartrecruiters':
+                step_answers = {}
+                if adapter.structured_inventory:
                     support = adapter.support_report(questions)
                     self.db.event(app_id, 'ADAPTER_CAPABILITIES', json.dumps(support))
-                    self.db.set_setting('field_mapping_cache:smartrecruiters', adapter.mapper.cache)
+                    self.db.set_setting('field_mapping_cache:' + adapter.name, adapter.mapper.cache)
                     if not support['autonomous']:
                         raise UnsupportedForm('Missing mandatory capabilities: ' + ', '.join(support['missing']))
                     from .field_mapping import field_policy
                     preflight_missing = []
                     for question in questions:
                         if question.semantic_key.startswith(('contact.', 'education.', 'links.', 'work_authorization.')):
-                            if self.resolver.resolve(question, app) is None:
+                            step_answers[question.key] = self.resolver.resolve_result(question, app)
+                            if not step_answers[question.key].accepted:
                                 preflight_missing.append({'key':question.semantic_key,'required':question.required})
                                 if question.required:
                                     self.request(app, question, 'Missing verified profile value identified before filling this step')
@@ -367,14 +390,17 @@ class Engine:
                     if q.kind == "file":
                         row = self.db.question(app_id, q)
                         if re.search(r"resume|curriculum vitae|\bcv\b", q.label, re.I):
-                            if not self.config.resume.exists() or not self.config.resume.read_bytes().startswith(b"%PDF-"):
+                            from .operations import FileSnapshot
+                            self.resume_snapshot = (FileSnapshot.read(self.config.resume, self.resume_snapshot)
+                                                    if self.config.resume.exists() else None)
+                            if not self.resume_snapshot or not self.resume_snapshot.is_pdf:
                                 # File contents remain local; Discord only asks whether setup is complete.
                                 setup = Question("resume", "Place your current PDF at data/private/resumes/resume.pdf, then answer Ready", "text", True, scope=f"application:{app_id}")
                                 self.request(app, setup, "The configured resume is missing or is not a PDF")
                                 missing = True
                                 continue
                             await adapter.upload_documents(q, self.config.resume)
-                            digest = hashlib.sha256(self.config.resume.read_bytes()).hexdigest()
+                            digest = self.resume_snapshot.sha256
                             self.db.execute("UPDATE applications SET resume_used=?,resume_sha256=? WHERE id=?", (str(self.config.resume), digest, app_id))
                             self.db.save_answer(row["id"], Answer("resume.pdf", "verified_document"))
                         elif q.required:
@@ -383,41 +409,23 @@ class Engine:
                         else:
                             self.db.execute("UPDATE questions SET status='SKIPPED' WHERE id=?", (row["id"],))
                         continue
+                    result = self.resolver.current_result(step_answers.get(q.key), q, app)
+                    q.scope, q.signature, q.policy = result.descriptor.scope, result.descriptor.signature, result.descriptor.policy
                     row = self.db.question(app_id, q)
-                    if adapter.name == 'smartrecruiters':
-                        policy = field_policy(self.config.profile, q.semantic_key, q.kind)
-                        if policy == 'DO_NOT_ANSWER':
-                            if q.required:
-                                self.request(app,q,'Required field is covered by DO_NOT_ANSWER policy')
-                                missing = True
-                            else:
-                                self.db.execute("UPDATE questions SET status='SKIPPED' WHERE id=?",(row['id'],))
-                            continue
-                    if row["status"] == "SKIPPED" and not q.required and not is_writing_question(q) and not (
-                            adapter.name == 'smartrecruiters' and q.semantic_key.startswith('demographics.')):
+                    policy = result.descriptor.policy
+                    if policy == 'DO_NOT_ANSWER':
+                        if q.required:
+                            self.request(app,q,'Required field is covered by DO_NOT_ANSWER policy')
+                            missing = True
+                        else:
+                            self.db.execute("UPDATE questions SET status='SKIPPED' WHERE id=?",(row['id'],))
                         continue
-                    answer = None
-                    previous_answer = saved_answers.get(q.key)
-                    if q.kind == 'combobox' and previous_answer and all([
-                        previous_answer['raw_question'] == q.label,
-                        previous_answer['scope'] == q.scope,
-                        previous_answer['required'] == int(q.required),
-                        previous_answer['max_length'] == q.max_length,
-                    ]):
-                        candidate = Answer(json.loads(previous_answer['answer']), previous_answer['answer_source'], previous_answer['confidence'])
-                        if candidate.value in q.options:
-                            validate_answer(q, candidate.value)
-                            answer = candidate
-                    if row["status"] == "ANSWERED":
-                        answer = Answer(json.loads(row["answer"]), row["answer_source"], row["confidence"])
-                        try:
-                            validate_answer(q, answer.value)
-                        except ValueError:
-                            answer = None
-                    answer = answer or self.resolver.resolve(q, app)
-                    if not answer and q.kind == "textarea":
-                        answer = written_reuse(self.db, q, app)
-                    if not answer and is_writing_question(q) and (adapter.name != 'smartrecruiters' or policy == 'GENERATE_GROUNDED'):
+                    answer = result.answer
+                    if not answer and row['status'] == 'ANSWERED':
+                        answer = self.resolver.replay(row, q, app)
+                    if not answer and is_writing_question(q) and policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}:
+                        answer = written_reuse(self.db, q, app, self.config.profile_snapshot().revision)
+                    if not answer and is_writing_question(q) and policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'} and (not adapter.requires_explicit_narrative_policy or policy == 'GENERATE_GROUNDED'):
                         try:
                             answer = await self.ai.draft(q, app)
                         except ProviderUnavailable as exc:
@@ -427,15 +435,17 @@ class Engine:
                             missing = True
                             continue
                     if answer and answer.confidence >= self.config["application"]["min_confidence"]:
+                        self.resolver.stamp(answer, result.descriptor)
                         await adapter.answer_question(q, answer)
-                        self.db.save_answer(row["id"], answer)
-                        self.db.event(app_id, 'LIVE_CONTROL_COMMITTED', json.dumps({'field_id':q.key,'label':q.label,
-                            'source':answer.source,'evidence':getattr(adapter,'live_committed',{}).get(q.key,{}).get('evidence',{})}))
-                        if adapter.name == 'smartrecruiters':
-                            self.db.event(app_id,'FIELD_FILLED',json.dumps({'field_id':q.key,'semantic_key':q.semantic_key,
-                                                                         'source':answer.source,'confidence':answer.confidence}))
+                        with self.db.transaction():
+                            self.db.save_answer(row["id"], answer)
+                            self.db.event(app_id, 'LIVE_CONTROL_COMMITTED', json.dumps({'field_id':q.key,'label':q.label,
+                                'source':answer.source,'evidence':getattr(adapter,'live_committed',{}).get(q.key,{}).get('evidence',{})}))
+                            if adapter.structured_inventory:
+                                self.db.event(app_id,'FIELD_FILLED',json.dumps({'field_id':q.key,'semantic_key':q.semantic_key,
+                                                                             'source':answer.source,'confidence':answer.confidence}))
                     elif not q.required and (not q.value or q.kind == "checkbox" and q.value == "No") and not (
-                            adapter.name == 'smartrecruiters' and (policy == 'REQUIRE_USER' or q.semantic_key.startswith('demographics.'))):
+                            policy == 'REQUIRE_USER' or adapter.requires_demographic_answer and q.semantic_key.startswith('demographics.')):
                         self.db.execute("UPDATE questions SET status='SKIPPED' WHERE id=?", (row["id"],))
                     else:
                         reason = "No sufficiently confident verified answer; existing prefilled values also require verification"
@@ -455,7 +465,7 @@ class Engine:
                 self.db.event(app_id, 'ATS_UPLOAD_READY', json.dumps({
                     'tracked_uploads_complete':True, 'controls_not_busy':True,
                     'resume_selected':bool(self.db.application(app_id)['resume_sha256'])}))
-                if adapter.name == 'smartrecruiters':
+                if adapter.structured_inventory:
                     self.adapter_event(app_id,'UPLOAD_READY',{'ready':True})
                 current_questions = await adapter.get_questions(app)
                 if tuple((q.key, q.label, tuple(q.options)) for q in current_questions) != signature:
@@ -474,21 +484,16 @@ class Engine:
                 if kind == "next":
                     if self.interrupted(app_id):
                         return True
-                    if adapter.name == 'smartrecruiters':
+                    if adapter.structured_inventory:
                         self.adapter_event(app_id, 'STEP_FILLED', {'step':step+1})
-                        await adapter.advance()
-                    else:
-                        marker = await self.browser.change_marker(page)
-                        await click_element(page, button)
-                        await page.wait_for_load_state("domcontentloaded")
-                        await self.browser.wait_for_change(page, marker, min(5000, self.config["browser"]["timeout_ms"]))
+                    await adapter.advance()
                     if await self.security_gate(app_id, page):
                         return True
                     continue
                 if not questions:
                     raise UnsupportedForm("Refusing to submit a form without inspectable fields")
-                if adapter.name == 'smartrecruiters':
-                    fresh = eligibility(self.db.application(app_id), self.config.profile)
+                if adapter.requires_verified_resume:
+                    fresh = eligibility(self.db.application(app_id), self.config.profile_snapshot().facts)
                     if fresh.eligible is not True:
                         raise UnsupportedForm('ELIGIBILITY_UNVERIFIED: fresh eligibility must pass before final Submit')
                     if not adapter.uploads or not self.browser.observation(page).get('upload_result', {}).get('ready'):
@@ -500,20 +505,21 @@ class Engine:
                 if self.fill_only:
                     if self.db.setting("auto_submit") is not False:
                         raise RuntimeError("Fill-only setting changed; refusing final action")
-                    fresh = eligibility(self.db.application(app_id), self.config.profile)
+                    fresh = eligibility(self.db.application(app_id), self.config.profile_snapshot().facts)
                     if fresh.eligible is not True:
                         raise UnsupportedForm("ELIGIBILITY_UNVERIFIED: manual-ready requires eligibility PASS")
                     if not await self.check_uploads(app_id, page, adapter.uploads):
                         raise UnsupportedForm("UPLOAD_NOT_READY: manual review requires completed uploads")
                     if self.db.submission_conflict(app_id):
                         raise UnsupportedForm("Existing submission history prevents manual-ready classification")
-                    self.db.transition(app_id, State.READY, "Ready for manual submission; no final Submit performed")
-                    self.db.update_security(app_id, application_state="READY_FOR_MANUAL_SUBMIT",
-                                            session_preserved=1, retry_allowed=0, manual_resume_allowed=0,
-                                            url_before_submit=safe_url(page.url))
-                    self.db.event(app_id, "READY_FOR_MANUAL_SUBMIT", json.dumps({
-                        "eligibility":"PASS", "upload_ready":True, "final_control_identified":True,
-                        "url":safe_url(page.url), "final_submit_clicks":0, "submission_requests":0}))
+                    with self.db.transaction():
+                        self.db.transition(app_id, State.READY, "Ready for manual submission; no final Submit performed")
+                        self.db.update_security(app_id, application_state="READY_FOR_MANUAL_SUBMIT",
+                                                session_preserved=1, retry_allowed=0, manual_resume_allowed=0,
+                                                url_before_submit=safe_url(page.url))
+                        self.db.event(app_id, "READY_FOR_MANUAL_SUBMIT", json.dumps({
+                            "eligibility":"PASS", "upload_ready":True, "final_control_identified":True,
+                            "url":safe_url(page.url), "final_submit_clicks":0, "submission_requests":0}))
                     self.retained_pages[app_id] = page
                     return True
                 if not self.db.setting("auto_submit", self.config["application"]["auto_submit"]):
@@ -523,7 +529,7 @@ class Engine:
                 probe = SubmissionProbe(self.db, app_id, page, button)
                 await probe.prepare()
                 self.db.update_security(app_id, application_state="READY_TO_SUBMIT", url_before_submit=safe_url(page.url))
-                if adapter.name == 'smartrecruiters':
+                if adapter.structured_inventory:
                     self.adapter_event(app_id,'READY_TO_SUBMIT',{'eligibility':'PASS','validation':'PASS','upload_ready':True})
                 folder = archive_application(self.config, self.db, app_id)
                 pre_name = 'pre-submit-' + probe.key
@@ -643,54 +649,62 @@ class Engine:
                     self.db.notify(f"failure:{app['id']}:{current['attempts']}", {"application_id": app["id"], "message": "APPLICATION FAILED: " + reason})
             log.warning("Application %s: %s", app["id"], reason)
         finally:
-            if probe:
-                try:
-                    await probe.finish()
-                except Exception as exc:
-                    self.db.event(app['id'], 'submit_telemetry_unavailable', type(exc).__name__)
-            current = self.db.application(app["id"])
-            if (self.db.setting('controlled_application_id') == app['id'] and page
-                    and not page.is_closed() and app['id'] not in self.handoff.pages
-                    and (current['status'] not in {'SUBMITTED', 'CLOSED', 'INELIGIBLE', 'ALREADY_APPLIED'}
-                         or current['manual_action_required'])):
-                await self.handoff.request(app['id'], page,
-                    'Controlled run stopped; preserve current page for inspection',
-                    current['error_category'] or 'SUBMISSION_UNKNOWN',
-                    unknown=bool(current['submit_intent_at']))
-                current = self.db.application(app['id'])
-            if current["status"] in {"CHECKING", "APPLYING"}:
-                self.db.transition(app["id"], State.RETRY, "Processing paused before submission", retry_at=None)
-            folder = archive_application(self.config, self.db, app["id"])
-            if self.fill_only and page and not page.is_closed():
-                from .fill_batch import checkpoint
-                # The checkpoint must reach disk before releasing this page or claiming another job.
-                await checkpoint(self, app['id'], page)
-                if self.db.application(app['id'])['application_state'] != 'READY_FOR_MANUAL_SUBMIT':
-                    self.retained_pages.pop(app['id'], None)
-                    self.handoff.pages.pop(app['id'], None)
-                    self.handoff.sessions.pop(app['id'], None)
-                    self.db.set_setting(f"manual_session:{app['id']}", None)
-                    self.db.update_security(app['id'], session_preserved=0, manual_resume_allowed=0)
-            if page and app["id"] not in self.handoff.pages and app['id'] not in self.retained_pages:
-                try:
-                    if current["status"] in {"NEEDS_INPUT", "MANUAL_REVIEW", "AUTH_REQUIRED", "FAILED"}:
-                        await self.browser.screenshot(page, folder / "screenshots", "attention")
-                except Exception:
-                    pass
-                await page.close()
-            self.next_application = time.monotonic() + self.config["application"]["delay_seconds"]
-            log.info("Application %s: %s", app["id"], self.db.application(app["id"])["status"])
+            try:
+                if probe:
+                    try:
+                        await probe.finish()
+                    except Exception as exc:
+                        self.db.event(app['id'], 'submit_telemetry_unavailable', type(exc).__name__)
+                current = self.db.application(app["id"])
+                if (self.db.setting('controlled_application_id') == app['id'] and page
+                        and not page.is_closed() and app['id'] not in self.handoff.pages
+                        and (current['status'] not in {'SUBMITTED', 'CLOSED', 'INELIGIBLE', 'ALREADY_APPLIED'}
+                             or current['manual_action_required'])):
+                    await self.handoff.request(app['id'], page,
+                        'Controlled run stopped; preserve current page for inspection',
+                        current['error_category'] or 'SUBMISSION_UNKNOWN',
+                        unknown=bool(current['submit_intent_at']))
+                    current = self.db.application(app['id'])
+                if current["status"] in {"CHECKING", "APPLYING"}:
+                    self.db.transition(app["id"], State.RETRY, "Processing paused before submission", retry_at=None)
+                folder = archive_application(self.config, self.db, app["id"])
+                if self.fill_only and page and not page.is_closed():
+                    from .fill_batch import checkpoint
+                    # The checkpoint must reach disk before releasing this page or claiming another job.
+                    await checkpoint(self, app['id'], page)
+                    if self.db.application(app['id'])['application_state'] != 'READY_FOR_MANUAL_SUBMIT':
+                        self.retained_pages.pop(app['id'], None)
+                        self.handoff.pages.pop(app['id'], None)
+                        self.handoff.sessions.pop(app['id'], None)
+                        self.db.set_setting(f"manual_session:{app['id']}", None)
+                        self.db.update_security(app['id'], session_preserved=0, manual_resume_allowed=0)
+                if page and app["id"] not in self.handoff.pages and app['id'] not in self.retained_pages:
+                    try:
+                        if current["status"] in {"NEEDS_INPUT", "MANUAL_REVIEW", "AUTH_REQUIRED", "FAILED"}:
+                            await self.browser.screenshot(page, folder / "screenshots", "attention")
+                    except Exception:
+                        pass
+                    await self.browser.release_page(page)
+                self.next_application = time.monotonic() + self.config["application"]["delay_seconds"]
+                log.info("Application %s: %s", app["id"], self.db.application(app["id"])["status"])
+            finally:
+                # History, checkpoint, telemetry and diagnostics failures must not
+                # bypass resource cleanup. Explicit handoffs retain their owner.
+                if page and not page.is_closed():
+                    preserve = app['id'] in self.handoff.pages or app['id'] in self.retained_pages
+                    await asyncio.shield(self.browser.release_page(page, preserve=preserve))
         return True
 
     async def check_uploads(self, app_id, page, controls):
         ready = await self.browser.uploads_ready(page, controls)
         tracker = getattr(page, '_autoapply_uploads', None)
         if tracker:
-            for event in tracker.events:
-                self.db.event(app_id, event['kind'], json.dumps(event))
+            with self.db.transaction():
+                for event in tracker.events:
+                    self.db.event(app_id, event['kind'], json.dumps(event))
+                self.db.set_setting(f'upload_result:{app_id}', tracker.result)
+                self.db.event(app_id, 'UPLOAD_READINESS', json.dumps(tracker.result))
             tracker.events.clear()
-            self.db.set_setting(f'upload_result:{app_id}', tracker.result)
-            self.db.event(app_id, 'UPLOAD_READINESS', json.dumps(tracker.result))
         return ready
 
     async def resume_manual(self, app_id, outcome=None, *, inspect_only=False, strict_session=False):
@@ -851,11 +865,13 @@ class Engine:
 
     async def close(self):
         # Called on explicit worker shutdown; a manual hold itself never calls close.
-        for app_id in self.handoff.pages:
-            self.db.update_security(app_id, session_preserved=0)
-            self.db.event(app_id, "manual_session_ended", "Worker/browser shutdown; automatic retry remains disabled")
-            archive_application(self.config, self.db, app_id)
-        await self.browser.close()
+        try:
+            for app_id in self.handoff.pages:
+                self.db.update_security(app_id, session_preserved=0)
+                self.db.event(app_id, "manual_session_ended", "Worker/browser shutdown; automatic retry remains disabled")
+                archive_application(self.config, self.db, app_id)
+        finally:
+            await self.browser.close()
 
     async def run(self):
         self.db.recover()

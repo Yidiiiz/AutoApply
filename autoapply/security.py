@@ -1,6 +1,7 @@
 """Passive security inspection only; never read challenge responses or solve challenges."""
 import re
 import asyncio
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
@@ -80,7 +81,8 @@ def classify_message(text, status=None, *, prominent=False):
 # storage, request bodies, response bodies, identity documents, or iframe contents are read.
 from .form_validation import VALIDATION_JS
 
-SNAPSHOT = r"""() => {
+SNAPSHOT = r"""options => {
+ const inspectValidation = options?.validation !== false;
  const visible = e => {
    if (!e.getClientRects().length || ['hidden','collapse'].includes(getComputedStyle(e).visibility)) return false;
    for (let n=e; n; n=n.parentElement) {
@@ -107,12 +109,16 @@ SNAPSHOT = r"""() => {
      (e.tagName==='IFRAME' && /\/recaptcha\/(?:api2|enterprise)\/anchor(?:\?|$)/i.test(e.getAttribute('src')||'') &&
       new URL(e.getAttribute('src'),document.baseURI).searchParams.get('size')==='invisible')
  }));
+ const validation=inspectValidation ? __NORMALIZED_VALIDATION__ : [];
  return {text:text(document.body).slice(0,150000),
+   condition_text:(document.body?.innerText||'').slice(0,150000),
+   password:[...document.querySelectorAll('input[type=password]')].some(visible),
+   validation, alerts:[...document.querySelectorAll('[role=alert]')].filter(visible).map(e=>e.textContent.trim()).filter(Boolean),
    messages:nodes.map(text).filter(Boolean), markers,
    has_form:!!document.querySelector('form,input[type="email"],input[type="file"]'),
-   invalid:__NORMALIZED_VALIDATION__,
+   invalid:validation.length,
    disabled:[...document.querySelectorAll('button,input[type="submit"]')].some(e => visible(e) && (e.disabled || e.getAttribute('aria-disabled')==='true') && /submit|send application/i.test(e.textContent || e.value))};
-}""".replace('__NORMALIZED_VALIDATION__', '(' + VALIDATION_JS + ')().length')
+}""".replace('__NORMALIZED_VALIDATION__', '(' + VALIDATION_JS + ')()')
 
 
 PROVIDERS = [
@@ -128,8 +134,8 @@ PROVIDERS = [
 
 
 class SecurityDetector:
-    async def snapshot(self, page):
-        data = await page.evaluate(SNAPSHOT)
+    async def snapshot(self, page, *, include_validation=True):
+        data = await page.evaluate(SNAPSHOT, {'validation':include_validation})
         data["url"] = page.url
         return data
 
@@ -193,7 +199,7 @@ class SecurityDetector:
                 r'/recaptcha/(?:api2|enterprise)/anchor(?:[?\s]|$)|challenge', marker['marker'], re.I))
         return not re.search(r'badge|response', marker['marker'], re.I)
 
-    async def detect(self, page, observation=None):
+    async def detect(self, page, observation=None, *, include_validation=True):
         observation = observation or {}
         if observation.get("dialog_open"):
             snapshot = {"text": "", "messages": observation["dialogs"], "markers": [], "url": page.url,
@@ -203,7 +209,7 @@ class SecurityDetector:
                 result = SecurityResult(type="dialog", interactive=True, confidence=1,
                     state=S.UNKNOWN_SECURITY_FAILURE, category=E.UNKNOWN_SECURITY_FAILURE, message="Unresolved browser dialog requires manual review")
             return result, snapshot
-        snapshot = await self.snapshot(page)
+        snapshot = await self.snapshot(page, include_validation=include_validation)
         # Embedded application forms get the same read-only inspection. Protected-provider
         # frames are recognized by metadata above; their contents are never inspected.
         for frame in page.frames:
@@ -217,6 +223,8 @@ class SecurityDetector:
                 element = await frame.frame_element()
                 if not await element.is_visible():
                     continue
+                # Adapter frame policies differ. Only the main-document scan
+                # can be delegated universally; retain embedded validation here.
                 embedded = await asyncio.wait_for(frame.evaluate(SNAPSHOT), timeout=2)
                 snapshot["text"] += "\n" + embedded["text"]
                 snapshot["messages"].extend(embedded["messages"])
@@ -249,12 +257,34 @@ def confirmation_evidence(snapshot):
     return None
 
 
-@dataclass
+@dataclass(frozen=True)
+class PageInspection:
+    """One fresh boundary observation. Pure readers receive independent values."""
+    security_json: str
+    snapshot_json: str
+
+    @property
+    def security(self):
+        return SecurityResult(**json.loads(self.security_json))
+
+    @property
+    def snapshot(self):
+        return json.loads(self.snapshot_json)
+
+
+@dataclass(frozen=True)
 class SubmissionResult:
-    security: SecurityResult
+    inspection: PageInspection
     confirmation: str | None
     validation_error: bool
-    snapshot: dict
+
+    @property
+    def security(self):
+        return self.inspection.security
+
+    @property
+    def snapshot(self):
+        return self.inspection.snapshot
 
 
 class PreSubmitState(StrEnum):
@@ -268,17 +298,25 @@ class SubmissionClassifier:
     def __init__(self):
         self.security = SecurityDetector()
 
-    async def classify(self, page, observation=None):
-        security, snapshot = await self.security.detect(page, observation)
+    async def classify(self, page, observation=None, *, include_validation=True):
+        security, snapshot = await self.security.detect(page, observation, include_validation=include_validation)
+        from dataclasses import asdict
+        return self.classify_evidence(PageInspection(json.dumps(asdict(security)), json.dumps(snapshot)))
+
+    @staticmethod
+    def classify_evidence(inspection):
+        security, snapshot = inspection.security, inspection.snapshot
         evidence = confirmation_evidence(snapshot)
         # A simultaneous explicit rejection invalidates new success-like text.
         if security.state in {S.SPAM_REJECTED, S.AUTOMATION_REJECTED, S.UNKNOWN_SECURITY_FAILURE, S.RATE_LIMITED}:
             evidence = None
         validation = bool(snapshot["invalid"]) or any(re.search(r"(?:required field|field is required|invalid email|please correct)", m, re.I) for m in snapshot["messages"])
-        return SubmissionResult(security, evidence, validation, snapshot)
+        return SubmissionResult(inspection, evidence, validation)
 
     async def pre_submit(self, page, adapter, observation=None):
-        result = await self.classify(page, observation)
+        # Adapter validation below owns the fresh normalized control scan here;
+        # post-submit classification still observes validity itself.
+        result = await self.classify(page, observation, include_validation=False)
         if result.security.blocking:
             return PreSubmitState.INTERACTIVE_SECURITY_STEP, [result.security.message]
         issues = await adapter.validate()

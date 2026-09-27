@@ -64,11 +64,15 @@ class SubmissionProbe:
         self.armed = False
 
     def record(self, kind, detail=None):
-        self.db.event(self.app_id, kind, json.dumps(detail or {}, ensure_ascii=True))
+        # Observation callbacks must not spend the confirmation window exporting
+        # bundles/statistics. SQLite evidence and its dirty marker commit now.
+        with self.db.transaction(sync_history=False):
+            self.db.event(self.app_id, kind, json.dumps(detail or {}, ensure_ascii=True))
 
     def save(self):
-        self.db.set_setting(f'submit_probe:{self.app_id}:{self.key}', self.data)
-        self.db.set_setting(f'latest_submit_probe:{self.app_id}', self.key)
+        with self.db.transaction(sync_history=False):
+            self.db.set_setting(f'submit_probe:{self.app_id}:{self.key}', self.data)
+            self.db.set_setting(f'latest_submit_probe:{self.app_id}', self.key)
 
     async def describe(self):
         if await self.button.count() != 1:
@@ -102,6 +106,7 @@ class SubmissionProbe:
         if not (detail['visible'] and detail['enabled'] and detail['bounding_box'] and detail['hit_test_valid'] and detail['inside_viewport'] and not detail['covered']):
             raise SubmitObstructed('Submit button failed visibility, geometry, or hit-test checks')
         self.save()
+        self.db.flush_history()
 
     async def physical_click(self):
         """One mouse call; never fall back to a locator click or retry after intent."""
@@ -251,3 +256,4 @@ class SubmissionProbe:
             except Exception:
                 pass
         self.save()
+        self.db.flush_history()

@@ -1,0 +1,26 @@
+[
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\AUDIT.md",
+    "matches": true
+  },
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\measure.py",
+    "matches": true
+  },
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\measurements.json",
+    "matches": true
+  },
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\policy-probes.json",
+    "matches": true
+  },
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\probe_policies.py",
+    "matches": true
+  },
+  {
+    "path": "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\audit-2026-09-25\\test-results.json",
+    "matches": true
+  }
+]

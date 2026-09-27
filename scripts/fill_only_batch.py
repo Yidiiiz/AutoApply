@@ -107,10 +107,10 @@ async def run(config,db,report, candidate_ids=None, approval=None):
             report.save(current_application_id=app_id,listings_considered=len(ids))
             app=db.application(app_id)
             approval.select(app)
-            # Reject known ineligibility from saved listing data before opening any tab.
-            check=eligibility(app,config.profile)
-            if check.eligible is False:
-                db.transition(app_id,'INELIGIBLE','; '.join(check.reasons))
+            # Shared preflight preserves sparse candidates for live enrichment.
+            from autoapply.candidate_policy import preflight
+            decision = preflight(db, config, app, mode='fill_only', historical_exclusions=EXCLUDED)
+            if not decision.proceed:
                 save('PROCESSING'); continue
             print(json.dumps({'selected':app_id,'company':app['company'],'role':app['title']}),flush=True)
             await engine.process_one(app_id)

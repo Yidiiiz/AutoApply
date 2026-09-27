@@ -4,12 +4,9 @@ from .jobs import normalize
 
 
 def dropdown_key(label):
-    text = normalize(label)
-    if text in {'school', 'university', 'college university'}:
-        return 'education.school'
-    if text in {'city', 'location city'}:
-        return 'contact.city'
-    return None
+    from .concepts import canonical_key
+    key = getattr(label, 'semantic_key', None) or canonical_key(label)
+    return key if key in {'education.school', 'contact.city'} else None
 
 
 def query_for(label, profile):

@@ -9,8 +9,9 @@
 <fieldset><legend>Work authorization *</legend><label><input type="radio" name="auth" required>Yes</label><label><input type="radio" name="auth">No</label></fieldset>
 <label>Consent<input type="checkbox"></label>
 <label>Country<select required><option value="">Choose</option><option>United States</option></select></label>
-<label>City<input role="combobox" aria-expanded="false" oninput="document.querySelector('#options').hidden=false"></label>
-<div id="options" role="listbox" hidden><div role="option" onclick="document.querySelector('[role=combobox]').value='Boston';this.parentElement.hidden=true">Boston</div></div>
+<label>City<input role="combobox" aria-controls="options" aria-expanded="false" onclick="openCity()" oninput="openCity()"></label>
+<div id="options" role="listbox" hidden><div role="option" onclick="const city=document.querySelector('[role=combobox]');city.value='Boston';city.setAttribute('aria-expanded','false');this.parentElement.hidden=true">Boston</div></div>
+<script>function openCity(){document.querySelector('#options').hidden=false;document.querySelector('[role=combobox]').setAttribute('aria-expanded','true')}</script>
 <label>Message<textarea></textarea></label>
 <label>Resume *<input type="file" required onchange="this.parentElement.insertAdjacentHTML('afterend','<span>'+this.files[0].name+'</span>')"></label>
 </section>

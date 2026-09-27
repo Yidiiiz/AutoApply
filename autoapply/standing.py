@@ -119,6 +119,7 @@ def _intents(text):
 
 
 def resolve_standing(text, profile):
+    text = getattr(text, 'label', text)
     ids = _intents(normalize_requirement(text))
     assertions = profile.get("eligibility_assertions", [])
     verified = {item.get("id") for item in assertions if isinstance(item, dict)

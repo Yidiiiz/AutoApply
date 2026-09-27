@@ -1,0 +1,163 @@
+{
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[application.html-GenericApplicationAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "generic_inventory_calls": 4,
+      "locator_constructions": 6,
+      "bulk_control_evaluations": 5,
+      "frame_evaluations": 1,
+      "full_inventories": 1
+    },
+    "seconds": 1.07117
+  },
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[greenhouse-controls.html-GenericApplicationAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 5,
+      "generic_inventory_calls": 4,
+      "locator_constructions": 14,
+      "bulk_control_evaluations": 6,
+      "frame_evaluations": 5,
+      "full_inventories": 2,
+      "security_scans": 2,
+      "option_searches": 2,
+      "control_state_reads": 7,
+      "locator_clicks": 1,
+      "option_or_text_scans": 8,
+      "fills": 1
+    },
+    "seconds": 1.535881
+  },
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[smartrecruiters-controls.html-SmartRecruitersAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "sr_inventory_calls": 4,
+      "locator_constructions": 7,
+      "bulk_control_evaluations": 6,
+      "full_inventories": 1
+    },
+    "seconds": 1.20717
+  },
+  "tests/test_phase6_browser.py::test_conditional_local_inventory": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "generic_inventory_calls": 3,
+      "locator_constructions": 12,
+      "bulk_control_evaluations": 6,
+      "frame_evaluations": 3,
+      "full_inventories": 3,
+      "control_evaluations": 2,
+      "fills": 1
+    },
+    "seconds": 1.167929
+  },
+  "tests/test_dropdown_browser.py::test_open_async_city_menu_is_committed_without_toggle": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 6,
+      "generic_inventory_calls": 1,
+      "locator_constructions": 31,
+      "bulk_control_evaluations": 2,
+      "frame_evaluations": 7,
+      "full_inventories": 1,
+      "security_scans": 2,
+      "option_searches": 5,
+      "control_state_reads": 12,
+      "option_or_text_scans": 10,
+      "fills": 2,
+      "control_evaluations": 6,
+      "locator_clicks": 1,
+      "validation_passes": 1
+    },
+    "seconds": 2.239291
+  },
+  "tests/test_smartrecruiters.py::test_discovery_fill_and_transition": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 35,
+      "sr_inventory_calls": 2,
+      "locator_constructions": 86,
+      "bulk_control_evaluations": 10,
+      "full_inventories": 2,
+      "security_scans": 22,
+      "control_state_reads": 39,
+      "fills": 5,
+      "control_evaluations": 45,
+      "locator_clicks": 4,
+      "option_or_text_scans": 4,
+      "option_searches": 3,
+      "cursor_viewport_reads": 3,
+      "upload_observations": 6,
+      "validation_passes": 2,
+      "frame_evaluations": 26,
+      "transition_observations": 4,
+      "cursor_geometry_reads": 24
+    },
+    "seconds": 4.333544
+  },
+  "tests/test_browser.py::test_greenhouse_removes_input_but_attachment_and_network_are_verified": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 10,
+      "locator_constructions": 8,
+      "control_state_reads": 6,
+      "control_evaluations": 9,
+      "security_scans": 4,
+      "cursor_viewport_reads": 1,
+      "upload_observations": 4,
+      "validation_passes": 2,
+      "frame_evaluations": 2,
+      "option_or_text_scans": 2
+    },
+    "seconds": 1.835586
+  },
+  "tests/test_browser.py::test_checkbox_group_validation_preserves_consent_and_native_errors": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 4,
+      "generic_inventory_calls": 1,
+      "locator_constructions": 12,
+      "bulk_control_evaluations": 2,
+      "frame_evaluations": 6,
+      "full_inventories": 1,
+      "validation_passes": 5,
+      "option_or_text_scans": 5,
+      "security_scans": 1,
+      "fills": 1
+    },
+    "seconds": 1.239017
+  },
+  "tests/test_browser.py::test_engine_presubmit_challenge_resumes_without_navigation": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 72,
+      "security_scans": 57,
+      "locator_constructions": 103,
+      "control_state_reads": 45,
+      "generic_inventory_calls": 4,
+      "bulk_control_evaluations": 7,
+      "frame_evaluations": 7,
+      "full_inventories": 3,
+      "fills": 5,
+      "control_evaluations": 62,
+      "option_or_text_scans": 5,
+      "locator_clicks": 1,
+      "cursor_viewport_reads": 3,
+      "upload_observations": 6,
+      "validation_passes": 2
+    },
+    "seconds": 18.154164
+  }
+}

@@ -48,9 +48,6 @@ def site():
 
 @pytest.fixture
 async def browser(config, monkeypatch):
-    installed = ROOT / "data/private/playwright"
-    if installed.exists():
-        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(installed))
     value = Browser(config)
     await value.start()
     yield value
@@ -423,8 +420,6 @@ async def test_fill_only_closed_candidate_releases_before_next(config, db, listi
         db.ingest(replace(listing, url='https://jobs.lever.co/example/'+suffix), config)
     db.set_setting('auto_submit', False)
     engine=Engine(config, db, fill_only=True)
-    installed=ROOT/'data/private/playwright'
-    if installed.exists(): monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH',str(installed))
     engine.browser.navigate=AsyncMock(return_value=(State.CLOSED,'Listing closed'))
     engine.security_gate=AsyncMock(return_value=False)
     try:

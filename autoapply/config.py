@@ -57,6 +57,16 @@ class Config:
     def profile(self):
         return read_yaml(self.private / "profile.yaml")
 
+    def profile_snapshot(self, *, reload=False):
+        from .profile_snapshot import ProfileSnapshot
+        path = self.private / 'profile.yaml'
+        stat = path.stat() if path.exists() else None
+        token = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino) if stat else None
+        if reload or not hasattr(self, '_snapshot') or token != self._snapshot_token:
+            self._snapshot = ProfileSnapshot.create(read_yaml(path), path)
+            self._snapshot_token = token
+        return self._snapshot
+
     @property
     def resume(self):
         return self.private / "resumes/resume.pdf"

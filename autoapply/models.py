@@ -97,6 +97,10 @@ class Question:
     value: str = ""
     scope: str = ""
     semantic_key: str = ""
+    signature: str = ""
+    policy: str = ""
+    min_selections: int | None = None
+    max_selections: int | None = None
 
 
 @dataclass
@@ -105,6 +109,27 @@ class Answer:
     source: str
     confidence: float = 1.0
     evidence: list[str] = field(default_factory=list)
+    verified: bool | None = None
+    semantic_key: str = ""
+    scope: str = ""
+    signature: str = ""
+    profile_revision: str = ""
+    reason: str = ""
+    provenance: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AnswerResolution:
+    answer: Answer | None
+    status: str
+    descriptor: object
+    profile_revision: str
+    reason: str = ""
+    context_revision: tuple = ()
+
+    @property
+    def accepted(self):
+        return self.answer is not None
 
 
 @dataclass

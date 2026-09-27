@@ -4,6 +4,7 @@ import hashlib
 import asyncio
 import json
 import re
+import time
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -11,6 +12,7 @@ from bs4 import BeautifulSoup
 from .jobs import ats_identity, canonical_url
 from .models import Question
 from .form_validation import CHECKBOX_GROUP_JS, VALIDATION_JS
+from .inspection import step_inventory
 
 FIELD_SCRIPT = r"""() => {
  const checkboxGroup = __CHECKBOX_GROUP__;
@@ -81,6 +83,10 @@ class UnsupportedForm(RuntimeError):
 
 class GenericApplicationAdapter:
     name = "generic"
+    structured_inventory = False
+    requires_explicit_narrative_policy = False
+    requires_verified_resume = False
+    requires_demographic_answer = False
 
     def __init__(self, page):
         self.page = page
@@ -91,6 +97,7 @@ class GenericApplicationAdapter:
         self.live_committed = {}
         self.uploads = getattr(page, '_autoapply_attached_documents', {})
         page._autoapply_attached_documents = self.uploads
+        self.emit = lambda kind, detail: None
 
     async def inspect(self):
         html = await self.page.content()
@@ -145,6 +152,7 @@ class GenericApplicationAdapter:
                     return href
         return None
 
+    @step_inventory
     async def get_questions(self, app):
         from .answers import scope_for
         questions, occurrences = [], {}
@@ -162,43 +170,8 @@ class GenericApplicationAdapter:
                 occurrences[signature] = occurrence + 1
                 key = hashlib.sha256(f"{signature}|{occurrence}".encode()).hexdigest()[:24]
                 self.signatures[key] = {"id":item.get("id"),"token":item["tokens"][0],"label":item["label"]}
-                hint = self.answer_hints.get(key)
-                saved_options = json.loads(hint["options"]) if hint and hint.get("options") else []
-                if item["kind"] == "combobox" and hint and json.loads(hint["answer"]) in saved_options:
-                    item["options"] = saved_options
-                elif item["kind"] == "combobox":
-                    control = frame.locator('[data-autoapply-field="' + item["tokens"][0] + '"]')
-                    if await control.get_attribute('aria-expanded') != 'true':
-                        await control.click()
-                    options = frame.get_by_role("option")
-                    from .dropdowns import query_for, choose_option
-                    query = query_for(item['label'], self.profile)
-                    if query and await control.is_editable():
-                        await control.fill(query)
-                        # Menus commonly populate asynchronously after a remote search.
-                        previous_options = None
-                        stable_options = 0
-                        for _ in range(50):
-                            texts = [t.strip() for t in await options.all_text_contents() if t.strip()]
-                            stable_options = stable_options + 1 if texts == previous_options else 0
-                            previous_options = texts
-                            if choose_option(item['label'], texts, self.profile) and stable_options >= 3:
-                                break
-                            await asyncio.sleep(.1)
-                    hint = self.answer_hints.get(key)
-                    if hint and hint['raw_question'] == item['label'] and hint['scope'] == scope_for(item['label'], app):
-                        value = json.loads(hint['answer'])
-                        exact = frame.get_by_role('option', name=value, exact=True)
-                        if isinstance(value, str) and await control.is_editable() and (await exact.count() == 0 or await options.count() > 20):
-                            await control.fill(value)
-                            try:
-                                await exact.wait_for(state='visible', timeout=5000)
-                            except Exception:
-                                raise UnsupportedForm('Saved answer is not an available exact dropdown option: ' + item['label']) from None
-                    if await options.count():
-                        item["options"] = await options.all_text_contents()
-                        item["options"] = [s.strip() for s in item["options"] if s.strip()]
-                    await control.press("Escape")
+                if item["kind"] == "combobox":
+                    await self.observe_dropdown(frame, key, item, app)
                 q = Question(key, item["label"], item["kind"], item["required"], item["options"], item["max_length"], item["value"], scope_for(item["label"], app))
                 self.controls[key] = (frame, item["tokens"])
                 questions.append(q)
@@ -215,10 +188,60 @@ class GenericApplicationAdapter:
                 raise UnsupportedForm(f'ADAPTER_DISCOVERY_FAILURE: {candidates} candidate controls but zero extracted fields')
         return questions
 
+    async def observe_dropdown(self, frame, key, item, app):
+        from .answers import scope_for
+        from .security import SecurityDetector
+        security, _ = await SecurityDetector().detect(self.page, getattr(self.page, '_autoapply_observation', None))
+        if security.blocking:
+            raise UnsupportedForm('Interactive security requirement before dropdown inspection')
+        # Semantic options participate in Phase 5 answer signatures. Both async
+        # preference search and saved-answer search consume this one budget.
+        async with asyncio.timeout(10):
+            control = frame.locator('[data-autoapply-field="' + item["tokens"][0] + '"]')
+            from .combobox import options_for
+            options = (await options_for(frame, self.signatures[key])).filter(visible=True)
+            if not await options.count() and await control.get_attribute('aria-expanded') != 'true':
+                await control.click()
+            from .dropdowns import query_for, choose_option
+            query = query_for(item['label'], self.profile)
+            texts = [t.strip() for t in await options.all_text_contents() if t.strip()]
+            if query and not choose_option(item['label'], texts, self.profile) and await control.is_editable():
+                await control.fill(query)
+                # Menus commonly populate asynchronously after a remote search.
+                previous_options = None
+                stable_options = 0
+                for _ in range(50):
+                    texts = [t.strip() for t in await options.all_text_contents() if t.strip()]
+                    stable_options = stable_options + 1 if texts == previous_options else 0
+                    previous_options = texts
+                    if choose_option(item['label'], texts, self.profile) and stable_options >= 3:
+                        break
+                    # Options can arrive in several asynchronous batches.
+                    # Observe a bounded quiet interval, waking on mutation.
+                    from .inspection import wait_for_dom_change, dom_revision
+                    marker = await dom_revision(frame)
+                    await wait_for_dom_change(frame, marker, 100)
+            hint = self.answer_hints.get(key)
+            if hint and hint['raw_question'] == item['label'] and hint['scope'] == scope_for(item['label'], app):
+                value = json.loads(hint['answer'])
+                exact = frame.get_by_role('option', name=value, exact=True)
+                if isinstance(value, str) and await control.is_editable() and (await exact.count() == 0 or await options.count() > 20):
+                    await control.fill(value)
+                    try:
+                        await exact.wait_for(state='visible', timeout=5000)
+                    except Exception:
+                        raise UnsupportedForm('Saved answer is not an available exact dropdown option: ' + item['label']) from None
+            if await options.count():
+                item["options"] = await options.all_text_contents()
+                item["options"] = [s.strip() for s in item["options"] if s.strip()]
+            # Semantic school/city options are needed by the resolver.
+            # Leave this owned menu open for the immediately following
+            # fill workflow; do not close and reopen it just for inventory.
+
     async def answer_question(self, q, answer):
         from .answers import validate_answer
         from .security import SecurityDetector
-        security, _ = await SecurityDetector().detect(self.page)
+        security, _ = await SecurityDetector().detect(self.page, getattr(self.page, '_autoapply_observation', None))
         if security.blocking:
             raise UnsupportedForm('Interactive security requirement before field input')
         validate_answer(q, answer.value)
@@ -232,6 +255,15 @@ class GenericApplicationAdapter:
         if q.kind in {"select", "multiselect", "combobox"}:
             from .combobox import open_and_select_combobox, signature_for, DropdownStateError
             signature = self.signatures.get(q.key) or await signature_for(field,q.label)
+            if q.kind in {'select', 'multiselect'} and q.key in self.signatures:
+                live = await field.evaluate("e=>[...e.options].filter(o=>!o.disabled&&o.value!=='').map(o=>o.text.trim())")
+                if live != q.options:
+                    raise UnsupportedForm('Dropdown options changed after inventory; resolve the current question again')
+            if q.kind == 'combobox' and q.options and q.key in self.signatures:
+                from .combobox import options_for
+                live = [s.strip() for s in await (await options_for(frame, signature)).filter(visible=True).all_text_contents() if s.strip()]
+                if live and live != q.options:
+                    raise UnsupportedForm('Dropdown options changed after inventory; resolve the current question again')
             try:
                 evidence = await open_and_select_combobox(frame,signature,value)
             except DropdownStateError as exc:
@@ -282,6 +314,13 @@ class GenericApplicationAdapter:
         return result
 
     async def upload_documents(self, q, path):
+        # Selection, ATS acceptance and subsequent readiness share this deadline.
+        if q.key in self.uploads:
+            return
+        async with asyncio.timeout(180):
+            await self._upload_documents(q, path)
+
+    async def _upload_documents(self, q, path):
         if q.key in self.uploads:
             # Same-page resumption retains the attachment. Normal validation and
             # fresh upload readiness still check it before submission.
@@ -305,7 +344,7 @@ class GenericApplicationAdapter:
             await frame.wait_for_function('''key => {
                 const e=document.querySelector('[data-autoapply-upload="'+key+'"]');
                 return e && (e.querySelector('.file-upload__filename') || e.querySelector('.helper-text--error'));
-            }''', arg=q.key, timeout=180000)
+            }''', arg=q.key, timeout=max(1,(tracker.deadline-time.monotonic())*1000) if tracker else 180000)
             self.uploads[q.key] = (container, path.name, path.stat().st_size)
             from .uploads import UI
             state = await container.evaluate(UI, {'name':path.name,'size':path.stat().st_size})
@@ -354,6 +393,86 @@ class GenericApplicationAdapter:
     async def verify_submission(self):
         from .security import SubmissionClassifier
         return (await SubmissionClassifier().classify(self.page)).confirmation
+
+    async def step_signature(self):
+        data = [self.page.url]
+        for frame in self.page.frames:
+            if frame != self.page.main_frame and not re.search(r'greenhouse|lever|ashby|application', frame.url, re.I):
+                continue
+            data.append(await frame.locator('form,input:not([type=hidden]),textarea,select,h1,h2,h3,[aria-current=step]').evaluate_all(
+                """es=>{
+                  if(!window.__autoapplyStepNodes)window.__autoapplyStepNodes={ids:new WeakMap(),next:0};
+                  const g=window.__autoapplyStepNodes;
+                  return es.filter(e=>e.getClientRects().length).map(e=>{
+                    if(!g.ids.has(e))g.ids.set(e,++g.next);
+                    return [g.ids.get(e),e.tagName,e.type,e.id,e.name,e.getAttribute('aria-label'),
+                      e.matches('h1,h2,h3,[aria-current=step]')?e.textContent:''];
+                  });
+                }"""))
+        return json.dumps(data, sort_keys=True)
+
+    def transition_error(self, category, detail):
+        error = UnsupportedForm(category + ': ' + detail)
+        error.category = category
+        return error
+
+    async def _stable_step(self, expected, seconds, deadline):
+        from .inspection import dom_revision, wait_for_dom_change
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            marker = await dom_revision(self.page)
+            await wait_for_dom_change(self.page, marker, min(end-time.monotonic(), deadline.remaining)*1000)
+            if await self.step_signature() != expected:
+                return False
+        return True
+
+    def transitioned(self):
+        self.live_committed.clear()
+        self.controls = {}
+        self._step_snapshot = None
+
+    async def advance(self, timeout_seconds=15):
+        from .operations import Deadline
+        from .inspection import dom_revision, wait_for_dom_change
+        from .security import SecurityDetector
+        deadline = Deadline.after(timeout_seconds)
+        delivered = False
+        try:
+            async with asyncio.timeout(deadline.remaining):
+                before = await self.step_signature()
+                if not await self._stable_step(before, .15, deadline):
+                    raise self.transition_error('STEP_UNSTABLE', 'Form changed before navigation')
+                self.emit('STEP_NEXT_INTENT', {})
+                kind, target = await self.action()
+                if kind != 'next':
+                    raise self.transition_error('MULTI_STEP_NAVIGATION', 'Fresh Next control missing')
+                for event in ('STEP_NEXT_TARGET_FOUND', 'STEP_NEXT_VISIBLE', 'STEP_NEXT_ENABLED'):
+                    self.emit(event, {})
+                # Mark delivery as ambiguous BEFORE awaiting input. Never retry.
+                delivered = True
+                try:
+                    await click_element(self.page, target)
+                except Exception as exc:
+                    self.emit('STEP_NEXT_FAILURE', {'error_type':type(exc).__name__, 'retry_performed':False})
+                    raise self.transition_error('MULTI_STEP_NAVIGATION',
+                        f'{type(exc).__name__}; inspect delivery and current step before retry') from exc
+                self.emit('STEP_NEXT_CLICK_DELIVERED', {})
+                while deadline.remaining:
+                    marker = await dom_revision(self.page)
+                    after = await self.step_signature()
+                    if after != before and await self._stable_step(after, .2, deadline):
+                        security, _ = await SecurityDetector().detect(self.page, getattr(self.page, '_autoapply_observation', None))
+                        if security.blocking:
+                            raise self.transition_error('SECURITY_CONTROL', 'Security requirement during step transition')
+                        self.transitioned()
+                        self.emit('STEP_TRANSITION_OBSERVED', {})
+                        self.emit('STEP_ADVANCED', {})
+                        return
+                    await wait_for_dom_change(self.page, marker, min(.1, deadline.remaining)*1000)
+        except TimeoutError as exc:
+            raise self.transition_error('STEP_TRANSITION_UNCONFIRMED' if delivered else 'STEP_UNSTABLE',
+                'Next delivery/transition is unconfirmed; inspect before retry') from exc
+        raise self.transition_error('STEP_TRANSITION_UNCONFIRMED', 'No stable transition observed; inspect before retry')
 
 
 class GreenhouseAdapter(GenericApplicationAdapter):

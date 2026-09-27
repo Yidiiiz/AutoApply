@@ -167,7 +167,6 @@ async def test_controlled_queue_cannot_claim_another(config,db,listing):
 async def test_headed_desktop_geometry(config,monkeypatch):
     from autoapply.browser import Browser
     from autoapply.config import ROOT
-    monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH',str(ROOT/'data/private/playwright'))
     config.data['browser']['headless']=False
     browser=Browser(config)
     try:
@@ -184,7 +183,6 @@ async def test_headed_desktop_geometry(config,monkeypatch):
 async def test_persistent_site_zoom_reset(config,monkeypatch,site):
     from autoapply.browser import Browser
     from autoapply.config import ROOT
-    monkeypatch.setenv('PLAYWRIGHT_BROWSERS_PATH',str(ROOT/'data/private/playwright'))
     config.data['browser']['headless']=False
     folder=config.private/'browser_profile/Default'
     folder.mkdir(parents=True)

@@ -1,6 +1,6 @@
 import pytest
 from autoapply.browser import Browser
-from autoapply.combobox import open_and_select_combobox, DropdownStateError
+from autoapply.combobox import open_and_select_combobox, committed_state, DropdownStateError
 
 
 @pytest.mark.browser
@@ -23,6 +23,56 @@ async def test_replaced_control_delayed_options_hidden_duplicate_and_commit(conf
         assert await page.evaluate('window.clicks')==1
         assert await page.evaluate('window.opens')==0
         assert await page.locator('#field').input_value()=='Desired option'
+    finally:
+        await browser.close()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('failure', ['open', 'wrong', 'invalid', 'no-collapse-evidence'])
+async def test_selection_requires_real_commitment(config, failure):
+    browser = Browser(config)
+    try:
+        page = await browser.new_page()
+        await page.set_content('''<input id="f" role="combobox" aria-expanded="true" aria-controls="menu">
+        <div id="menu" role="listbox"><div role="option">Desired</div></div>
+        <script>window.clicks=0;document.querySelector('[role=option]').onclick=()=>{
+          window.clicks++;const f=document.querySelector('#f');
+          if(window.failure==='wrong')f.value='Wrong';
+          if(window.failure==='invalid')f.setAttribute('aria-invalid','true');
+          if(window.failure!=='open'){
+            document.querySelector('#menu').innerHTML='';
+            if(window.failure==='no-collapse-evidence')f.removeAttribute('aria-expanded');
+            else f.setAttribute('aria-expanded','false');
+          }
+        };</script>''')
+        await page.evaluate('(v)=>window.failure=v', failure)
+        with pytest.raises(DropdownStateError):
+            await open_and_select_combobox(page.main_frame, {'id':'f','label':'Test'}, 'Desired', timeout_ms=250)
+        assert await page.evaluate('window.clicks') == 1
+    finally:
+        await browser.close()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('expanded,options,hidden,closed', [
+    ('false', '', '', True),
+    ('false', '<div role="option" hidden>Desired</div>', '', True),
+    ('false', '<div role="option" style="visibility:hidden">Desired</div>', '', True),
+    ('true', '', '', False),  # Async loading is not a closed menu.
+    ('true', '<div role="option">Desired</div>', '', False),
+    ('false', '<div role="option">Desired</div>', '', False),  # Contradictory ARIA.
+    ('true', '<div role="option">Desired</div>', 'hidden', True),
+])
+async def test_retained_menu_commitment_evidence(config, expanded, options, hidden, closed):
+    browser = Browser(config)
+    try:
+        page = await browser.new_page()
+        await page.set_content(f'''<input id="f" role="combobox" value="Desired"
+          aria-expanded="{expanded}" aria-controls="menu">
+          <div id="menu" role="listbox" {hidden} style="width:200px;height:30px">{options}</div>''')
+        state = await committed_state(page.main_frame, {'id':'f','label':'Test'}, 'Desired')
+        assert state['value'] and not state['invalid']
+        assert state['closed'] is closed
     finally:
         await browser.close()
 

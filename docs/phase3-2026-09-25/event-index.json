@@ -1,0 +1,84 @@
+{
+  "method": "Five synthetic in-memory inserts of 20,000 events over 1,000 applications; isolates index cost from history exporting.",
+  "sqlite": "3.50.4",
+  "samples": {
+    "False": [
+      {
+        "seconds": 0.011828099999547703,
+        "bytes": 1101824,
+        "plan": [
+          "SCAN events"
+        ]
+      },
+      {
+        "seconds": 0.01018110000040906,
+        "bytes": 1101824,
+        "plan": [
+          "SCAN events"
+        ]
+      },
+      {
+        "seconds": 0.01055610000003071,
+        "bytes": 1101824,
+        "plan": [
+          "SCAN events"
+        ]
+      },
+      {
+        "seconds": 0.009966400000848807,
+        "bytes": 1101824,
+        "plan": [
+          "SCAN events"
+        ]
+      },
+      {
+        "seconds": 0.00996119999945222,
+        "bytes": 1101824,
+        "plan": [
+          "SCAN events"
+        ]
+      }
+    ],
+    "True": [
+      {
+        "seconds": 0.016748500000176136,
+        "bytes": 1327104,
+        "plan": [
+          "SEARCH events USING INDEX events_application (application_id=?)"
+        ]
+      },
+      {
+        "seconds": 0.016761299999416224,
+        "bytes": 1327104,
+        "plan": [
+          "SEARCH events USING INDEX events_application (application_id=?)"
+        ]
+      },
+      {
+        "seconds": 0.01672320000034233,
+        "bytes": 1327104,
+        "plan": [
+          "SEARCH events USING INDEX events_application (application_id=?)"
+        ]
+      },
+      {
+        "seconds": 0.016833599998790305,
+        "bytes": 1327104,
+        "plan": [
+          "SEARCH events USING INDEX events_application (application_id=?)"
+        ]
+      },
+      {
+        "seconds": 0.016425100000560633,
+        "bytes": 1327104,
+        "plan": [
+          "SEARCH events USING INDEX events_application (application_id=?)"
+        ]
+      }
+    ]
+  },
+  "median_seconds": {
+    "False": 0.01018110000040906,
+    "True": 0.016748500000176136
+  }
+}

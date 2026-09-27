@@ -1,0 +1,31 @@
+{
+  "method": "Synthetic temporary storage; resolution considered but not used; AI gate stub; no throughput claim.",
+  "first_name": {
+    "profile_reads": 60,
+    "SELECT": 60,
+    "writes": 0,
+    "events": 0,
+    "resolver_calls": 20,
+    "resolution_computations": 20,
+    "mapper_calls": 20,
+    "normalization_calls": 100,
+    "ai_calls": 0,
+    "seconds": 0.098753,
+    "fields": 1,
+    "repeats": 20
+  },
+  "representative": {
+    "profile_reads": 1120,
+    "SELECT": 1020,
+    "writes": 40,
+    "events": 40,
+    "resolver_calls": 300,
+    "resolution_computations": 300,
+    "mapper_calls": 300,
+    "normalization_calls": 1860,
+    "ai_calls": 0,
+    "seconds": 2.784118,
+    "fields": 15,
+    "repeats": 20
+  }
+}

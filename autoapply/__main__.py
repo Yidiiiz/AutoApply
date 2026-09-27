@@ -166,7 +166,8 @@ def main():
     load_dotenv(Path(args.root) / ".env", override=False)
     config = Config(args.root)
     setup_logging(config)
-    db = Database(config.private / "autoapply.sqlite3", config["jobs"]["max_listing_age_days"])
+    db = Database(config.private / "autoapply.sqlite3", config["jobs"]["max_listing_age_days"],
+                  startup_maintenance=args.command not in {'status', 'queue', 'recent', 'pending'})
     try:
         return asyncio.run(execute(args, config, db))
     except KeyboardInterrupt:

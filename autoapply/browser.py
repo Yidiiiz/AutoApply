@@ -13,11 +13,10 @@ from .retry import SiteError
 from .cursor import get_cursor, CursorConfig
 
 
-async def page_condition(page):
-    security, _ = await SecurityDetector().detect(page)
+def classify_page_condition(security, snapshot):
     if security.blocking:
         return State.MANUAL_REVIEW, security.message
-    text = (await page.locator("body").inner_text())[:150000]
+    text = snapshot.get('condition_text', snapshot['text'])
     patterns = [
         (State.ALREADY_APPLIED, r"you (?:have )?already applied|you (?:have )?previously (?:applied|submitted)|an application (?:already )?exists|duplicate application"),
     ]
@@ -25,17 +24,43 @@ async def page_condition(page):
         match = re.search(pattern, text, re.I)
         if match:
             return state, match[0]
-    if await page.locator('input[type="password"]:visible').count() or re.search(r"/(?:login|signin|sign-in|authwall)(?:[/?#]|$)", page.url, re.I):
+    if snapshot.get('password') or re.search(r"/(?:login|signin|sign-in|authwall)(?:[/?#]|$)", snapshot['url'], re.I):
         return State.AUTH_REQUIRED, "Sign-in requires the configured account; restore the persistent browser session"
     if closed_status(text):
         return State.CLOSED, "LISTING_CLOSED: explicit closure text"
     return None, ""
 
 
+async def page_condition(page):
+    security, snapshot = await SecurityDetector().detect(page)
+    return classify_page_condition(security, snapshot)
+
+
+class PageLease:
+    """Ownership of a page in AutoApply's dedicated context, including holds."""
+    def __init__(self, browser, page):
+        self.browser, self.page = browser, page
+        self.preserved = False
+
+    async def release(self, *, preserve=False):
+        self.preserved = preserve
+        if preserve or self.page.is_closed():
+            return
+        try:
+            cursor = getattr(self.page, '_autoapply_cursor', None)
+            if cursor:
+                await cursor.cancel()
+        finally:
+            await self.page.close()
+
+
 class Browser:
     def __init__(self, config):
         self.config, self.context, self.playwright = config, None, None
         self.start_lock = asyncio.Lock()
+        self.page_lock = asyncio.Lock()
+        self.leases = {}
+        self.pending_closes = set()
         self.observations = {}
         self.max_active_application_tabs = None
         self.tab_limit_violated = False
@@ -52,17 +77,36 @@ class Browser:
             self.tab_limit_violated = True
             raise RuntimeError('BATCH_TAB_LIMIT_VIOLATION')
 
+    async def enforce_application_limit(self, limit):
+        self.max_active_application_tabs = limit
+        if self.context:
+            for page in list(self.context.pages):
+                if page.url == 'about:blank' and page not in self.leases:
+                    await page.close()  # Only the dedicated context's unowned startup page.
+        self.check_tab_limit()
+
     def page_created(self, page):
+        self.lease(page)
         self.application_tabs_opened += 1
         try:
             self.check_tab_limit()
         except RuntimeError:
             # A popup must not become another application session.
-            asyncio.create_task(page.close())
+            task = asyncio.create_task(self.release_page(page))
+            self.pending_closes.add(task)
+            def finished(task):
+                self.pending_closes.discard(task)
+                if not task.cancelled():
+                    task.exception()  # The limit remains violated even if close failed.
+            task.add_done_callback(finished)
 
     async def start(self):
         async with self.start_lock:
-            await self._start()
+            try:
+                await self._start()
+            except BaseException:
+                await asyncio.shield(self.close())
+                raise
 
     async def _start(self):
         if self.context:
@@ -95,7 +139,7 @@ class Browser:
                 if page.url == 'about:blank':
                     await page.close()
             self.check_tab_limit()
-            self.context.on('page', self.page_created)
+        self.context.on('page', self.page_created)
 
     def reset_profile_zoom(self):
         """Reset only zoom preferences in AutoApply's own, not-yet-open profile."""
@@ -114,17 +158,38 @@ class Browser:
             temporary.replace(path)
 
     async def new_page(self):
+        async with self.page_lock:
+            return await self._new_page()
+
+    def lease(self, page):
+        if page.context is not self.context:
+            raise ValueError('Cannot own a page outside the AutoApply context')
+        if page not in self.leases:
+            self.leases[page] = PageLease(self, page)
+            page.on('close', lambda: self.leases.pop(page, None))
+        return self.leases[page]
+
+    async def release_page(self, page, *, preserve=False):
+        await self.lease(page).release(preserve=preserve)
+
+    async def _new_page(self):
         await self.start()
         self.check_tab_limit(opening=True)
         page = await self.context.new_page()
-        self.check_tab_limit()
-        await self.ensure_desktop(page)
-        self.observe(page)
-        async def security_guard():
-            result, _ = await SecurityDetector().detect(page, self.observation(page))
-            return result.blocking
-        get_cursor(page, CursorConfig(**self.config.data.get("cursor", {})), security_guard)
-        return page
+        lease = self.lease(page)
+        try:
+            self.check_tab_limit()
+            await self.ensure_desktop(page)
+            self.observe(page)
+            async def security_guard():
+                self.check_tab_limit()
+                result, _ = await SecurityDetector().detect(page, self.observation(page))
+                return result.blocking
+            get_cursor(page, CursorConfig(**self.config.data.get("cursor", {})), security_guard)
+            return page
+        except BaseException:
+            await asyncio.shield(lease.release())
+            raise
 
     async def ensure_desktop(self, page):
         before = await page.evaluate("() => ({width:innerWidth,height:innerHeight,outerWidth,outerHeight,scale:devicePixelRatio})")
@@ -149,6 +214,7 @@ class Browser:
         if page in self.observations:
             return
         data = self.observations[page] = {"status": None, "dialogs": [], "messages": [], "dialog_open": False, "network_error": False, "pending_uploads":{}, "upload_failed":False, "http_failures": []}
+        page._autoapply_observation = data
         from .uploads import UploadTracker
         tracker = page._autoapply_uploads = UploadTracker()
         def request_started(request):
@@ -284,7 +350,7 @@ class Browser:
         # Persistent Chromium profiles retain per-site browser zoom. A fixed
         # viewport alone cannot correct a site saved at 33% zoom.
         before = await page.evaluate("() => ({width:innerWidth,height:innerHeight,scale:devicePixelRatio})")
-        after = await page.evaluate("() => ({width:innerWidth,height:innerHeight,scale:devicePixelRatio})")
+        after = dict(before)
         self.zoom_diagnostics = {"before":before,"after":after}
         if page.viewport_size and abs(after['width']-page.viewport_size['width']) > 3:
             from .scrolling import NavigationError
@@ -297,15 +363,25 @@ class Browser:
         await page.screenshot(path=str(Path(folder) / (name + ".png")), full_page=True, mask=masks, timeout=5000)
 
     async def close(self):
-        if self.context:
-            for page in self.context.pages:
-                cursor = getattr(page, "_autoapply_cursor", None)
-                if cursor:
-                    try:
-                        await cursor.cancel()
-                    except Exception:
-                        pass  # Closing the context below also destroys its input state.
-            await self.context.close()
-        if self.playwright:
-            await self.playwright.stop()
-        self.context = self.playwright = None
+        try:
+            if self.pending_closes:
+                await asyncio.gather(*self.pending_closes, return_exceptions=True)
+            if self.context:
+                try:
+                    for page in list(self.context.pages):
+                        cursor = getattr(page, "_autoapply_cursor", None)
+                        if cursor:
+                            try:
+                                await cursor.cancel()
+                            except Exception:
+                                pass  # Context close also destroys its input state.
+                finally:
+                    await self.context.close()
+        finally:
+            try:
+                if self.playwright:
+                    await self.playwright.stop()
+            finally:
+                self.context = self.playwright = None
+                self.leases.clear()
+                self.observations.clear()

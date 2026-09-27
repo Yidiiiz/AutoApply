@@ -46,6 +46,7 @@ def disclosure_intent(label, company):
 
 
 def resolve_disclosure(label, options, profile, company):
+    label = getattr(label, 'label', label)
     intent = disclosure_intent(label, company)
     record = profile.get("standing_disclosures", {}).get(intent, {})
     if not intent or not isinstance(record, dict) or not (
@@ -63,6 +64,7 @@ def resolve_disclosure(label, options, profile, company):
 
 
 def resolve_service_or_survey(label, options, profile, company, *, required=False):
+    label = getattr(label, 'label', label)
     text = normalize(label)
     rules = profile.get("standing_disclosures", {})
     service = rules.get("military_service", {})

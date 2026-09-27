@@ -33,7 +33,9 @@ class GeometryValidator:
         previous, samples = None, 0
         while time.monotonic() < deadline:
             check()
-            current = await locator.bounding_box(timeout=c.actionability_timeout_ms)
+            current = await asyncio.wait_for(
+                locator.bounding_box(timeout=min(c.actionability_timeout_ms, max(1,(deadline-time.monotonic())*1000))),
+                timeout=max(.001,deadline-time.monotonic()))
             check()
             if not current or min(current["width"], current["height"]) <= 0:
                 raise TargetUnavailableError("Cursor target has no geometry")

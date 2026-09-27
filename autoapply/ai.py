@@ -95,7 +95,7 @@ class AIManager:
     async def draft(self, q, app, tier=3):
         if not is_writing_question(q):
             raise ProviderUnavailable('This prompt requires a verified factual answer, not generated prose')
-        reused = written_reuse(self.db, q, app)
+        reused = written_reuse(self.db, q, app, self.config.profile_snapshot().revision)
         if reused:
             return reused
         facts = dict(self.config.profile.get("verified_facts", {}))
@@ -165,7 +165,7 @@ class AIManager:
                     'audit':audit}, ensure_ascii=False))
                 # Automatically use audited ordinary prose, but do not promote it
                 # to user-verified reusable memory across changed listings.
-                return Answer(answer, "grounded_ai:" + provider.name, 1.0, sorted(used))
+                return Answer(answer, "grounded_ai:" + provider.name, 1.0, sorted(used), verified=False, reason="Generated narrative proposal; grounding audit is not user verification")
             except (ProviderUnavailable, ValueError) as exc:
                 errors.append(str(exc))
             except Exception as exc:

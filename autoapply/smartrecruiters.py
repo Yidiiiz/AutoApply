@@ -1,15 +1,15 @@
 """SmartRecruiters semantic controls, explicit capabilities and step navigation."""
-import asyncio
 import hashlib
 import json
 import re
 
 from .applications import GenericApplicationAdapter, UnsupportedForm
-from .field_mapping import FieldMapper, UNKNOWN_FIELD, normalize, signature
+from .field_mapping import FieldMapper, UNKNOWN_FIELD, REJECTED_FIELD, normalize, signature
 from .models import Question
+from .inspection import step_inventory
 
-# Per-control evaluation deliberately avoids choosing the first <form>. Locator
-# discovery also pierces open component roots; references are scoped to each root.
+# Pure control metadata function used by the bulk collector below. It deliberately
+# avoids choosing the first form; references stay scoped to each component root.
 METADATA = r'''e => {
  const root=e.getRootNode(), text=n=>{if(!n)return '';const c=n.cloneNode(true);c.querySelectorAll('input,select,textarea,button').forEach(x=>x.remove());return (c.textContent||'').replace(/\s+/g,' ').trim();};
  const labelled=(e.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>text(root.getElementById(id))).join(' ');
@@ -35,6 +35,25 @@ METADATA = r'''e => {
  max_length:e.maxLength>0?e.maxLength:null};
 }'''
 
+# One Playwright selector traversal pierces open shadow roots. Label lookup stays
+# rooted in each component, and marker assignment happens in the same evaluation.
+BULK_METADATA = r'''es => { // phase6 bulk inventory
+ const metadata=__METADATA__;
+ const w=window;
+ if(!w.__autoapplySRNodes)w.__autoapplySRNodes={ids:new WeakMap(),next:0};
+ const ids=w.__autoapplySRNodes;
+ const identity=e=>{if(!ids.ids.has(e))ids.ids.set(e,++ids.next);return ids.ids.get(e)};
+ return es.filter(e=>{
+   if(e.type!=='file'&&(!e.getClientRects().length||['hidden','collapse'].includes(getComputedStyle(e).visibility)))return false;
+   for(let n=e;n;n=n.parentElement||n.getRootNode().host)if(n.getAttribute('aria-hidden')==='true')return false;
+   return true;
+ }).map(e=>{
+   const item=metadata(e), token='sr-node-'+identity(e);
+   e.setAttribute('data-autoapply-field',token);
+   return {...item,token,root:identity(e.getRootNode())};
+ });
+}'''.replace('__METADATA__',METADATA)
+
 CAPABILITIES = {'FIELD_DISCOVERY', 'TEXT_INPUT', 'RADIO', 'CHECKBOX', 'NATIVE_SELECT',
                 'SEARCHABLE_SELECT', 'AUTOCOMPLETE', 'TEXTAREA', 'FILE_UPLOAD',
                 'MULTI_STEP_NAVIGATION', 'VALIDATION_INSPECTION', 'SECURITY_INSPECTION', 'FINAL_SUBMIT', 'CONFIRMATION_DETECTION'}
@@ -53,6 +72,10 @@ class CapabilityFailure(UnsupportedForm):
 class SmartRecruitersAdapter(GenericApplicationAdapter):
     name = 'smartrecruiters'
     capabilities = CAPABILITIES
+    structured_inventory = True
+    requires_explicit_narrative_policy = True
+    requires_verified_resume = True
+    requires_demographic_answer = True
 
     def __init__(self, page):
         super().__init__(page)
@@ -99,6 +122,12 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
             if await field.get_attribute('aria-invalid') == 'true':
                 raise CapabilityFailure('VALIDATION_INSPECTION',q.label)
 
+    async def control_state(self, key):
+        if key not in self.controls:
+            raise CapabilityFailure('VALIDATION_INSPECTION', 'Committed control disappeared within the current step: '+key)
+        return await super().control_state(key)
+
+    @step_inventory
     async def get_questions(self, app):
         from .answers import scope_for
         self.controls, self.inventory = {}, []
@@ -108,16 +137,12 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
             if frame != self.page.main_frame and not re.search(r'^https://[^/]*\.smartrecruiters\.com/', frame.url):
                 continue
             fields = frame.locator('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]),textarea,select,[role=combobox]:not(input):not(select),[role=checkbox]:not(input)')
-            for field in await fields.all():
-                item = await field.evaluate(METADATA)
-                if item['kind'] != 'file' and not await field.is_visible():
-                    continue
-                if await field.evaluate('e=>!!e.closest("[aria-hidden=true]")'):
-                    continue
+            for item in await fields.evaluate_all(BULK_METADATA):
+                field = item['token']
                 candidates += 1
                 item['label'] = item['label'].rstrip(' *').strip()
                 if item['kind'] == 'radio':
-                    group_key = (frame_index, item['name'], item['group_label'])
+                    group_key = (frame_index, item['root'], item['name'], item['group_label'])
                     if not item['name'] and not item['group_label']:
                         raise CapabilityFailure('UNSUPPORTED_REQUIRED', 'Radio group has no stable identity')
                     group = radio_groups.setdefault(group_key, [])
@@ -143,8 +168,9 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
                                            control_type=q.kind,required=True,options=q.options,semantic_key=UNKNOWN_FIELD,
                                            mapping_source='ats_adapter',confidence=0,current_state='unanswered',
                                            supported_for_input=True,support='SUPPORTED',validation_state='requires_verified_answer'))
-        self.counts = dict(visible_candidates=candidates, extracted=len(questions), mapped=sum(q.semantic_key!=UNKNOWN_FIELD for q in questions),
-                           required=sum(q.required for q in questions), unresolved_required=sum(q.required and q.semantic_key==UNKNOWN_FIELD for q in questions))
+        unresolved = {UNKNOWN_FIELD, REJECTED_FIELD}
+        self.counts = dict(visible_candidates=candidates, extracted=len(questions), mapped=sum(q.semantic_key not in unresolved for q in questions),
+                           required=sum(q.required for q in questions), unresolved_required=sum(q.required and q.semantic_key in unresolved for q in questions))
         resumes = [q for q in questions if q.kind == 'file' and re.search(r'resume|curriculum vitae|\bcv\b', q.label, re.I)]
         if len(resumes) > 1:
             raise CapabilityFailure('FILE_UPLOAD_AMBIGUOUS','Multiple resume controls; distinguish profile import from application attachment before selecting')
@@ -163,11 +189,7 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
         ordinal = seen.get(identity, 0)
         seen[identity] = ordinal + 1
         key = hashlib.sha256(f'{frame_index}:{identity}:{ordinal}'.encode()).hexdigest()[:24]
-        tokens = []
-        for n, field in enumerate(fields):
-            token = f'sr-{key}-{n}'
-            await field.evaluate('(e,t)=>e.setAttribute("data-autoapply-field",t)', token)
-            tokens.append(token)
+        tokens = list(fields)
         mapping = await self.mapper.map(item)
         supported = item['kind'] in INPUT_CAPABILITY and not item['disabled'] and bool(item['label'])
         support = 'SUPPORTED' if supported else 'UNSUPPORTED_REQUIRED' if item['required'] else 'UNSUPPORTED_OPTIONAL'
@@ -207,52 +229,22 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
         return None, None
 
     async def step_signature(self):
-        data = []
+        data = [self.page.url]
         for frame in self.page.frames:
             if frame == self.page.main_frame or 'smartrecruiters.com' in frame.url:
                 data.append(await frame.locator('input:not([type=hidden]),textarea,select,h1,h2,h3,[aria-current=step]').evaluate_all(
                     "es=>es.filter(e=>e.getClientRects().length).map(e=>[e.tagName,e.id,e.name,e.getAttribute('aria-label'),e.matches('h1,h2,h3,[aria-current=step]')?e.textContent:''])"))
         return json.dumps(data, sort_keys=True)
 
-    async def advance(self):
-        from .cursor import click_element
-        before = await self.step_signature()
-        await asyncio.sleep(.15)
-        if before != await self.step_signature():
-            raise CapabilityFailure('STEP_UNSTABLE', 'Form changed before navigation')
-        self.emit('STEP_NEXT_INTENT', {})
-        kind, target = await self.action()
-        if kind != 'next':
-            raise CapabilityFailure('MULTI_STEP_NAVIGATION','Fresh Next control missing')
-        for event in ('STEP_NEXT_TARGET_FOUND','STEP_NEXT_VISIBLE','STEP_NEXT_ENABLED'):
-            self.emit(event, {})
-        # Existing cursor path performs scroll, fresh geometry, stability and hit
-        # testing before physical input. No retry after any delivery ambiguity.
-        try:
-            await click_element(self.page, target)
-        except Exception as exc:
-            from .cursor import get_cursor
-            cursor = get_cursor(self.page)
-            self.emit('STEP_NEXT_FAILURE', {'error_type':type(exc).__name__,
-                                           'cursor_events':[e['event'] for e in cursor.events[-20:]],
-                                           'retry_performed':False})
-            raise CapabilityFailure('MULTI_STEP_NAVIGATION',f'{type(exc).__name__}; inspect delivery and current step before retry') from exc
-        self.emit('STEP_NEXT_CLICK_DELIVERED', {})
-        for _ in range(100):
-            await asyncio.sleep(.1)
-            after = await self.step_signature()
-            if after != before:
-                await asyncio.sleep(.2)
-                if after == await self.step_signature():
-                    from .uploads import SessionAttachment
-                    for attachment, _, _ in self.uploads.values():
-                        if isinstance(attachment, SessionAttachment):
-                            attachment.advance()
-                    self.controls = {}
-                    self.emit('STEP_TRANSITION_OBSERVED', {})
-                    self.emit('STEP_ADVANCED', {})
-                    return
-        raise CapabilityFailure('STEP_TRANSITION_UNCONFIRMED','Next was delivered but no stable transition observed; inspect before retry')
+    def transition_error(self, category, detail):
+        return CapabilityFailure(category, detail)
+
+    def transitioned(self):
+        from .uploads import SessionAttachment
+        for attachment, _, _ in self.uploads.values():
+            if isinstance(attachment, SessionAttachment):
+                attachment.advance()
+        super().transitioned()
 
     def support_report(self, questions):
         needed = {'FIELD_DISCOVERY','FILE_UPLOAD','MULTI_STEP_NAVIGATION','VALIDATION_INSPECTION','SECURITY_INSPECTION','FINAL_SUBMIT','CONFIRMATION_DETECTION'}

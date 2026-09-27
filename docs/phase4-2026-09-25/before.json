@@ -1,0 +1,105 @@
+{
+  "python": "3.14.3",
+  "sqlite": "3.50.4",
+  "workloads": {
+    "separate_events": {
+      "db_commits": 20,
+      "history_flushes": 10,
+      "history_syncs": 10,
+      "bundle_exports": 10,
+      "statistics_calculations": 10,
+      "db_writes": 10,
+      "security_writes": 0,
+      "file_rewrites": 30,
+      "seconds": 0.322894,
+      "files": {
+        "discovered\\1_Synthetic_Software Intern\\events.json": 10,
+        "discovered\\1_Synthetic_Software Intern\\job_description.txt": 10,
+        "statistics.json": 10
+      },
+      "sqlite_changes_including_triggers": 30
+    },
+    "batched_events": {
+      "db_commits": 2,
+      "history_flushes": 11,
+      "history_syncs": 1,
+      "bundle_exports": 1,
+      "statistics_calculations": 1,
+      "db_writes": 10,
+      "security_writes": 0,
+      "file_rewrites": 3,
+      "seconds": 0.041733,
+      "files": {
+        "discovered\\1_Synthetic_Software Intern\\events.json": 1,
+        "discovered\\1_Synthetic_Software Intern\\job_description.txt": 1,
+        "statistics.json": 1
+      },
+      "sqlite_changes_including_triggers": 12
+    },
+    "unchanged_security": {
+      "db_commits": 20,
+      "history_flushes": 20,
+      "history_syncs": 10,
+      "bundle_exports": 10,
+      "statistics_calculations": 10,
+      "db_writes": 10,
+      "security_writes": 10,
+      "file_rewrites": 40,
+      "seconds": 0.461105,
+      "files": {
+        "discovered\\1_Synthetic_Software Intern\\application.json": 10,
+        "discovered\\1_Synthetic_Software Intern\\status.json": 10,
+        "discovered\\1_Synthetic_Software Intern\\job_description.txt": 10,
+        "statistics.json": 10
+      },
+      "sqlite_changes_including_triggers": 30
+    },
+    "small_mutation": {
+      "db_commits": 2,
+      "history_flushes": 1,
+      "history_syncs": 1,
+      "bundle_exports": 1,
+      "statistics_calculations": 1,
+      "db_writes": 1,
+      "security_writes": 0,
+      "file_rewrites": 3,
+      "seconds": 0.043882,
+      "files": {
+        "discovered\\1_Synthetic_Software Intern\\events.json": 1,
+        "discovered\\1_Synthetic_Software Intern\\job_description.txt": 1,
+        "statistics.json": 1
+      },
+      "sqlite_changes_including_triggers": 3
+    },
+    "probe_observations": {
+      "db_commits": 60,
+      "history_flushes": 30,
+      "history_syncs": 10,
+      "bundle_exports": 10,
+      "statistics_calculations": 10,
+      "db_writes": 30,
+      "security_writes": 0,
+      "file_rewrites": 30,
+      "seconds": 0.467987,
+      "files": {
+        "discovered\\1_Synthetic_Software Intern\\events.json": 10,
+        "discovered\\1_Synthetic_Software Intern\\job_description.txt": 10,
+        "statistics.json": 10
+      },
+      "sqlite_changes_including_triggers": 50,
+      "final_flush": {
+        "db_commits": 1,
+        "history_flushes": 0,
+        "history_syncs": 0,
+        "bundle_exports": 0,
+        "statistics_calculations": 0,
+        "db_writes": 0,
+        "security_writes": 0,
+        "file_rewrites": 0,
+        "seconds": 2.8e-05,
+        "files": {},
+        "sqlite_changes_including_triggers": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "distinct_requisitions_same_title": {
+    "application_ids": [
+      1,
+      2
+    ],
+    "conflict_id": 1
+  },
+  "conflicting_field_signals": {
+    "mapper_result": {
+      "semantic_key": "UNKNOWN_FIELD",
+      "mapping_source": "generic_rule",
+      "confidence": 0
+    },
+    "resolver_supplied_answer": true,
+    "answer_source": "profile:contact.email"
+  }
+}

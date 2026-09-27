@@ -3,6 +3,7 @@ import json
 from .answers import from_row, validate_answer, writing_topic, concept, AnswerResolver, is_writing_question
 from .archive import archive_application
 from .jobs import freshness
+from .freshness import utc
 from .models import Answer, State, now
 
 
@@ -11,10 +12,13 @@ class Controller:
         self.config, self.db, self.ai = config, db, ai
 
     def pending(self):
-        self.db.cleanup_stale_listings()
-        return self.db.rows("""SELECT q.*,a.status application_status,j.company,j.title,j.canonical_url
+        rows = self.db.rows("""SELECT q.*,a.status application_status,j.company,j.title,j.canonical_url,
+            j.posted_at,j.listing_status,a.submit_intent_at,a.manual_action_required
             FROM questions q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id
             WHERE (j.listing_active=1 OR a.submit_intent_at IS NOT NULL OR a.manual_action_required=1) AND q.status='PENDING' AND a.status NOT IN ('SUBMITTED','ALREADY_APPLIED','INELIGIBLE','CLOSED','INVALID','DUPLICATE') ORDER BY q.id""")
+        days, reference = self.db.listing_days(), utc()
+        return [row for row in rows if row['submit_intent_at'] or row['manual_action_required']
+                or self.db.listing_decision(row, reference, days=days)[2]]
 
     def answer(self, question_id, value):
         row = self.db.one("SELECT * FROM questions WHERE id=?", (question_id,))
@@ -27,7 +31,9 @@ class Controller:
         q = from_row(row)
         validate_answer(q, value)
         with self.db.transaction():
-            self.db.save_answer(question_id, Answer(value, "user_confirmed"), verified=q.kind != "file")
+            self.db.save_answer(question_id, Answer(value, "user_confirmed", verified=True,
+                provenance={'question_id': question_id,
+                            'canonical_profile_revision': self.config.profile_snapshot().revision}), verified=q.kind != "file")
             if q.key == "listing-date":
                 self.db.execute("UPDATE jobs SET posted_at=?,date_evidence='user confirmed' WHERE id=?", (value, app["job_id"]))
                 if not freshness(value, self.config["jobs"]["max_listing_age_days"]):
@@ -40,14 +46,22 @@ class Controller:
             if q.kind == "textarea":
                 self.db.execute("""INSERT INTO written_responses(question,topic,answer,company,job_title,verified,provider,evidence,created_at)
                     VALUES (?,?,?,?,?,1,'user','[]',?)""", (q.label, writing_topic(q.label), value, app["company"], app["title"], now()))
+                self.db.execute('UPDATE written_responses SET question_signature=?,profile_revision=? WHERE id=last_insert_rowid()',
+                                (row['question_signature'], self.config.profile_snapshot().revision))
             self.db.event(app["id"], "user_answer", f"Question {question_id} confirmed")
-            path = concept(q.label)
+            from .concepts import REGISTRY
+            from .field_mapping import describe
+            descriptor = describe(q, app, self.config.profile_snapshot().facts)
+            spec = REGISTRY.get(descriptor.semantic_key)
+            path = spec.profile_path if spec and spec.factual_fallback and 'global' in spec.scopes else None
+            # Combined sponsorship has a deliberately narrow canonical grammar.
+            if descriptor.semantic_key == 'sponsorship_combined':
+                path = 'sponsorship_combined'
             if path:
                 # Canonical reusable facts stay in the normal verified answer store;
                 # application-specific essays and salary answers retain their scope.
                 self.db.set_setting("verified_fact:" + path, {"value": value, "source":"USER_PROVIDED", "question_id":question_id})
             self._resume_if_ready(app["id"])
-        archive_application(self.config, self.db, app["id"])
         if self.db.one("SELECT application_id FROM manual_requests WHERE application_id=?", (app['id'],)):
             return f"All required answers are available; resuming {app['company']} #{app['id']}."
         return "Answer saved. " + self.db.application(app["id"])["status"]
@@ -88,8 +102,9 @@ class Controller:
         if not is_writing_question(q) or q.key in {"eligibility", "listing-date", "resume"}:
             raise ValueError("AI writing is only available for open-ended written questions")
         result = await self.ai.draft(q, app)
-        self.db.set_setting(f"draft:{question_id}", result.value)
-        self.db.event(app["id"], "ai_draft", f"Draft for question {question_id}; source {result.source}")
+        with self.db.transaction():
+            self.db.set_setting(f"draft:{question_id}", result.value)
+            self.db.event(app["id"], "ai_draft", f"Draft for question {question_id}; source {result.source}")
         return result.value
 
     def inspect(self, app_id):
@@ -230,14 +245,19 @@ class Controller:
             self.db.set_setting("auto_submit", parts[1] == "on")
             return "Auto-submit " + parts[1]
         if cmd == "status":
-            self.db.cleanup_stale_listings()
             return json.dumps({"paused": self.db.setting("paused", False), "auto_submit": self.db.setting("auto_submit", self.config["application"]["auto_submit"]),
-                               "listing_stats": self.db.refresh_listing_statistics(), "states": self.db.rows("SELECT status,count(*) count FROM applications GROUP BY status")}, indent=2)
+                               "listing_stats": self.db.listing_statistics(),
+                               "listing_statistics_as_of": self.db.setting('listing_statistics_as_of'),
+                               "listing_maintenance_due_at": self.db.setting('listing_maintenance_due_at'),
+                               "states": self.db.rows("SELECT status,count(*) count FROM applications GROUP BY status")}, indent=2)
         if cmd in {"queue", "recent"}:
-            if cmd == "queue":
-                self.db.cleanup_stale_listings()
             condition = "WHERE j.listing_active=1 AND a.status IN ('QUEUED','RETRY','CHECKING','APPLYING','READY')" if cmd == "queue" else ""
-            rows = self.db.rows(f"SELECT a.id,j.company,j.title,a.status,a.updated_at,j.canonical_url FROM applications a JOIN jobs j ON j.id=a.job_id {condition} ORDER BY a.updated_at DESC LIMIT 20")
+            rows = self.db.execute(f"SELECT a.id,j.company,j.title,a.status,a.updated_at,j.canonical_url,j.posted_at,j.listing_status FROM applications a JOIN jobs j ON j.id=a.job_id {condition} ORDER BY a.updated_at DESC")
+            from itertools import islice
+            if cmd == 'queue':
+                days, reference = self.db.listing_days(), utc()
+                rows = (row for row in rows if self.db.listing_decision(dict(row), reference, days=days)[2])
+            rows = list(islice(rows, 20))
             return "\n".join(f"#{r['id']} {r['company']} | {r['title']} | {r['status']} | {r['updated_at']}\n{r['canonical_url']}" for r in rows) or "No applications."
         if cmd == "pending":
             return "\n".join(f"#{q['id']} (application {q['application_id']}): {q['raw_question']}" for q in self.pending()) or "No pending questions."

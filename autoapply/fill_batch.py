@@ -28,9 +28,13 @@ def discover(db, config, seen=()):
         AND NOT EXISTS (SELECT 1 FROM settings s WHERE s.key='duplicate_submission_guard:' || a.id
                         AND s.value NOT IN ('false','null','0'))
         ORDER BY j.priority DESC,j.discovered_at,a.id''', (now(),))
+    from .candidate_policy import preflight
+    from .answers import AnswerResolver
+    snapshot = AnswerResolver(config, db).refresh()
     return [r['id'] for r in rows if r['id'] not in EXCLUDED and r['id'] not in seen
-            and not db.automation_retired(r['id'])
-            and freshness_state(r['posted_at'], config['jobs']['max_listing_age_days']) == 'FRESH']
+            and freshness_state(r['posted_at'], config['jobs']['max_listing_age_days']) == 'FRESH'
+            and preflight(db, config, db.application(r['id']), snapshot=snapshot,
+                          mode='fill_only', historical_exclusions=EXCLUDED).proceed]
 
 
 async def checkpoint(engine, app_id, page):

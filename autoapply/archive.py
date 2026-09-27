@@ -22,6 +22,11 @@ LEGACY = dict(QUEUED='DISCOVERED', RETRY='DISCOVERED', CHECKING='OPENED',
               APPLYING='FILLING', READY='READY_TO_SUBMIT', NEEDS_INPUT='MANUAL_REQUIRED',
               AUTH_REQUIRED='MANUAL_REQUIRED', MANUAL_REVIEW='MANUAL_REQUIRED')
 _locks = {}
+_lock_owners = threading.local()
+
+
+def history_lock_held(root):
+    return str(root) in getattr(_lock_owners, 'roots', ())
 
 
 def safe_name(value):
@@ -29,9 +34,14 @@ def safe_name(value):
 
 
 def atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
     json.loads(payload)
+    atomic_text(path, payload)
+
+
+def atomic_text(path, payload):
+    """Replace changed UTF-8 content atomically; preserve unchanged artifact bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         if path.exists() and path.read_text(encoding='utf-8') == payload:
             return
@@ -138,8 +148,11 @@ class ApplicationHistory:
                         raise RuntimeError('Application history is busy; pending changes will recover on startup') from None
                     time.sleep(.05)
             try:
+                roots = getattr(_lock_owners, 'roots', set())
+                _lock_owners.roots = roots | {str(self.root)}
                 yield
             finally:
+                _lock_owners.roots = roots
                 lock.__exit__()
 
     def _candidates(self):
@@ -147,7 +160,7 @@ class ApplicationHistory:
         for entry in sorted(self.root.iterdir()):
             if entry.is_symlink():
                 raise ValueError('History contains a symbolic link; manual review required')
-            if entry.name in {'statistics.json', 'migration_report.json', '.layout.json'} or entry.name.endswith('.tmp'):
+            if entry.name in {'statistics.json', 'migration_report.json', '.layout.json', '.cache-token.json'} or entry.name.endswith('.tmp'):
                 continue
             if entry.is_file():
                 yield entry
@@ -250,11 +263,23 @@ class ApplicationHistory:
             self.records[ident], self.paths[ident] = record, path.parent
 
     def _refresh(self):
-        statistics = self.root / 'statistics.json'
-        revision = statistics.stat().st_mtime_ns if statistics.exists() else None
+        revision = self._cache_revision()
         if revision != self.revision or not self.records:
             self._scan()
             self.revision = revision
+
+    def _cache_revision(self):
+        # Aggregate content may be unchanged while individual records change.
+        # This token invalidates readers; it is NOT a dirty-queue acknowledgement.
+        token = self.root / '.cache-token.json'
+        statistics = self.root / 'statistics.json'
+        return (read_json(token) if token.exists() else None,
+                statistics.stat().st_mtime_ns if statistics.exists() else None)
+
+    def _invalidate_readers(self):
+        # Publish before writes, under the history lock. Even interrupted exports
+        # invalidate other instances, and the durable DB dirty queue retries them.
+        atomic_json(self.root / '.cache-token.json', uuid.uuid4().hex)
 
     def _statistics(self):
         from .history_statistics import calculate_statistics
@@ -266,8 +291,16 @@ class ApplicationHistory:
             except (ValueError, OSError):
                 # Listing metrics are rebuilt from SQLite during startup maintenance.
                 pass
-        atomic_json(self.root / 'statistics.json', result)
-        self.revision = (self.root / 'statistics.json').stat().st_mtime_ns
+        path = self.root / 'statistics.json'
+        try:
+            previous = read_json(path)
+            if {k: v for k, v in previous.items() if k != 'generated_at'} == {
+                    k: v for k, v in result.items() if k != 'generated_at'}:
+                result['generated_at'] = previous['generated_at']
+        except (OSError, ValueError, AttributeError, KeyError):
+            pass
+        atomic_json(path, result)
+        self.revision = self._cache_revision()
         return result
 
     def validate(self):
@@ -281,6 +314,7 @@ class ApplicationHistory:
             loaded = [(p, self._load(p, report)) for p in candidates if p not in empty]
             if candidates and not (self.root / '.layout.json').exists():
                 self._backup()
+            self._invalidate_readers()
             for path in empty:
                 report['empty_directories'] += 1
                 report['warnings'].append(f'Empty legacy directory removed (no application record): {path.name}')
@@ -380,8 +414,11 @@ class ApplicationHistory:
         return found
 
     def sync(self, db, ids):
+        if not db.conn.in_transaction or not db._flushing_history:
+            raise RuntimeError('History sync must be owned by Database.flush_history')
         with self.locked():
             self._refresh()
+            self._invalidate_readers()
             for app_id in ids:
                 if not db.one('SELECT id FROM applications WHERE id=?', (app_id,)):
                     folder = self.paths.get(str(app_id))
@@ -422,12 +459,19 @@ class ApplicationHistory:
                     events=events, confirmation={key: app[key] for key in ('status', 'submitted_at', 'confirmation_text', 'confirmation_url')})
                 for name, value in data.items():
                     atomic_json(folder / (name + '.json'), value)
-                (folder / 'job_description.txt').write_text(app['description'] or '', encoding='utf-8')
+                atomic_text(folder / 'job_description.txt', app['description'] or '')
             self._statistics()
 
 
 def archive_application(config, db, app_id):
-    db.flush_history([app_id])
+    # Mutations already enqueue/flush via SQLite triggers. Do not force a second
+    # export merely to get a screenshot directory. Missing bundles still repair.
+    db.flush_history()
+    with db.history.locked():
+        db.history._refresh()
+        folder = db.history.paths.get(str(app_id))
+    if folder is None or not (folder / 'application.json').exists():
+        db.flush_history([app_id])
     return db.history.paths[str(app_id)]
 
 

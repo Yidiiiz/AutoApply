@@ -1,0 +1,154 @@
+{
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[application.html-GenericApplicationAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "generic_inventory_calls": 4,
+      "frame_evaluations": 4,
+      "full_inventories": 4,
+      "locator_constructions": 4
+    },
+    "seconds": 0.975925
+  },
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[greenhouse-controls.html-GenericApplicationAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "generic_inventory_calls": 4,
+      "frame_evaluations": 4,
+      "full_inventories": 4,
+      "locator_constructions": 8,
+      "control_state_reads": 8,
+      "locator_clicks": 4,
+      "fills": 4,
+      "option_or_text_scans": 20
+    },
+    "seconds": 3.088354
+  },
+  "tests/test_phase6_browser.py::test_repeated_local_inventory[smartrecruiters-controls.html-SmartRecruitersAdapter]": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "sr_inventory_calls": 4,
+      "locator_constructions": 8,
+      "control_evaluations": 120,
+      "control_state_reads": 36
+    },
+    "seconds": 2.897574
+  },
+  "tests/test_dropdown_browser.py::test_open_async_city_menu_is_committed_without_toggle": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 5,
+      "generic_inventory_calls": 1,
+      "frame_evaluations": 2,
+      "full_inventories": 1,
+      "locator_constructions": 26,
+      "control_state_reads": 9,
+      "fills": 2,
+      "option_or_text_scans": 8,
+      "security_scans": 1,
+      "control_evaluations": 6,
+      "locator_clicks": 2,
+      "option_searches": 3,
+      "validation_passes": 1
+    },
+    "seconds": 2.406088
+  },
+  "tests/test_smartrecruiters.py::test_discovery_fill_and_transition": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 53,
+      "sr_inventory_calls": 2,
+      "locator_constructions": 96,
+      "control_evaluations": 88,
+      "control_state_reads": 56,
+      "security_scans": 27,
+      "fills": 5,
+      "locator_clicks": 4,
+      "option_or_text_scans": 4,
+      "option_searches": 3,
+      "cursor_viewport_reads": 23,
+      "upload_observations": 13,
+      "validation_passes": 2,
+      "frame_evaluations": 26,
+      "transition_observations": 4,
+      "bulk_control_evaluations": 4,
+      "cursor_geometry_reads": 24
+    },
+    "seconds": 4.387764
+  },
+  "tests/test_browser.py::test_greenhouse_removes_input_but_attachment_and_network_are_verified": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 10,
+      "locator_constructions": 11,
+      "control_state_reads": 9,
+      "control_evaluations": 15,
+      "security_scans": 6,
+      "cursor_viewport_reads": 1,
+      "upload_observations": 7,
+      "validation_passes": 2,
+      "frame_evaluations": 2,
+      "option_or_text_scans": 2
+    },
+    "seconds": 1.856043
+  },
+  "tests/test_browser.py::test_checkbox_group_validation_preserves_consent_and_native_errors": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 4,
+      "generic_inventory_calls": 1,
+      "frame_evaluations": 6,
+      "full_inventories": 1,
+      "locator_constructions": 10,
+      "validation_passes": 5,
+      "option_or_text_scans": 5,
+      "security_scans": 1,
+      "fills": 1
+    },
+    "seconds": 1.216075
+  },
+  "tests/test_browser.py::test_engine_presubmit_challenge_resumes_without_navigation": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 81,
+      "security_scans": 69,
+      "locator_constructions": 119,
+      "control_state_reads": 60,
+      "generic_inventory_calls": 4,
+      "frame_evaluations": 8,
+      "full_inventories": 4,
+      "fills": 5,
+      "control_evaluations": 75,
+      "option_or_text_scans": 5,
+      "locator_clicks": 1,
+      "cursor_viewport_reads": 3,
+      "upload_observations": 14,
+      "validation_passes": 2
+    },
+    "seconds": 14.160039
+  },
+  "tests/test_phase6_browser.py::test_conditional_local_inventory": {
+    "counts": {
+      "page_creations": 1,
+      "max_context_pages": 2,
+      "page_evaluations": 3,
+      "generic_inventory_calls": 3,
+      "frame_evaluations": 3,
+      "full_inventories": 3,
+      "locator_constructions": 6,
+      "control_evaluations": 2,
+      "fills": 1
+    },
+    "seconds": 1.535722
+  }
+}

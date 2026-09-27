@@ -93,6 +93,9 @@ def test_form_source_and_no_numeric_invention(config, db, listing):
     q = Question("communication", "Do you have strong communication skills?", "radio", True, ["Yes", "No"])
     answer = resolver.resolve(q, db.application(app_id))
     assert answer.value == "Yes" and answer.source == SOURCE and answer.evidence == ["communication"]
+    assert db.one("SELECT * FROM events WHERE kind='standing_answer'") is None
+    row = db.question(app_id, q)
+    db.save_answer(row['id'], answer)
     event = db.one("SELECT * FROM events WHERE kind='standing_answer'")
     assert json.loads(event["detail"])["assertion_ids"] == ["communication"]
     assert resolver.resolve(Question("gpa", "GPA", "number", True), db.application(app_id)) is None

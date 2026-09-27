@@ -118,7 +118,6 @@ async def test_failed_dispatch_retains_ownership_until_idempotent_cleanup():
 async def cursor_page(config, monkeypatch):
     from autoapply.browser import Browser
     from autoapply.config import ROOT
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(ROOT / "data/private/playwright"))
     browser = Browser(config)
     page = await browser.new_page()
     await page.route("**/*", lambda route: route.fulfill(body="<html><body></body></html>", content_type="text/html"))

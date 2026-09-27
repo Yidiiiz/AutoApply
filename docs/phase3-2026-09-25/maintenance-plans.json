@@ -1,0 +1,26 @@
+[
+  {
+    "sql": "SELECT identity_key FROM listing_maintenance WHERE due_at<=?",
+    "plan": [
+      "SEARCH listing_maintenance USING INDEX listing_maintenance_due (due_at<?)"
+    ]
+  },
+  {
+    "sql": "SELECT j.*,o.identity_key observed_key,o.posted_at observed_posted,\n                o.freshness_state observed_fresh,o.listing_status observed_status,o.culled_at observed_culled,\n                coalesce(j.last_seen_at,(SELECT max(last_seen) FROM job_sources WHERE job_id=j.id),j.discovered_at) source_seen,\n                CASE WHEN a.status IN ('QUEUED','RETRY','CHECKING','APPLYING','READY','NEEDS_INPUT')\n                    AND a.submit_intent_at IS NULL THEN 1 ELSE 0 END queued_count\n                FROM listing_maintenance m JOIN jobs j ON j.identity_key=m.identity_key LEFT JOIN listing_observations o ON o.identity_key=j.identity_key LEFT JOIN applications a ON a.job_id=j.id WHERE m.due_at<=?",
+    "plan": [
+      "SEARCH m USING INDEX listing_maintenance_due (due_at<?)",
+      "SEARCH j USING INDEX sqlite_autoindex_jobs_1 (identity_key=?)",
+      "SEARCH o USING INDEX sqlite_autoindex_listing_observations_1 (identity_key=?) LEFT-JOIN",
+      "SEARCH a USING INDEX sqlite_autoindex_applications_1 (job_id=?) LEFT-JOIN",
+      "CORRELATED SCALAR SUBQUERY 1",
+      "SEARCH job_sources USING INDEX job_sources_job (job_id=?)"
+    ]
+  },
+  {
+    "sql": "SELECT o.* FROM listing_observations o JOIN listing_maintenance m ON m.identity_key=o.identity_key WHERE o.job_id IS NULL AND m.due_at<=?",
+    "plan": [
+      "SEARCH m USING INDEX listing_maintenance_due (due_at<?)",
+      "SEARCH o USING INDEX sqlite_autoindex_listing_observations_1 (identity_key=?)"
+    ]
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "listings": 100,
+    "selects": 9,
+    "updates": 0,
+    "sqlite_changes": 2
+  },
+  {
+    "listings": 1000,
+    "selects": 9,
+    "updates": 0,
+    "sqlite_changes": 2
+  }
+]

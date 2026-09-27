@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS source_revisions (
  source TEXT PRIMARY KEY, revision TEXT, default_branch TEXT, checked_at TEXT, error TEXT);
 CREATE INDEX IF NOT EXISTS app_queue ON applications(status, retry_at);
 CREATE INDEX IF NOT EXISTS questions_pending ON questions(status, application_id);
+CREATE INDEX IF NOT EXISTS jobs_canonical_url ON jobs(canonical_url);
+CREATE INDEX IF NOT EXISTS events_application ON events(application_id);
+CREATE INDEX IF NOT EXISTS job_sources_job ON job_sources(job_id);
 CREATE TABLE IF NOT EXISTS manual_requests (
  application_id INTEGER PRIMARY KEY REFERENCES applications(id), action TEXT NOT NULL, created_at TEXT NOT NULL);
 """
@@ -95,6 +98,7 @@ class Database(ListingStore):
     def __init__(self, path, max_listing_age_days=None, *, startup_maintenance=True):
         self._history_ready = False
         self._flushing_history = False
+        self._closed = False
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
@@ -103,6 +107,34 @@ class Database(ListingStore):
         if self.conn.execute("PRAGMA user_version").fetchone()[0] > 2:
             raise RuntimeError("Database belongs to a newer AutoApply version")
         self.conn.executescript(SCHEMA)
+        # Additive answer metadata; unsigned legacy rows remain unknown/readable.
+        for table, additions in {
+            'questions': {'semantic_key': "TEXT DEFAULT ''", 'question_signature': "TEXT DEFAULT ''",
+                          'field_policy': "TEXT DEFAULT ''", 'answer_provenance': 'TEXT',
+                          'min_selections': 'INTEGER', 'max_selections': 'INTEGER'},
+            'known_answers': {'question_signature': 'TEXT', 'provenance': 'TEXT'},
+            'written_responses': {'question_signature': 'TEXT', 'profile_revision': 'TEXT'},
+        }.items():
+            columns = {row['name'] for row in self.conn.execute(f'PRAGMA table_info({table})')}
+            for name, definition in additions.items():
+                if name not in columns:
+                    self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+        self.conn.executescript('''
+            CREATE TABLE IF NOT EXISTS answer_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+            INSERT OR IGNORE INTO answer_revision VALUES (1,0);
+        ''')
+        for table, operations in {
+            'known_answers': ('INSERT', 'DELETE', 'UPDATE OF answer,verified,source,scope,question_signature,provenance'),
+            'settings': ('INSERT', 'DELETE', 'UPDATE'),
+        }.items():
+            for operation in operations:
+                verb = operation.split()[0]
+                row = 'OLD' if verb == 'DELETE' else 'NEW'
+                condition = (f"WHEN {row}.key LIKE 'verified_fact:%' OR {row}.key LIKE 'known_answer_signature:%'"
+                             if table == 'settings' else '')
+                self.conn.executescript(f'''CREATE TRIGGER IF NOT EXISTS answer_revision_{table}_{verb}
+                    AFTER {operation} ON {table} {condition} BEGIN
+                    UPDATE answer_revision SET revision=revision+1 WHERE id=1; END;''')
         with self.transaction():
             columns = {row["name"] for row in self.rows("PRAGMA table_info(applications)")}
             migrate = "application_state" not in columns
@@ -127,7 +159,7 @@ class Database(ListingStore):
             window(max_listing_age_days)
             self.set_setting('listing_max_age_days', max_listing_age_days)
         self._initialize_history(Path(path).parent / 'application_history')
-        self.listing_startup_report = self.cleanup_stale_listings(migration=first_listings) if startup_maintenance else {}
+        self.listing_startup_report = self.maintain_listings(migration=first_listings) if startup_maintenance else {}
 
     def _initialize_history(self, root):
         from .archive import ApplicationHistory
@@ -162,6 +194,16 @@ class Database(ListingStore):
                 value = f'SELECT id FROM applications WHERE job_id={row}.{column}' if table in {'jobs', 'job_sources'} else f'SELECT {row}.{column} WHERE {row}.{column} IS NOT NULL'
                 self.conn.executescript(f'''CREATE TRIGGER IF NOT EXISTS history_{table}_{operation}
                     AFTER {operation} ON {table} BEGIN INSERT OR IGNORE INTO history_dirty {value}; END;''')
+        # generated_responses.json reads draft:<question_id> settings. They must
+        # participate in the same durable dirty queue as question/evidence rows.
+        for operation, row in [('INSERT', 'NEW'), ('UPDATE', 'NEW'), ('DELETE', 'OLD')]:
+            self.conn.executescript(f'''CREATE TRIGGER IF NOT EXISTS history_draft_{operation}
+                AFTER {operation} ON settings
+                WHEN {row}.key = 'draft:' || CAST(substr({row}.key,7) AS INTEGER)
+                BEGIN INSERT INTO history_dirty
+                    SELECT application_id FROM questions WHERE id=CAST(substr({row}.key,7) AS INTEGER)
+                    ON CONFLICT(application_id) DO NOTHING;
+                END;''')
         self.history = ApplicationHistory(root)
         first = not (root / '.layout.json').exists()
         self.history_startup_report = self.history.validate()
@@ -176,8 +218,13 @@ class Database(ListingStore):
             return
         self._flushing_history = True
         try:
+            self._check_history_lock_order()
             for app_id in ids:
                 self.conn.execute('INSERT OR IGNORE INTO history_dirty VALUES (?)', (app_id,))
+            # Avoid a write-lock/commit cycle for settings and other clean writes.
+            # Re-read under BEGIN IMMEDIATE below before acknowledging anything.
+            if not self.conn.execute('SELECT 1 FROM history_dirty LIMIT 1').fetchone():
+                return
             # Hold the DB write lock through export so another process cannot
             # acknowledge an older snapshot over a newer committed transition.
             self.conn.execute('BEGIN IMMEDIATE')
@@ -194,11 +241,24 @@ class Database(ListingStore):
             self._flushing_history = False
 
     def close(self):
-        self.conn.close()
+        if self._closed:
+            return
+        try:
+            self.flush_history()
+        finally:
+            self.conn.close()
+            self._closed = True
+
+    def _check_history_lock_order(self):
+        if self._history_ready and not self.conn.in_transaction:
+            from .archive import history_lock_held
+            if history_lock_held(self.history.root):
+                raise RuntimeError('Acquire the database transaction before the history lock')
 
     def execute(self, sql, args=()):
+        self._check_history_lock_order()
         cursor = self.conn.execute(sql, args)
-        if sql.lstrip().split(None, 1)[0].upper() in {'INSERT', 'UPDATE', 'DELETE', 'REPLACE'}:
+        if not self.conn.in_transaction and sql.lstrip().split(None, 1)[0].upper() in {'INSERT', 'UPDATE', 'DELETE', 'REPLACE'}:
             self.flush_history()
         return cursor
 
@@ -210,21 +270,43 @@ class Database(ListingStore):
         return dict(row) if row else None
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, sync_history=True):
+        """Short DB-only batch; commit before export. Never span an await.
+
+        sync_history=False is for durable probe observations only: dirty triggers
+        still commit, and the next normal boundary/close/startup exports them.
+        Critical state/intent/confirmation callers use the default boundary.
+        """
         self.execute("BEGIN IMMEDIATE")
+        changes = self.conn.total_changes
         try:
             yield
             self.execute("COMMIT")
         except BaseException:
             self.execute("ROLLBACK")
             raise
-        self.flush_history()
+        if sync_history and self.conn.total_changes != changes:
+            self.flush_history()
 
     def setting(self, key, default=None):
         row = self.one("SELECT value FROM settings WHERE key=?", (key,))
         return json.loads(row["value"]) if row else default
 
+    def answer_revision(self):
+        # SQLite data_version detects other connections; total_changes detects this one.
+        # Usage receipts and unrelated events do not advance the answer revision.
+        token = (self.conn.total_changes, self.conn.execute('PRAGMA data_version').fetchone()[0], self.conn.in_transaction)
+        if getattr(self, '_answer_revision_token', None) != token:
+            self._answer_revision_value = self.one('SELECT revision FROM answer_revision WHERE id=1')['revision']
+            self._answer_revision_token = token
+        return self._answer_revision_value
+
     def set_setting(self, key, value):
+        if key == 'listing_max_age_days':
+            window(value)
+            if self.listing_days() == value:
+                return
+            self.execute("INSERT OR IGNORE INTO settings VALUES ('listing_maintenance_dirty','true')")
         self.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(value)))
 
     def event(self, app_id, kind, detail):
@@ -242,10 +324,15 @@ class Database(ListingStore):
     def update_security(self, app_id, **fields):
         if not fields or not fields.keys() <= SECURITY_COLUMNS.keys():
             raise ValueError("Invalid security update")
-        previous = self.one("SELECT submission_confirmation_seen FROM applications WHERE id=?", (app_id,))
+        previous = self.one("SELECT * FROM applications WHERE id=?", (app_id,))
         if previous and previous["submission_confirmation_seen"]:
             if fields.get("submission_confirmation_seen") == 0 or fields.get("application_state", "SUBMITTED") != "SUBMITTED":
                 raise ValueError("Confirmed submission cannot be erased by verification outcome")
+        # diagnostics_at describes the last changed observation, not a heartbeat.
+        # Explicit timestamp-only diagnostics still persist (e.g. handoff capture).
+        compared = fields.keys() - {'diagnostics_at'} or fields.keys()
+        if previous and all(previous[key] == fields[key] for key in compared):
+            return
         self.execute("UPDATE applications SET " + ",".join(f"{k}=?" for k in fields) + ",updated_at=? WHERE id=?", (*fields.values(), now(), app_id))
 
     def ingest(self, listing, config):
@@ -318,7 +405,7 @@ class Database(ListingStore):
                     self.execute("INSERT INTO job_sources(job_id,source_name,source_url,source_job_id,first_seen,last_seen) VALUES (?,?,?,?,?,?)",
                         (job_id,listing.source,listing.url,source_id,timestamp,timestamp))
             self.observe_listing(key,url,listing.source,posted,fresh,status,job_id=job_id,
-                date_source=date_source,confidence=confidence,duplicate=bool(previous),reference=timestamp,culled_at=culled)
+                date_source=date_source,confidence=confidence,duplicate=bool(previous),reference=timestamp,culled_at=culled,days=days)
             self.execute('INSERT OR IGNORE INTO listing_aliases(source,source_job_id,identity_key) VALUES (?,?,?)', (listing.source,source_id,key))
         self.last_ingest_result = dict(raw_results=1,already_known=int(bool(previous)),older_than_window=int(fresh=='STALE'),
             unknown_date=int(fresh=='UNKNOWN_DATE'),closed=int(status in {'CLOSED','REMOVED'}),
@@ -378,7 +465,7 @@ class Database(ListingStore):
         if target is not None and application_id != target:
             return None
         if application_id is None:
-            self.cleanup_stale_listings()
+            self.maintain_listings()
         elif not self.one('SELECT id FROM applications WHERE id=?', (application_id,)) or not self.guard_listing(application_id):
             # Explicit runs must not perform maintenance on unrelated listings.
             return None
@@ -455,10 +542,12 @@ class Database(ListingStore):
             JOIN jobs j ON j.id=a.job_id WHERE a.id!=? AND
             (a.submit_intent_at IS NOT NULL OR a.submission_confirmation_seen=1 OR
              a.status IN ('SUBMITTED','ALREADY_APPLIED','SUBMITTING','MANUAL_REVIEW'))""", (app_id,)):
-            if job_identity(app["canonical_url"]) == job_identity(other["canonical_url"]) or (
+            if job_identity(app["canonical_url"]) == job_identity(other["canonical_url"]):
+                return dict(other, identity_match='exact_protected_duplicate')
+            if (not ats_identity(app['canonical_url'])[1] or not ats_identity(other['canonical_url'])[1]) and (
                 normalize(app["company"]) == normalize(other["company"]) and
                 normalize(app["title"]) == normalize(other["title"]) and app["ats"] == other["ats"]):
-                return other
+                return dict(other, identity_match='ambiguous_legacy_identity')
         # Imported records can outlive their original database. Consult the
         # central history API so a prior submission cannot be missed after migration.
         for other in self.history.find_by_url(app['canonical_url']):
@@ -469,11 +558,18 @@ class Database(ListingStore):
                             status=other.get('status', other['application_state']))
         return None
 
+    @atomic_mutation
     def question(self, app_id, q, reason=""):
+        from .field_mapping import describe
+        descriptor = describe(q, self.application(app_id))
+        # Engine supplies the effective policy-bound signature; direct callers use defaults.
+        q.scope = descriptor.scope
+        semantic = descriptor.semantic_key
+        digest = descriptor.signature
         stamp = now()
         row = self.one("SELECT * FROM questions WHERE application_id=? AND field_key=?", (app_id, q.key))
         signature = (q.label, q.kind, json.dumps(q.options), int(q.required), q.max_length, q.scope)
-        if row and (row["raw_question"], row["field_type"], row["options"], row["required"], row["max_length"], row["scope"]) == signature:
+        if row and (row["raw_question"], row["field_type"], row["options"], row["required"], row["max_length"], row["scope"]) == signature and row['question_signature'] == digest:
             return row
         self.execute("""INSERT INTO questions(application_id,field_key,raw_question,normalized_question,field_type,options,required,
             max_length,scope,status,reason,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)
@@ -482,14 +578,28 @@ class Database(ListingStore):
             required=excluded.required,max_length=excluded.max_length,scope=excluded.scope,status='PENDING',answer=NULL,
             answer_source=NULL,confidence=NULL,reason=excluded.reason,updated_at=excluded.updated_at""",
             (app_id, q.key, q.label, normalize(q.label), q.kind, json.dumps(q.options), q.required, q.max_length, q.scope, reason, stamp, stamp))
+        self.execute('UPDATE questions SET semantic_key=?,question_signature=?,field_policy=?,min_selections=?,max_selections=?,answer_provenance=NULL WHERE application_id=? AND field_key=?',
+                     (semantic, digest, q.policy or descriptor.policy, q.min_selections, q.max_selections, app_id, q.key))
         return self.one("SELECT * FROM questions WHERE application_id=? AND field_key=?", (app_id, q.key))
 
+    @atomic_mutation
     def save_answer(self, question_id, answer, verified=False):
         q = self.one("SELECT * FROM questions WHERE id=?", (question_id,))
         if not q:
             raise ValueError("Question not found")
-        self.execute("UPDATE questions SET answer=?,answer_source=?,confidence=?,status='ANSWERED',updated_at=? WHERE id=?",
-                     (json.dumps(answer.value), answer.source, answer.confidence, now(), question_id))
+        from dataclasses import asdict
+        from .answers import record_answer_use
+        data = asdict(answer)
+        for key in ('value', 'source', 'confidence'):
+            data.pop(key)
+        data['signature'] = answer.signature or q['question_signature']
+        data['semantic_key'] = answer.semantic_key or q['semantic_key']
+        data['scope'] = answer.scope or q['scope']
+        if verified:
+            data['verified'] = True
+        self.execute("UPDATE questions SET answer=?,answer_source=?,confidence=?,answer_provenance=?,status='ANSWERED',updated_at=? WHERE id=?",
+                     (json.dumps(answer.value), answer.source, answer.confidence, json.dumps(data), now(), question_id))
+        record_answer_use(self, q['application_id'], answer)
         if verified:
             self.execute("""INSERT INTO known_answers(normalized_question,scope,answer,verified,source,created_at)
                 VALUES (?,?,?,1,?,?) ON CONFLICT(normalized_question,scope) DO UPDATE SET answer=excluded.answer,
@@ -498,6 +608,8 @@ class Database(ListingStore):
             stored = self.one('SELECT id FROM known_answers WHERE normalized_question=? AND scope=?', (q['normalized_question'],q['scope']))
             self.set_setting('known_answer_signature:' + str(stored['id']),
                              answer_signature(q['raw_question'],q['field_type'],json.loads(q['options'])))
+            self.execute('UPDATE known_answers SET concept=?,question_signature=?,provenance=? WHERE id=?',
+                         (q['semantic_key'], q['question_signature'], json.dumps(data), stored['id']))
 
     def bind_url(self, app_id, url):
         app = self.application(app_id)

@@ -244,11 +244,17 @@ class CursorController:
             # Never dispatch a coordinate from an obsolete viewport. Element moves
             # re-resolve; point moves/drags fail closed because their destination
             # cannot be safely inferred in the new coordinate system.
-            if await self._viewport() != viewport:
+            if target and not dragging:
+                geometry = await self._geometry()
+                current_viewport = tuple(self._geometry_snapshot[0][1][1:3])
+            else:
+                geometry = None
+                current_viewport = await self._viewport()
+            if current_viewport != viewport:
                 if target and not dragging:
                     return False
                 raise TargetUnstableError("Viewport changed during movement")
-            if target and not dragging and await self._geometry() != target.geometry_generation:
+            if target and not dragging and geometry != target.geometry_generation:
                 return False
             if (time.monotonic()-last_check)*1000 >= self.config.revalidation_interval_ms:
                 await self._guard(generation)

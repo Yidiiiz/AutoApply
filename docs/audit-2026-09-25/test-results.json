@@ -1,0 +1,226 @@
+{
+  "baseline": {
+    "tests": 631,
+    "failures": 9,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 622,
+    "junit_seconds": 667.858,
+    "console_seconds": 668.11,
+    "started_at": "2026-09-25T00:21:44.432026-04:00",
+    "exit_code": 1,
+    "failed_cases": [
+      {
+        "case": "tests.test_dropdown_browser::test_open_async_city_menu_is_committed_without_toggle",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      },
+      {
+        "case": "tests.test_manual_submission_retirement::test_retired_application_blocks_before_database_or_browser_work",
+        "message": "AttributeError: 'Engine' object has no attribute 'fill_only'"
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_discovery_fill_and_transition",
+        "message": "autoapply.applications.UnsupportedForm: Cannot verify custom dropdown selection: {\"state\": {\"label\": \"City\", \"control_count\": 1, \"expanded\": \"false\", \"enabled\": true, \"visible_options\": [\"Choose\", \"United States\"], \"exact_options\": 0}, \"error\": \"AssertionError\"}"
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_normal_engine_two_steps_and_one_confirmed_submit",
+        "message": "AssertionError: KeyError during form page 2\nassert 'MANUAL_REVIEW' == 'SUBMITTED'\n  \n  - SUBMITTED\n  + MANUAL_REVIEW"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_replaced_control_delayed_options_hidden_duplicate_and_commit",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_missing_option_reports_state_without_click",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_native_select",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_multiselect_chip_keeps_menu_open[True]",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_multiselect_chip_keeps_menu_open[False]",
+        "message": "playwright._impl._errors.Error: BrowserType.launch_persistent_context: spawn EPERM"
+      }
+    ],
+    "slowest_cases_including_setup_and_teardown": [
+      {
+        "case": "tests.test_fill_batch::test_discovery_never_opens_tabs[100]",
+        "seconds": 43.486
+      },
+      {
+        "case": "tests.test_browser::test_autosubmit_off_revalidates_before_retry",
+        "seconds": 26.691
+      },
+      {
+        "case": "tests.test_input_navigation::test_restart_reconstructs_only_resolved_input",
+        "seconds": 25.899
+      },
+      {
+        "case": "tests.test_submission_probe::test_production_flow_records_one_click_request_and_confirmation",
+        "seconds": 24.621
+      },
+      {
+        "case": "tests.test_input_navigation::test_submit_archive_has_no_orphan_screenshot_folder",
+        "seconds": 23.802
+      },
+      {
+        "case": "tests.test_browser::test_full_flow_pauses_answers_uploads_submits_and_archives",
+        "seconds": 23.662
+      },
+      {
+        "case": "tests.test_narratives::test_production_fills_narrative_and_skips_optional_demographic[True]",
+        "seconds": 22.581
+      },
+      {
+        "case": "tests.test_narratives::test_production_fills_narrative_and_skips_optional_demographic[False]",
+        "seconds": 22.353
+      },
+      {
+        "case": "tests.test_browser::test_engine_presubmit_challenge_resumes_without_navigation",
+        "seconds": 15.98
+      },
+      {
+        "case": "tests.test_browser::test_uncertain_submission_never_retried",
+        "seconds": 14.577
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_unobserved_transition_stops",
+        "seconds": 12.511
+      },
+      {
+        "case": "tests.test_browser::test_listing_guard_immediately_before_submit[stale]",
+        "seconds": 12.187
+      },
+      {
+        "case": "tests.test_fill_batch::test_discovery_never_opens_tabs[57]",
+        "seconds": 12.058
+      },
+      {
+        "case": "tests.test_submission_probe::test_production_silent_button_does_not_count_screenshot_as_effect",
+        "seconds": 11.928
+      },
+      {
+        "case": "tests.test_browser::test_fill_only_keeps_ready_tab_and_refuses_fanout",
+        "seconds": 11.006
+      },
+      {
+        "case": "tests.test_browser::test_listing_guard_immediately_before_submit[unknown]",
+        "seconds": 10.594
+      },
+      {
+        "case": "tests.test_submission_probe::test_confirmed_result_persists_before_post_click_screenshot_error",
+        "seconds": 9.813
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_discovery_fill_and_transition",
+        "seconds": 9.403
+      },
+      {
+        "case": "tests.test_browser::test_listing_guard_immediately_before_submit[closed]",
+        "seconds": 8.336
+      },
+      {
+        "case": "tests.test_browser::test_pause_just_before_submission_prevents_click",
+        "seconds": 7.821
+      }
+    ]
+  },
+  "failure-diagnostics": {
+    "tests": 9,
+    "failures": 5,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 4,
+    "junit_seconds": 38.064,
+    "console_seconds": 39.91,
+    "started_at": "2026-09-25T00:34:56.883798-04:00",
+    "exit_code": 1,
+    "failed_cases": [
+      {
+        "case": "tests.test_dropdown_browser::test_open_async_city_menu_is_committed_without_toggle",
+        "message": "autoapply.applications.UnsupportedForm: Cannot verify custom dropdown selection: {\"state\": {\"label\": \"Location (City)\", \"control_count\": 1, \"expanded\": \"false\", \"enabled\": true, \"visible_options\": [], \"exact_options\": 0}, \"error\": \"ValueError\"}"
+      },
+      {
+        "case": "tests.test_stable_combobox::test_replaced_control_delayed_options_hidden_duplicate_and_commit",
+        "message": "autoapply.combobox.DropdownStateError: Cannot verify custom dropdown selection: {\"state\": {\"label\": \"Example\", \"control_count\": 1, \"expanded\": \"false\", \"enabled\": true, \"visible_options\": [], \"exact_options\": 0}, \"error\": \"ValueError\"}"
+      },
+      {
+        "case": "tests.test_manual_submission_retirement::test_retired_application_blocks_before_database_or_browser_work",
+        "message": "AttributeError: 'Engine' object has no attribute 'fill_only'"
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_discovery_fill_and_transition",
+        "message": "autoapply.applications.UnsupportedForm: Cannot verify custom dropdown selection: {\"state\": {\"label\": \"City\", \"control_count\": 1, \"expanded\": \"false\", \"enabled\": true, \"visible_options\": [\"Choose\", \"United States\"], \"exact_options\": 0}, \"error\": \"AssertionError\"}"
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_normal_engine_two_steps_and_one_confirmed_submit",
+        "message": "AssertionError: KeyError during form page 2\nassert 'MANUAL_REVIEW' == 'SUBMITTED'\n  \n  - SUBMITTED\n  + MANUAL_REVIEW"
+      }
+    ],
+    "slowest_cases_including_setup_and_teardown": [
+      {
+        "case": "tests.test_dropdown_browser::test_open_async_city_menu_is_committed_without_toggle",
+        "seconds": 9.681
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_discovery_fill_and_transition",
+        "seconds": 9.069
+      },
+      {
+        "case": "tests.test_stable_combobox::test_replaced_control_delayed_options_hidden_duplicate_and_commit",
+        "seconds": 8.897
+      },
+      {
+        "case": "tests.test_smartrecruiters::test_normal_engine_two_steps_and_one_confirmed_submit",
+        "seconds": 6.648
+      },
+      {
+        "case": "tests.test_stable_combobox::test_missing_option_reports_state_without_click",
+        "seconds": 1.079
+      },
+      {
+        "case": "tests.test_stable_combobox::test_multiselect_chip_keeps_menu_open[False]",
+        "seconds": 0.842
+      },
+      {
+        "case": "tests.test_stable_combobox::test_multiselect_chip_keeps_menu_open[True]",
+        "seconds": 0.775
+      },
+      {
+        "case": "tests.test_stable_combobox::test_native_select",
+        "seconds": 0.743
+      },
+      {
+        "case": "tests.test_manual_submission_retirement::test_retired_application_blocks_before_database_or_browser_work",
+        "seconds": 0.001
+      }
+    ]
+  },
+  "instrumented_diagnosis": {
+    "tests": 3,
+    "passed": 0,
+    "failed": 3,
+    "console_seconds": 25.27,
+    "exit_code": 1,
+    "method": "Temporary pytest plugin logged state without changing return values; original source and tests unchanged.",
+    "observations": {
+      "two_dropdown_cases": {
+        "expanded": "false",
+        "value": true,
+        "invalid": false,
+        "closed": false
+      },
+      "smartrecruiters": {
+        "committed_count": 3,
+        "control_count": 1,
+        "missing_key": true
+      }
+    },
+    "log": ".tmp/audit-2026-09-25/instrumented-diagnostics.log"
+  }
+}

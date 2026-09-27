@@ -1,5 +1,7 @@
 import json
+import os
 from datetime import date
+from pathlib import Path
 
 import pytest
 import yaml
@@ -7,6 +9,14 @@ import yaml
 from autoapply.config import Config
 from autoapply.database import Database
 from autoapply.models import Listing
+
+
+@pytest.fixture(autouse=True)
+def local_test_browser(monkeypatch):
+    """Use the existing repo installation for temporary test profiles only."""
+    installed = Path(__file__).resolve().parents[1] / "data/private/playwright"
+    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ and installed.is_dir():
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(installed))
 
 
 @pytest.fixture
