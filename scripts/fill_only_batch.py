@@ -15,7 +15,7 @@ from autoapply.discord_bot import DiscordBot, chunks
 from autoapply.runtime import ProcessLock
 from autoapply.models import now
 from autoapply.submission_probe import SubmissionProbe
-from autoapply.fill_batch import EXCLUDED, MAX_ACTIVE_APPLICATION_TABS, BatchReport, discover, verify_safety, verify_reconstruction
+from autoapply.fill_batch import EXCLUDED, MAX_ACTIVE_APPLICATION_TABS, BatchReport, discover, verify_safety, BatchPolicy, finish_preparation
 from autoapply.jobs import eligibility
 from autoapply.batch_approval import ApprovedDestinations
 
@@ -59,7 +59,8 @@ class BatchBot(DiscordBot):
         except ValueError as exc:
             await message.channel.send(str(exc))
 
-async def run(config,db,report, candidate_ids=None, approval=None):
+async def run(config,db,report, candidate_ids=None, approval=None, *, policy=None):
+    policy = policy or BatchPolicy()
     verify_safety(db)
     if approval is None:
         raise RuntimeError('Destination-specific approval evidence required')
@@ -71,19 +72,24 @@ async def run(config,db,report, candidate_ids=None, approval=None):
     baseline={i:db.application(i) for i in EXCLUDED}
     bot=BatchBot(engine.control); bot.batch_ids=ids
     connection=None
-    original=SubmissionProbe.physical_click
-    SubmissionProbe.physical_click=forbidden_submit
     def save(result):
         rows=[]
         for i in ids:
             a=db.application(i)
-            rows.append({k:a[k] for k in ('id','company','title','ats','status','application_state','failure_reason','error_category','canonical_url','current_url','resume_sha256','eligibility_json')})
-        report.save(result=result,applications=rows,ready_count=sum(a['application_state']=='READY_FOR_MANUAL_SUBMIT' for a in rows),
+            row = {k:a[k] for k in ('id','company','title','ats','status','application_state','failure_reason','error_category','canonical_url','current_url','resume_sha256','eligibility_json')}
+            row['snapshot'] = engine.control.status_snapshot(i)
+            rows.append(row)
+        report.save(result=result,applications=rows,
+            ready_count=sum(a['snapshot']['readiness']=='LIVE_READY_FOR_MANUAL_SUBMIT' for a in rows),
+            prepared_count=sum(a['snapshot']['checkpoint'].get('readiness') in {'RECONSTRUCTABLE_CHECKPOINT','RECONSTRUCTION_VERIFIED'} for a in rows),
+            reconstruction_verified_count=sum(a['snapshot']['checkpoint'].get('readiness')=='RECONSTRUCTION_VERIFIED' for a in rows),
+            **engine.fill_invariant.snapshot(),
             applications_opened=engine.browser.application_tabs_opened,
             applications_filled=sum(bool(db.one("SELECT id FROM events WHERE application_id=? AND kind='LIVE_CONTROL_COMMITTED' AND created_at>=?",(i,report.data['started_at']))) for i in ids),
             skipped_ineligible=sum(a['status']=='INELIGIBLE' for a in rows),skipped_closed=sum(a['status']=='CLOSED' for a in rows),
             blocked_questions=sum(bool(db.one("SELECT id FROM questions WHERE application_id=? AND status='PENDING'",(i,))) for i in ids),
-            active_tab_count=len(engine.browser.context.pages) if engine.browser.context else 0,
+            active_tab_count=sum(not p.is_closed() for p in engine.browser.leases),
+            unexpected_popup_violations=engine.browser.unexpected_popup_violations,
             max_active_tabs_observed=engine.browser.max_tabs_observed,auto_submit=db.setting('auto_submit'),
             browser_pid=engine.browser.browser_pid,
             blocked_network_requests=approval.blocked,final_submission_requests_blocked=approval.final_requests_blocked,
@@ -93,8 +99,9 @@ async def run(config,db,report, candidate_ids=None, approval=None):
         await bot.wait_for_delivery(connection)
         user=await bot.fetch_user(bot.owner_id)
         db.set_setting('paused',False)
-        while report.data['ready_count']<5:
+        while report.data.get('prepared_count', 0)<policy.target_count:
             verify_safety(db)
+            engine.fill_invariant.check()
             engine.browser.check_tab_limit()
             if db.setting('paused') or engine.stop_event.is_set():
                 save('GLOBAL_WORKER_PAUSED'); break
@@ -115,6 +122,7 @@ async def run(config,db,report, candidate_ids=None, approval=None):
             print(json.dumps({'selected':app_id,'company':app['company'],'role':app['title']}),flush=True)
             await engine.process_one(app_id)
             engine.browser.check_tab_limit()
+            engine.fill_invariant.check()
             app=db.application(app_id)
             if app['submit_intent_at']: raise RuntimeError('UNEXPECTED_SUBMISSION_INTENT')
             save('PROCESSING')
@@ -127,17 +135,19 @@ async def run(config,db,report, candidate_ids=None, approval=None):
                 for piece in chunks(message): await user.send(piece)
                 db.event(app_id,'FILL_ONLY_DISCORD_INPUT_SENT','Exact unknown questions sent to configured owner')
             if app['application_state']=='READY_FOR_MANUAL_SUBMIT':
-                await verify_reconstruction(engine,app_id)
+                await finish_preparation(engine,app_id,verify=policy.verify_reconstruction)
+                engine.fill_invariant.check()
                 report.save(smoke_test='PASSED')
                 save('PROCESSING')
                 continue
             if app['error_category'] in {'EXTERNAL_EXECUTION_APPROVAL_REQUIRED','EXECUTION_APPROVAL_BLOCKED'}:
+                if report.data['smoke_test']=='NOT_STARTED': report.save(smoke_test='FAILED')
                 save('GLOBAL_EXECUTION_BLOCKER'); break
-            if eligibility(app,config.profile).eligible is True and report.data['smoke_test']=='NOT_STARTED':
+            if report.data['smoke_test']=='NOT_STARTED':
                 report.save(smoke_test='FAILED')
                 save('SMOKE_TEST_FAILED'); break
         else:
-            save('FIVE_READY')
+            save('TARGET_CHECKPOINTS_PREPARED')
     except Exception as exc:
         save('GLOBAL_FAILURE: '+str(exc))
         raise
@@ -153,12 +163,13 @@ async def run(config,db,report, candidate_ids=None, approval=None):
                 db.update_security(i,application_state='MANUAL_REQUIRED',session_preserved=0,
                     manual_action_required=1,manual_action_reason='Saved filled checkpoint; live session ended, reconstruction needs verification')
         await engine.close()
-        SubmissionProbe.physical_click=original
         save(report.data['result'])
         report.save(current_application_id=None,worker_finished_at=now())
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-reconstruction',action='store_true',help='Explicitly replay each prepared checkpoint once')
+    parser.add_argument('--target-count',type=int,default=5)
     parser.add_argument('--candidate-ids',type=int,nargs='+',help='Restrict this run to explicitly approved employer destinations')
     args=parser.parse_args()
     load_dotenv(ROOT/'.env')
@@ -182,7 +193,7 @@ if __name__=='__main__':
                 verify_safety(db)
                 report.save(result='PREFLIGHT_PASSED')
                 report.save(approval_evidence='data/private/fill-only-explicit-approval.json',approval_sha256=approval.source_sha256)
-                asyncio.run(run(config,db,report,args.candidate_ids,approval))
+                asyncio.run(run(config,db,report,args.candidate_ids,approval,policy=BatchPolicy(args.target_count,args.verify_reconstruction)))
             finally:
                 db.close()
     finally:

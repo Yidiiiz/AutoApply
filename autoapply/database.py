@@ -9,7 +9,9 @@ from .jobs import ats_identity, canonical_url, job_identity, normalize, priority
 from .listing_store import ListingStore
 from .freshness import extract_posting_date, freshness_state, parse_posted, utc, window
 from .models import FINAL, State, now
-from .retry import ErrorCategory, RetryPolicy
+from .retry import ErrorCategory
+from .lifecycle import Lifecycle, STATE_MAP
+from .retry import Failure, Delivery
 
 SECURITY_COLUMNS = {
     "application_state": "TEXT NOT NULL DEFAULT 'DISCOVERED'",
@@ -28,13 +30,6 @@ SECURITY_COLUMNS = {
     "manual_resume_allowed": "INTEGER NOT NULL DEFAULT 0",
 }
 
-STATE_MAP = {
-    "DISCOVERED": "DISCOVERED", "QUEUED": "DISCOVERED", "RETRY": "DISCOVERED",
-    "CHECKING": "OPENED", "APPLYING": "FILLING", "READY": "READY_TO_SUBMIT",
-    "SUBMITTING": "SUBMITTING", "SUBMITTED": "SUBMITTED", "ALREADY_APPLIED": "ALREADY_APPLIED",
-    "MANUAL_REVIEW": "MANUAL_REQUIRED", "NEEDS_INPUT": "MANUAL_REQUIRED", "AUTH_REQUIRED": "MANUAL_REQUIRED",
-}
-STATE_MAP.update({s: s for s in ('CLOSED', 'INVALID', 'INELIGIBLE', 'DUPLICATE', 'FAILED')})
 
 
 def atomic_mutation(method):
@@ -91,6 +86,9 @@ CREATE INDEX IF NOT EXISTS events_application ON events(application_id);
 CREATE INDEX IF NOT EXISTS job_sources_job ON job_sources(job_id);
 CREATE TABLE IF NOT EXISTS manual_requests (
  application_id INTEGER PRIMARY KEY REFERENCES applications(id), action TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS manual_commands (
+ id TEXT PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id), command TEXT NOT NULL,
+ state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result TEXT);
 """
 
 
@@ -109,6 +107,9 @@ class Database(ListingStore):
         self.conn.executescript(SCHEMA)
         # Additive answer metadata; unsigned legacy rows remain unknown/readable.
         for table, additions in {
+            'applications': {'attempt_started': 'INTEGER NOT NULL DEFAULT 0',
+                             'max_retries': 'INTEGER NOT NULL DEFAULT 3',
+                             'delivery_state': "TEXT NOT NULL DEFAULT 'NOT_STARTED'"},
             'questions': {'semantic_key': "TEXT DEFAULT ''", 'question_signature': "TEXT DEFAULT ''",
                           'field_policy': "TEXT DEFAULT ''", 'answer_provenance': 'TEXT',
                           'min_selections': 'INTEGER', 'max_selections': 'INTEGER'},
@@ -119,6 +120,10 @@ class Database(ListingStore):
             for name, definition in additions.items():
                 if name not in columns:
                     self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                    if table == 'applications' and name == 'attempt_started':
+                        # Pre-Phase-7 claims already consumed an attempt. Preserve that
+                        # conservative accounting when their work boundary is unknown.
+                        self.conn.execute("UPDATE applications SET attempt_started=1 WHERE attempts>0 AND status IN ('CHECKING','APPLYING','SUBMITTING')")
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS answer_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
             INSERT OR IGNORE INTO answer_revision VALUES (1,0);
@@ -320,20 +325,8 @@ class Database(ListingStore):
         self.execute("INSERT OR IGNORE INTO notifications(dedupe_key,payload,created_at) VALUES (?,?,?)",
                      (key, json.dumps(payload), now()))
 
-    @atomic_mutation
     def update_security(self, app_id, **fields):
-        if not fields or not fields.keys() <= SECURITY_COLUMNS.keys():
-            raise ValueError("Invalid security update")
-        previous = self.one("SELECT * FROM applications WHERE id=?", (app_id,))
-        if previous and previous["submission_confirmation_seen"]:
-            if fields.get("submission_confirmation_seen") == 0 or fields.get("application_state", "SUBMITTED") != "SUBMITTED":
-                raise ValueError("Confirmed submission cannot be erased by verification outcome")
-        # diagnostics_at describes the last changed observation, not a heartbeat.
-        # Explicit timestamp-only diagnostics still persist (e.g. handoff capture).
-        compared = fields.keys() - {'diagnostics_at'} or fields.keys()
-        if previous and all(previous[key] == fields[key] for key in compared):
-            return
-        self.execute("UPDATE applications SET " + ",".join(f"{k}=?" for k in fields) + ",updated_at=? WHERE id=?", (*fields.values(), now(), app_id))
+        return self.lifecycle.dimensions(app_id, **fields)
 
     def ingest(self, listing, config):
         import logging
@@ -437,126 +430,37 @@ class Database(ListingStore):
             raise ValueError(f"Application {app_id} not found")
         return row
 
-    @atomic_mutation
+    @property
+    def lifecycle(self):
+        if not hasattr(self, '_lifecycle'):
+            self._lifecycle = Lifecycle(self)
+        return self._lifecycle
+
     def transition(self, app_id, status, reason="", **fields):
-        app = self.application(app_id)
-        if app["status"] in FINAL and status != app["status"]:
-            raise ValueError("Cannot automatically reopen a final application")
-        if status == State.SUBMITTED and not fields.get("confirmation_text"):
-            raise ValueError("Submission requires positive confirmation evidence")
-        allowed = {"stage", "started_at", "submitted_at", "resume_used", "resume_sha256", "confirmation_text", "confirmation_url", "retry_at", "submit_intent_at", "eligibility_override"}
-        if not fields.keys() <= allowed:
-            raise ValueError("Invalid application update")
-        fields.update(status=str(status), updated_at=now(), failure_reason=reason)
-        self.execute("UPDATE applications SET " + ",".join(f"{k}=?" for k in fields) + " WHERE id=?", (*fields.values(), app_id))
-        self.execute("UPDATE jobs SET status=?,reason=? WHERE id=?", (str(status), reason, app["job_id"]))
-        self.event(app_id, str(status), reason)
-        security = {"application_state": STATE_MAP.get(str(status), "FAILED")}
-        if status in {State.SUBMITTED, State.ALREADY_APPLIED} and fields.get("confirmation_text"):
-            security.update(submission_confirmation_seen=1, submission_confirmation_reason=fields["confirmation_text"], retry_allowed=0)
-        elif status in FINAL or status in {State.MANUAL_REVIEW, State.SUBMITTING}:
-            security["retry_allowed"] = 0
-        self.update_security(app_id, **security)
+        # Compatibility for migrations and existing integrations; runtime uses lifecycle.
+        return self.lifecycle.transition(app_id, status, reason, legacy=True, **fields)
 
     def claim(self, application_id=None):
-        if application_id is not None and self.automation_retired(application_id):
-            return None
-        target = self.setting("controlled_application_id")
-        if target is not None and application_id != target:
-            return None
-        if application_id is None:
-            self.maintain_listings()
-        elif not self.one('SELECT id FROM applications WHERE id=?', (application_id,)) or not self.guard_listing(application_id):
-            # Explicit runs must not perform maintenance on unrelated listings.
-            return None
-        with self.transaction():
-            sql = """SELECT a.id FROM applications a JOIN jobs j ON j.id=a.job_id
-                WHERE j.listing_active=1 AND j.listing_status='ACTIVE' AND a.status IN ('QUEUED','RETRY') AND a.retry_allowed=1 AND a.submit_intent_at IS NULL AND (a.retry_at IS NULL OR a.retry_at<=?)
-                AND NOT EXISTS (SELECT 1 FROM settings s WHERE s.key='duplicate_submission_guard:' || a.id AND s.value NOT IN ('false','null','0'))
-                """
-            args = [now()]
-            if application_id is not None:
-                sql += " AND a.id=?"
-                args.append(application_id)
-            row = self.one(sql + " ORDER BY j.priority DESC,j.discovered_at,a.id LIMIT 1", args)
-            if not row:
-                return None
-            if not self.guard_listing(row["id"]):
-                return None
-            previous = self.application(row["id"])
-            self.transition(row["id"], State.CHECKING, started_at=previous["started_at"] or now(), stage="checking")
-            self.execute("UPDATE applications SET attempts=attempts+1 WHERE id=?", (row["id"],))
-            return self.application(row["id"])
+        return self.lifecycle.claim(application_id)
 
     def recover(self):
-        for row in self.rows("SELECT id FROM applications WHERE session_preserved=1 AND error_category!='INPUT_REQUIRED'"):
-            self.notify(f"lost-session:{row['id']}:{now()}", {"application_id": row["id"], "message": "Worker restarted; the prior live form session is unavailable. Automatic resubmission remains disabled. Check employer history."})
-        self.execute("UPDATE applications SET session_preserved=0 WHERE session_preserved=1")
-        for row in self.rows("SELECT id,submit_intent_at FROM applications WHERE status IN ('CHECKING','APPLYING','SUBMITTING')"):
-            state = State.MANUAL_REVIEW if row["submit_intent_at"] else State.RETRY
-            reason = "Submission may have completed; verify employer history before retry" if row["submit_intent_at"] else "Recovered interrupted pre-submit processing"
-            self.transition(row["id"], state, reason)
-            if row["submit_intent_at"]:
-                self.update_security(row["id"], application_state="UNKNOWN", manual_action_required=1,
-                                     manual_action_reason=reason, retry_allowed=0, error_category="SUBMISSION_UNKNOWN")
-            self.notify(f"recovery:{row['id']}:{now()}", {"application_id": row["id"], "message": reason})
+        return self.lifecycle.recover()
 
     def retry(self, app_id):
-        if self.automation_retired(app_id):
-            raise ValueError("User-reported submission permanently excludes this application from automation")
-        if not self.guard_listing(app_id):
-            raise ValueError("Listing is no longer eligible for new processing")
-        app = self.application(app_id)
-        if not app["retry_allowed"]:
-            raise ValueError("Automatic retry disabled. Use resume-manual with the preserved session or reconcile employer history.")
-        if app["submit_intent_at"]:
-            raise ValueError("Submission outcome is uncertain. Use reconcile after checking employer history.")
-        if app["status"] in {"CHECKING", "APPLYING", "SUBMITTING"}:
-            raise ValueError("Application is currently active")
-        if self.one("SELECT id FROM questions WHERE application_id=? AND status='PENDING'", (app_id,)):
-            raise ValueError("Answer or skip pending questions first")
-        self.transition(app_id, State.RETRY, "User requested retry", retry_at=None)
+        return self.lifecycle.retry(app_id)
 
     def fail(self, app_id, reason, max_retries, category=ErrorCategory.NETWORK_ERROR):
         app = self.application(app_id)
-        decision = RetryPolicy().decide(category, app["attempts"], max_retries, bool(app["submit_intent_at"]))
-        self.update_security(app_id, error_category=category, retry_allowed=int(decision.allowed))
-        if app["submit_intent_at"]:
-            self.transition(app_id, State.MANUAL_REVIEW, "Submission outcome uncertain: " + reason)
-        elif decision.allowed:
-            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=decision.delay)).isoformat()
-            self.transition(app_id, State.RETRY, reason, retry_at=retry_at)
-        else:
-            self.transition(app_id, State.FAILED, reason)
+        failure = reason if isinstance(reason, Failure) else Failure(category, reason,
+            stage=app['stage'], delivery=Delivery(app['delivery_state']))
+        return self.lifecycle.record_failure(app_id, failure, max_retries)
 
     def automation_retired(self, app_id):
         return bool(self.setting(f"duplicate_submission_guard:{app_id}", False))
 
     def submission_conflict(self, app_id):
-        app = self.application(app_id)
-        if self.automation_retired(app_id):
-            return app
-        if app["submit_intent_at"] or app["submission_confirmation_seen"]:
-            return app
-        for other in self.rows("""SELECT a.*,j.company,j.title,j.ats,j.canonical_url FROM applications a
-            JOIN jobs j ON j.id=a.job_id WHERE a.id!=? AND
-            (a.submit_intent_at IS NOT NULL OR a.submission_confirmation_seen=1 OR
-             a.status IN ('SUBMITTED','ALREADY_APPLIED','SUBMITTING','MANUAL_REVIEW'))""", (app_id,)):
-            if job_identity(app["canonical_url"]) == job_identity(other["canonical_url"]):
-                return dict(other, identity_match='exact_protected_duplicate')
-            if (not ats_identity(app['canonical_url'])[1] or not ats_identity(other['canonical_url'])[1]) and (
-                normalize(app["company"]) == normalize(other["company"]) and
-                normalize(app["title"]) == normalize(other["title"]) and app["ats"] == other["ats"]):
-                return dict(other, identity_match='ambiguous_legacy_identity')
-        # Imported records can outlive their original database. Consult the
-        # central history API so a prior submission cannot be missed after migration.
-        for other in self.history.find_by_url(app['canonical_url']):
-            if other['application_id'] != str(app_id) and (
-                other.get('submit_intent_at') or other.get('submission_confirmation_seen') or
-                other['application_state'] in {'SUBMITTED', 'ALREADY_APPLIED', 'SUBMITTING', 'MANUAL_REQUIRED', 'UNKNOWN'}):
-                return dict(other, id=other.get('id', other['application_id']),
-                            status=other.get('status', other['application_state']))
-        return None
+        from .conflicts import submission_conflict
+        return submission_conflict(self, app_id)
 
     @atomic_mutation
     def question(self, app_id, q, reason=""):

@@ -132,7 +132,7 @@ def test_retry_categories_bounded_and_no_post_intent_retry():
     policy = RetryPolicy()
     for category in E:
         decision = policy.decide(category, 1, 3)
-        assert decision.allowed == (category in {E.NETWORK_ERROR, E.SITE_ERROR, E.RATE_LIMIT})
+        assert decision.allowed == (category in {E.NETWORK_ERROR, E.SITE_ERROR, E.RATE_LIMIT, E.PROCESS_INTERRUPTED})
         assert not policy.decide(category, 1, 3, submitted_intent=True).allowed
         assert not policy.decide(category, 4, 3).allowed
     assert 60 <= policy.decide(E.NETWORK_ERROR, 1, 3).delay <= 65
@@ -295,7 +295,8 @@ async def test_rate_limited_before_submit_uses_backoff(config, db, listing, secu
     await page.set_content('<h1>Too Many Requests</h1>')
     assert await engine.security_gate(1, page)
     app = db.application(1)
-    assert app["application_state"] == "RATE_LIMITED" and app["retry_allowed"] and app["retry_at"]
+    assert app["application_state"] == "RATE_LIMITED" and not app["retry_allowed"] and not app["retry_at"]
+    assert app["manual_action_required"]
 
 
 @pytest.mark.parametrize('error,category', [(TimeoutError(), 'NETWORK_ERROR'), (SiteError(), 'SITE_ERROR')])

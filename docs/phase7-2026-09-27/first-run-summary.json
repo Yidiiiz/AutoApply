@@ -1,0 +1,11 @@
+{
+  "total": 930,
+  "baseline_ids_present": 851,
+  "baseline_passed": 849,
+  "new_passed": 79,
+  "nonpassing": {
+    "tests/test_freshness.py::test_stale_pending_questions_do_not_reenter_discovery_outbox": "failure",
+    "tests/test_input_navigation.py::test_restart_reconstructs_only_resolved_input": "failure"
+  },
+  "missing": []
+}

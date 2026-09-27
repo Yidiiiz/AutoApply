@@ -227,7 +227,8 @@ async def test_fill_only_keeps_ready_tab_and_refuses_fanout(config, db, browser,
     from autoapply.fill_batch import verify_reconstruction
     record = await verify_reconstruction(engine, 1)
     assert record['reconstruction_verified']
-    assert db.application(1)['application_state'] == 'READY_FOR_MANUAL_SUBMIT'
+    assert record['readiness'] == 'RECONSTRUCTION_VERIFIED'
+    assert db.application(1)['application_state'] == 'READY_TO_SUBMIT'
     assert not db.application(1)['session_preserved']
     assert not engine.retained_pages
     assert not site[1]

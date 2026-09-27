@@ -5,6 +5,8 @@ from enum import StrEnum
 
 
 class ErrorCategory(StrEnum):
+    STEP_TRANSITION_UNKNOWN = 'STEP_TRANSITION_UNKNOWN'
+    PROCESS_INTERRUPTED = 'PROCESS_INTERRUPTED'
     PRE_SUBMIT_TARGET_UNSTABLE = 'PRE_SUBMIT_TARGET_UNSTABLE'
     PRE_SUBMIT_DROPDOWN_STATE_FAILURE = 'PRE_SUBMIT_DROPDOWN_STATE_FAILURE'
     SUBMIT_ELEMENT_OBSTRUCTED = "SUBMIT_ELEMENT_OBSTRUCTED"
@@ -40,14 +42,35 @@ class ErrorCategory(StrEnum):
 class RetryDecision:
     allowed: bool
     delay: float = 0
+    reason: str = ''
+
+
+class Delivery(StrEnum):
+    NOT_STARTED = 'NOT_STARTED'
+    POSSIBLY_DELIVERED = 'POSSIBLY_DELIVERED'
+    OBSERVED = 'OBSERVED'
+
+
+@dataclass(frozen=True)
+class Failure:
+    category: str
+    reason: str
+    operation: str = 'application'
+    stage: str = ''
+    delivery: Delivery = Delivery.NOT_STARTED
+    retryable: bool = True
 
 
 class RetryPolicy:
-    retryable = {ErrorCategory.NETWORK_ERROR, ErrorCategory.SITE_ERROR, ErrorCategory.RATE_LIMIT}
+    retryable = {ErrorCategory.NETWORK_ERROR, ErrorCategory.SITE_ERROR, ErrorCategory.RATE_LIMIT,
+                 ErrorCategory.PROCESS_INTERRUPTED}
 
-    def decide(self, category, attempts, max_retries, submitted_intent=False):
-        if submitted_intent or category not in self.retryable or attempts > max_retries:
-            return RetryDecision(False)
+    def decide(self, category, attempts, max_retries, submitted_intent=False, *, held=False):
+        failure = category if isinstance(category, Failure) else Failure(category, '')
+        if (submitted_intent or held or not failure.retryable or
+                failure.delivery != Delivery.NOT_STARTED or failure.category not in self.retryable
+                or attempts > max_retries):
+            return RetryDecision(False, reason='Intent, hold, delivery uncertainty, category or exhausted budget')
         # Both exponent and final delay are bounded, including jitter.
         delay = min(60 * 2 ** min(10, max(0, attempts - 1)), 1800)
         return RetryDecision(True, min(1800, delay + random.uniform(0, 5)))

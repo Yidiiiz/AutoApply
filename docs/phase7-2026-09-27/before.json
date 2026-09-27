@@ -1,0 +1,15 @@
+{
+  "claim": {
+    "application_updates": 3,
+    "history_syncs": 1
+  },
+  "failure": {
+    "retry_decisions": 1,
+    "application_updates": 3,
+    "history_syncs": 2
+  },
+  "recovery": {
+    "application_updates": 3,
+    "history_syncs": 1
+  }
+}

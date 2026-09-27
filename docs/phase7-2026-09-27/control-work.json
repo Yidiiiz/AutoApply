@@ -1,0 +1,618 @@
+{
+  "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[False]": {
+    "counts": {
+      "protected_set_scans": 9,
+      "processing_passes": 3,
+      "application_opens": 3,
+      "navigations": 3,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[True]": {
+    "counts": {
+      "protected_set_scans": 15,
+      "processing_passes": 6,
+      "application_opens": 3,
+      "navigations": 6,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Security check</h1><p>Verify you are human</p>-BOT_CHALLENGE]": {
+    "counts": {
+      "processing_passes": 1,
+      "protected_set_scans": 1,
+      "application_opens": 1,
+      "navigations": 1,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Software Engineering Intern Summer 2027</h1>\\n<p>Software engineering internship for undergraduate students in New York, NY.</p>\\n<form><label>Unknown factual identifier<input name=\"unknown\" required></label>\\n<label>Resume<input name=\"resume\" type=\"file\" required></label><button type=\"submit\">Submit application</button></form>\\n<script>window.finalClicks=0;document.querySelector('button').onclick=()=>window.finalClicks++;\\ndocument.querySelector('form').onsubmit=e=>{e.preventDefault();fetch('/submit',{method:'POST'})}</script>-INPUT_REQUIRED]": {
+    "counts": {
+      "processing_passes": 1,
+      "protected_set_scans": 1,
+      "application_opens": 1,
+      "navigations": 1,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Software Engineering Intern Summer 2027</h1>\\n<p>Software engineering internship for undergraduate students in New York, NY.</p>\\n<form><label>First Name<input name=\"first_name\" type=\"color\" required></label>\\n<label>Resume<input name=\"resume\" type=\"file\" required></label><button type=\"submit\">Submit application</button></form>\\n<script>window.finalClicks=0;document.querySelector('button').onclick=()=>window.finalClicks++;\\ndocument.querySelector('form').onsubmit=e=>{e.preventDefault();fetch('/submit',{method:'POST'})}</script>-UNSUPPORTED_CONTROL]": {
+    "counts": {
+      "processing_passes": 1,
+      "protected_set_scans": 1,
+      "application_opens": 1,
+      "navigations": 1,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_whole_run_intent_violation_is_detected": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 1,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_final_request_is_blocked_and_latched": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 1
+    }
+  },
+  "tests/test_phase7_fill.py::test_specialized_runner_smoke_gate[False-2]": {
+    "counts": {
+      "protected_set_scans": 3,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_specialized_runner_smoke_gate[False-3]": {
+    "counts": {
+      "protected_set_scans": 3,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_specialized_runner_smoke_gate[True-2]": {
+    "counts": {
+      "protected_set_scans": 5,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_specialized_runner_smoke_gate[True-3]": {
+    "counts": {
+      "protected_set_scans": 5,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_reconstruction_failure_never_claims_verified": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_fill.py::test_actual_final_click_is_observed_and_stops_run": {
+    "counts": {
+      "application_opens": 1,
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 1,
+      "employer_submission_requests": 0,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_fill.py::test_completed_final_request_is_counted": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": {
+      "final_submit_clicks": 0,
+      "employer_submission_requests": 1,
+      "submission_intents_created": 0,
+      "submission_requests_blocked": 0
+    }
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[QUEUED-CHECKING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[CHECKING-APPLYING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[APPLYING-NEEDS_INPUT]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[APPLYING-READY]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[READY-SUBMITTING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[SUBMITTING-SUBMITTED]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[SUBMITTING-MANUAL_REVIEW]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[FAILED-RETRY]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_transition_policy[RETRY-CHECKING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_forbidden_transitions[QUEUED-APPLYING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_forbidden_transitions[FAILED-APPLYING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_forbidden_transitions[SUBMITTED-QUEUED]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_forbidden_transitions[SUBMITTED-APPLYING]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_forbidden_transitions[INELIGIBLE-RETRY]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[NETWORK_ERROR-NOT_STARTED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[NETWORK_ERROR-POSSIBLY_DELIVERED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[NETWORK_ERROR-OBSERVED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[SITE_ERROR-NOT_STARTED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[SITE_ERROR-POSSIBLY_DELIVERED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[SITE_ERROR-OBSERVED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[RATE_LIMIT-NOT_STARTED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[RATE_LIMIT-POSSIBLY_DELIVERED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[RATE_LIMIT-OBSERVED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[STEP_TRANSITION_UNKNOWN-NOT_STARTED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[STEP_TRANSITION_UNKNOWN-POSSIBLY_DELIVERED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_typed_delivery_decision[STEP_TRANSITION_UNKNOWN-OBSERVED]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[manual]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[security]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[controlled]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[retired]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[intent]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_holds_override_retry[confirmed]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_restart_budget_counts_work_not_startups": {
+    "counts": {
+      "retry_decisions": 3,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_crash_after_possible_delivery_holds[False]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_crash_after_possible_delivery_holds[True]": {
+    "counts": {
+      "protected_set_scans": 1,
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_reconciliation_retains_intent_evidence[False]": {
+    "counts": {
+      "retry_decisions": 2,
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_reconciliation_retains_intent_evidence[True]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_atomic_hold_rolls_back_all_dimensions": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_persisted_flags_do_not_prove_live_readiness": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_cli_discord_same_envelope[resume 1]": {
+    "counts": {
+      "command_parses": 2
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_cli_discord_same_envelope[resume-manual 1]": {
+    "counts": {
+      "command_parses": 2
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_cli_discord_same_envelope[inspect-manual 1]": {
+    "counts": {
+      "command_parses": 2
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[None-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[None-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[wrong-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[wrong-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[session-A-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_token_parity[session-A-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_claim_crash_has_evidence_and_never_replays": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_stale_command_records_failure_without_browser": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_exact_identity_distinct_tenants_and_requisitions": {
+    "counts": {
+      "protected_set_scans": 2,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_normal_resume_never_refreshes_live_classes": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[answer-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[answer-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[skip-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[skip-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[stop-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[stop-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[inspect-command]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[inspect-route]": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[reconcile-command]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_other_manual_commands_share_semantics[reconcile-route]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[{bad-json]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[[]]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[{\"action\":\"inspect\",\"id\":[]}]": {
+    "counts": {
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_resolved_answers_cannot_manufacture_retry_budget": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_controlled_missing_token_does_not_resolve_facts": {
+    "counts": {
+      "command_parses": 1
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_ambiguous_next_cannot_inherit_prior_resume_permission[False]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  },
+  "tests/test_phase7_lifecycle.py::test_ambiguous_next_cannot_inherit_prior_resume_permission[True]": {
+    "counts": {
+      "retry_decisions": 1,
+      "command_parses": 0
+    },
+    "last_invariant": null
+  }
+}

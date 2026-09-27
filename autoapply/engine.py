@@ -19,9 +19,12 @@ from .models import Answer, Question, State, now
 from .sources import BrowserJobSource, scan_github
 from .handoff import ManualHandoffManager, VERIFICATION
 from .security import PreSubmitState, SubmissionClassifier, safe_url
-from .retry import ErrorCategory, SiteError
+from .retry import ErrorCategory, SiteError, Failure, Delivery
+from .manual import ManualCommands
 from .scrolling import NavigationError
 from .submission_probe import SubmissionProbe
+from .cursor.types import TargetUnstableError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 log = logging.getLogger("autoapply")
 
@@ -39,18 +42,35 @@ class Engine:
         self.handoff = ManualHandoffManager(config, db, self.browser)
         self.processing_lock = asyncio.Lock()
         self.fill_only = fill_only
+        self.db.lifecycle.fill_only = fill_only
         if fill_only:
             from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
             self.browser.max_active_application_tabs = MAX_ACTIVE_APPLICATION_TABS
         self.retained_pages = {}
+        self.control.live_page = lambda app_id: self.handoff.pages.get(app_id) or self.retained_pages.get(app_id)
         self.resume_snapshot = None
+        self.fill_invariant = None
+        if fill_only:
+            from .fill_batch import FillOnlyInvariant
+            self.fill_invariant = FillOnlyInvariant(db)
+            self.browser.fill_invariant = self.fill_invariant
 
     def interrupted(self, app_id):
         if self.fill_only:
+            self.ensure_fill_policy()
             from .fill_batch import verify_safety
             verify_safety(self.db)
+            self.fill_invariant.check()
             self.browser.check_tab_limit()
         return self.stop_event.is_set() or self.db.setting("paused", False) or self.db.application(app_id)["status"] not in {"CHECKING", "APPLYING", "READY"}
+
+    def ensure_fill_policy(self):
+        if self.fill_only and self.fill_invariant is None:
+            from .fill_batch import FillOnlyInvariant, MAX_ACTIVE_APPLICATION_TABS
+            self.fill_invariant = FillOnlyInvariant(self.db)
+            self.browser.fill_invariant = self.fill_invariant
+            self.browser.max_active_application_tabs = MAX_ACTIVE_APPLICATION_TABS
+            self.db.lifecycle.fill_only = True
 
     def adapter_event(self, app_id, kind, detail):
         """Persist semantic progress, never browser handles or applicant values."""
@@ -62,9 +82,12 @@ class Engine:
                 state['stage'] = kind
             if kind == 'STEP_DISCOVERED':
                 state['inventory'] = detail
+            if kind == 'STEP_NEXT_INTENT':
+                self.db.lifecycle.delivery(app_id, Delivery.POSSIBLY_DELIVERED)
             if kind == 'STEP_NEXT_CLICK_DELIVERED':
                 state['next_clicks'] += 1
             if kind == 'STEP_ADVANCED':
+                self.db.lifecycle.delivery(app_id, Delivery.NOT_STARTED)
                 state['step'] += 1
                 state.pop('inventory', None)
             if kind == 'STEP_NEXT_FAILURE':
@@ -82,7 +105,7 @@ class Engine:
             self.db.mark_listing_closed(self.db.application(app_id)["job_id"])
             reason = "LISTING_CLOSED: " + reason
         with self.db.transaction():
-            self.db.transition(app_id, state, reason, **evidence)
+            self.db.lifecycle.transition(app_id, state, reason, **evidence)
             self.db.event(app_id, "hold", reason)
 
     def daily_count(self):
@@ -126,7 +149,7 @@ class Engine:
                 self.db.event(None, "source_error", name + ": " + type(exc).__name__)
                 self.db.notify("source:" + name, {"message": f"{name} scan failed. Restore authentication or inspect source layout."})
         for row in self.db.rows("SELECT id FROM applications WHERE stage='' AND status IN ('INVALID','CLOSED','NEEDS_INPUT')"):
-            self.db.execute("UPDATE applications SET stage='discovery' WHERE id=?", (row["id"],))
+            self.db.lifecycle.metadata(row["id"], stage="discovery")
         for row in self.db.rows("SELECT DISTINCT q.application_id FROM questions q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id WHERE j.listing_active=1 AND q.status='PENDING' AND a.status='NEEDS_INPUT'"):
             self.handoff.notify(row['application_id'], "Required information is pending")
         log.info("DISCOVERY COMPLETE: %s", counts)
@@ -157,7 +180,7 @@ class Engine:
                 self.db.fail(app_id, result.security.message, self.config["processing"]["max_retries"], ErrorCategory.RATE_LIMIT)
                 self.db.update_security(app_id, application_state="RATE_LIMITED")
                 await self.handoff.diagnostics(app_id, page)
-                self.db.notify(f"rate:{app_id}:{now()}", {"application_id": app_id, "message": "Rate limited; bounded backoff applies only before submission."})
+                self.db.notify(f"rate:{app_id}:{now()}", {"application_id": app_id, "message": "Rate limited; the security hold prevents automatic retry."})
             else:
                 await self.handoff.request(app_id, page, result.security.message, result.security.category)
             return True
@@ -166,8 +189,7 @@ class Engine:
     async def confirm(self, app_id, page, evidence):
         app = self.db.application(app_id)
         if not app["submission_confirmation_seen"]:
-            self.db.transition(app_id, State.SUBMITTED, confirmation_text=evidence,
-                confirmation_url=safe_url(page.url), submitted_at=now(), stage="confirmed")
+            self.db.lifecycle.record_confirmation(app_id, evidence, safe_url(page.url))
             self.db.notify(f"submitted:{app_id}", {"application_id": app_id, "message": f"APPLICATION SUBMITTED - {app['company']} #{app_id}\n{app['title']}\nEmployer confirmation received."})
             log.info("[SUBMIT] Confirmation detected application=%s", app_id)
 
@@ -220,6 +242,7 @@ class Engine:
             await self.browser.wait_for_change(page, marker, min(500, (deadline - time.monotonic()) * 1000))
 
     async def process_one(self, application_id=None):
+        self.ensure_fill_policy()
         async with self.processing_lock:
             if self.fill_only:
                 from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
@@ -227,14 +250,21 @@ class Engine:
                 if self.retained_pages or self.handoff.pages:
                     raise RuntimeError('BATCH_TAB_LIMIT_VIOLATION: release previous application first')
                 self.browser.check_tab_limit(opening=True)
+                self.fill_invariant.check()
             target = self.db.setting("controlled_application_id")
             if target is not None and application_id != target:
                 return False
             if self.handoff.pages and not self.fill_only:
                 return False
-            return await self._process_one(application_id)
+            result = await self._process_one(application_id)
+            if self.fill_invariant:
+                self.fill_invariant.check()
+            return result
 
     async def _process_one(self, application_id=None, preserved_page=None):
+        self.ensure_fill_policy()
+        if self.fill_invariant:
+            self.fill_invariant.check()
         if self.fill_only and self.db.setting("auto_submit") is not False:
             raise RuntimeError("Fill-only requires auto_submit=false")
         if application_id is not None and self.db.automation_retired(application_id):
@@ -269,6 +299,8 @@ class Engine:
             if self.fill_only:
                 from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
                 await self.browser.enforce_application_limit(MAX_ACTIVE_APPLICATION_TABS)
+            if not preserved_page:
+                self.db.lifecycle.begin_attempt(app_id, self.config["processing"]["max_retries"])
             page = page or await self.browser.new_page()
             if preserved_page:
                 state, evidence = await page_condition(page)
@@ -325,7 +357,7 @@ class Engine:
                 return True
             if self.interrupted(app_id):
                 return True
-            self.db.transition(app_id, State.APPLYING, stage="opening form")
+            self.db.lifecycle.transition(app_id, State.APPLYING, stage="opening form")
             if not preserved_page or app["stage"] == "checking":
                 await adapter.begin()
             boundary = await self.inspect_security(app_id, page)
@@ -340,8 +372,8 @@ class Engine:
                 "SELECT * FROM questions WHERE application_id=? AND status='ANSWERED' AND field_type='combobox'", (app_id,))}
             adapter.answer_hints = saved_answers
             adapter.profile = self.config.profile_snapshot().facts
+            adapter.emit = lambda kind, detail: self.adapter_event(app_id, kind, detail)
             if adapter.structured_inventory:
-                adapter.emit = lambda kind, detail: self.adapter_event(app_id, kind, detail)
                 adapter.mapper.cache = self.db.setting('field_mapping_cache:' + adapter.name, {})
                 self.db.event(app_id, 'PROFILE_PREFLIGHT', json.dumps({'missing':self.config.setup_issues()}))
             for step in range(self.config["application"]["max_pages"]):
@@ -357,7 +389,7 @@ class Engine:
                     else:
                         self.hold(app_id, state, evidence)
                     return True
-                self.db.execute("UPDATE applications SET stage=? WHERE id=?", (f"form page {step + 1}", app_id))
+                self.db.lifecycle.metadata(app_id, stage=f"form page {step + 1}")
                 questions = await adapter.get_questions(app)
                 step_answers = {}
                 if adapter.structured_inventory:
@@ -401,7 +433,7 @@ class Engine:
                                 continue
                             await adapter.upload_documents(q, self.config.resume)
                             digest = self.resume_snapshot.sha256
-                            self.db.execute("UPDATE applications SET resume_used=?,resume_sha256=? WHERE id=?", (str(self.config.resume), digest, app_id))
+                            self.db.lifecycle.metadata(app_id, resume_used=str(self.config.resume), resume_sha256=digest)
                             self.db.save_answer(row["id"], Answer("resume.pdf", "verified_document"))
                         elif q.required:
                             self.request(app, q, "A required document needs manual preparation and upload")
@@ -513,17 +545,14 @@ class Engine:
                     if self.db.submission_conflict(app_id):
                         raise UnsupportedForm("Existing submission history prevents manual-ready classification")
                     with self.db.transaction():
-                        self.db.transition(app_id, State.READY, "Ready for manual submission; no final Submit performed")
-                        self.db.update_security(app_id, application_state="READY_FOR_MANUAL_SUBMIT",
-                                                session_preserved=1, retry_allowed=0, manual_resume_allowed=0,
-                                                url_before_submit=safe_url(page.url))
+                        self.db.lifecycle.record_ready(app_id, live=True, url=safe_url(page.url))
                         self.db.event(app_id, "READY_FOR_MANUAL_SUBMIT", json.dumps({
                             "eligibility":"PASS", "upload_ready":True, "final_control_identified":True,
                             "url":safe_url(page.url), "final_submit_clicks":0, "submission_requests":0}))
                     self.retained_pages[app_id] = page
                     return True
                 if not self.db.setting("auto_submit", self.config["application"]["auto_submit"]):
-                    self.db.transition(app_id, State.READY, "Auto-submit is disabled; enable and retry to revalidate")
+                    self.db.lifecycle.record_ready(app_id)
                     return True
                 folder = archive_application(self.config, self.db, app_id)
                 probe = SubmissionProbe(self.db, app_id, page, button)
@@ -578,11 +607,7 @@ class Engine:
                     await self.handoff.request(app_id, page, 'ATS upload is not ready before Submit; see upload lifecycle evidence.', self.browser.observation(page).get('upload_result', {}).get('category', ErrorCategory.UPLOAD_PENDING))
                     return True
                 await probe.arm()
-                with self.db.transaction():
-                    conflict = self.db.submission_conflict(app_id)
-                    if conflict:
-                        raise UnsupportedForm(f"Existing application {conflict['id']} is {conflict['status']}; check its history instead of submitting again")
-                    self.db.transition(app_id, State.SUBMITTING, stage="submission intent", submit_intent_at=now())
+                self.db.lifecycle.record_submission_intent(app_id)
                 probe.intent()
                 self.browser.reset_observation(page)
                 log.info("[SUBMIT] Submission initiated application=%s", app_id)
@@ -614,7 +639,7 @@ class Engine:
             # Exception messages can contain form values, tokens or sensitive URLs.
             reason = f"{type(exc).__name__} during {self.db.application(app['id'])['stage']}"
             current = self.db.application(app["id"])
-            if not current['submit_intent_at'] and type(exc).__name__ == 'TargetUnstableError':
+            if not current['submit_intent_at'] and isinstance(exc, TargetUnstableError):
                 await self.handoff.request(app['id'], page, str(exc), 'PRE_SUBMIT_TARGET_UNSTABLE')
                 return True
             if current["submit_intent_at"]:
@@ -640,7 +665,7 @@ class Engine:
                             unknown=bool(current['submit_intent_at']))
                     elif current["submit_intent_at"]:
                         await self.handoff.request(app["id"], page, reason, unknown=True)
-                    elif isinstance(exc, (TimeoutError, OSError, SiteError)) or type(exc).__name__ == "TimeoutError" or (page and self.browser.observation(page).get("network_error")):
+                    elif isinstance(exc, (TimeoutError, PlaywrightTimeoutError, OSError, SiteError)) or (page and self.browser.observation(page).get("network_error")):
                         category = ErrorCategory.SITE_ERROR if isinstance(exc, SiteError) else ErrorCategory.NETWORK_ERROR
                         self.db.fail(app["id"], reason, self.config["processing"]["max_retries"], category)
                     else:
@@ -666,7 +691,7 @@ class Engine:
                         unknown=bool(current['submit_intent_at']))
                     current = self.db.application(app['id'])
                 if current["status"] in {"CHECKING", "APPLYING"}:
-                    self.db.transition(app["id"], State.RETRY, "Processing paused before submission", retry_at=None)
+                    self.db.fail(app["id"], "Processing interrupted before submission", self.config["processing"]["max_retries"], ErrorCategory.PROCESS_INTERRUPTED)
                 folder = archive_application(self.config, self.db, app["id"])
                 if self.fill_only and page and not page.is_closed():
                     from .fill_batch import checkpoint
@@ -707,33 +732,23 @@ class Engine:
             tracker.events.clear()
         return ready
 
-    async def resume_manual(self, app_id, outcome=None, *, inspect_only=False, strict_session=False):
+    async def resume_manual(self, app_id, outcome=None, *, inspect_only=False, strict_session=False, session_token=None):
+        self.ensure_fill_policy()
+        if self.fill_only:
+            from .fill_batch import MAX_ACTIVE_APPLICATION_TABS
+            await self.browser.enforce_application_limit(MAX_ACTIVE_APPLICATION_TABS)
         if self.db.automation_retired(app_id):
             raise ValueError("User-reported submission permanently excludes this application from automation")
         async with self.processing_lock:
             target = self.db.setting("controlled_application_id")
-            if target is not None and app_id != target:
-                raise ValueError("Controlled run permits only the configured application")
+            if target is not None and (app_id != target or not session_token or session_token != self.handoff.sessions.get(app_id)):
+                raise ValueError("Controlled resume requires the correct application and live session token")
             if self.db.setting(f'inspect_only_once:{app_id}', False):
                 # A controlled worker can register its existing page without an
                 # accidental fill if a security restriction disappears meanwhile.
                 inspect_only = True
                 self.db.set_setting(f'inspect_only_once:{app_id}', False)
             page = self.handoff.pages.get(app_id)
-            if self.db.setting(f'refresh_upload_protocol:{app_id}', False):
-                # Explicit development-worker upgrade, safe only before any file
-                # selection or submission. Preserve callback object identity and
-                # the browser; never reconstruct or discard upload evidence.
-                app = self.db.application(app_id)
-                tracker = getattr(page, '_autoapply_uploads', None) if page else None
-                if not tracker or tracker.selected or tracker.requests or app['submit_intent_at']:
-                    raise ValueError('Upload protocol upgrade requires an untouched same-session tracker')
-                import importlib
-                from . import uploads
-                importlib.reload(uploads)
-                tracker.__class__ = uploads.UploadTracker
-                self.db.set_setting(f'refresh_upload_protocol:{app_id}', False)
-                self.db.event(app_id,'UPLOAD_PROTOCOL_REFRESHED','No selections, requests, or submit intent; callback identity retained')
             if not inspect_only:
                 self.control.resolve_known_pending(app_id)
             app = self.db.application(app_id)
@@ -748,9 +763,8 @@ class Engine:
                         return False
                     if self.db.submission_conflict(app_id) or not self.db.guard_listing(app_id):
                         return False
+                    self.db.lifecycle.resume(app_id, reconstruct=True)
                     self.handoff.release(app_id)
-                    self.db.update_security(app_id, retry_allowed=1)
-                    self.db.transition(app_id, State.RETRY, "Resolved durable input hold; reconstructing same application", retry_at=None)
                     return await self._process_one(app_id)
                 if app["submission_confirmation_seen"] and outcome in {"PASSED", "FAILED", "SKIPPED"}:
                     self.db.update_security(app_id, verification_state=outcome)
@@ -808,54 +822,52 @@ class Engine:
                 return False
             await get_cursor(page).exit_manual_mode(Point(1, 1))
             # Reinspect/fill this exact page without navigation, resetting the form, or claiming another job.
+            self.db.lifecycle.resume(app_id, verification="PASSED" if previous_security == "INTERACTIVE_CHALLENGE" else app["verification_state"])
             self.handoff.release(app_id)
-            self.db.transition(app_id, State.APPLYING, "Manual step completed; revalidating preserved form")
-            self.db.update_security(app_id, retry_allowed=1, verification_state="PASSED" if previous_security == "INTERACTIVE_CHALLENGE" else app["verification_state"])
             log.info("[RESUME] Revalidating preserved form application=%s", app_id)
             await self._process_one(app_id, preserved_page=page)
             return True
 
     async def service_manual_requests(self):
+        ledger = ManualCommands(self.db)
         for request in self.db.rows("SELECT * FROM manual_requests ORDER BY created_at"):
-            app_id = request["application_id"]
-            with self.db.transaction():
-                deleted = self.db.execute("DELETE FROM manual_requests WHERE application_id=? AND action=? AND created_at=?",
-                    (app_id, request["action"], request["created_at"]))
-                if not deleted.rowcount:
-                    continue
             command = None
-            # Commands are consumed before page access. Failed commands require an
-            # explicit new command; a crashed worker can never replay an action.
+            app_id = request['application_id']
             try:
-                if (request["action"] == "inspect" and self.db.setting("controlled_application_id") is None
-                        and not self.db.automation_retired(app_id)
-                        and self.db.application(app_id)["error_category"] == "INPUT_REQUIRED"):
-                    # Preserve the existing ordinary-worker durable answer flow.
-                    # Controlled workers never reconstruct a missing session.
-                    await self.resume_manual(app_id)
+                command = ledger.claim(request)
+                if command is None:
                     continue
-                command = json.loads(request["action"])
+                app = self.db.application(app_id)
+                target = self.db.setting('controlled_application_id')
+                reconstruct = command.parameters.get('reconstruct', False)
                 token = self.handoff.sessions.get(app_id)
-                if (self.db.automation_retired(app_id) or not token or command.get("token") != token
-                        or self.db.setting(f"manual_ack:{command['id']}")
-                        or command.get("action") not in {"inspect", "inspect-only", "PASSED", "FAILED", "SKIPPED"}):
-                    continue
-                self.db.set_setting(f"manual_ack:{command['id']}", "IN_PROGRESS")
-                self.db.set_setting(f"manual_session:{app_id}", {"token": token,
-                    "state": "MANUAL_INTERVENTION_COMPLETE", "busy": True})
-                action = command["action"]
-                await self.resume_manual(app_id, action if action in {"PASSED", "FAILED", "SKIPPED"} else None,
-                    inspect_only=action == "inspect-only", strict_session=True)
-                self.db.set_setting(f"manual_ack:{command['id']}", "ACKNOWLEDGED")
+                page = self.handoff.pages.get(app_id)
+                if self.db.automation_retired(app_id) or (target is not None and app_id != target):
+                    raise ValueError('Retired application or controlled target mismatch')
+                if reconstruct:
+                    if target is not None or app['error_category'] != 'INPUT_REQUIRED' or app['submit_intent_at']:
+                        raise ValueError('Reconstruction is not authorized')
+                elif (not token or command.session_token != token or page is None or page.is_closed()):
+                    raise ValueError('Stale or unavailable live session')
+                if command.action not in {'inspect', 'inspect-only', 'PASSED', 'FAILED', 'SKIPPED'}:
+                    raise ValueError('Unsupported manual operation')
+                if token:
+                    self.db.set_setting(f'manual_session:{app_id}', {'token': token, 'state': 'MANUAL_INTERVENTION_COMPLETE', 'busy': True})
+                result = await self.resume_manual(app_id,
+                    command.action if command.action in {'PASSED','FAILED','SKIPPED'} else None,
+                    inspect_only=command.action == 'inspect-only', strict_session=not reconstruct,
+                    session_token=command.session_token)
+                ledger.finish(command, 'ACKNOWLEDGED', 'Completed' if result else 'Inspected; application remains held')
             except Exception as exc:
-                if isinstance(command, dict) and command.get("id"):
-                    self.db.set_setting(f"manual_ack:{command['id']}", "FAILED")
-                self.db.event(app_id, "manual_inspection_error", type(exc).__name__)
+                if command:
+                    ledger.finish(command, 'FAILED', type(exc).__name__ + ': ' + str(exc))
+                else:
+                    # Malformed legacy requests remain visible; no destructive action ran.
+                    self.db.event(app_id, 'manual_inspection_error', type(exc).__name__)
             finally:
                 token = self.handoff.sessions.get(app_id)
                 if token:
-                    self.db.set_setting(f"manual_session:{app_id}", {"token": token,
-                        "state": "WAITING_FOR_MANUAL_INTERVENTION", "busy": False})
+                    self.db.set_setting(f'manual_session:{app_id}', {'token': token, 'state': 'WAITING_FOR_MANUAL_INTERVENTION', 'busy': False})
 
     async def wait_for_manual(self):
         # CLI work-once remains alive so Playwright does not dispose the populated form.
@@ -866,8 +878,11 @@ class Engine:
     async def close(self):
         # Called on explicit worker shutdown; a manual hold itself never calls close.
         try:
-            for app_id in self.handoff.pages:
+            for app_id in set(self.handoff.pages) | set(self.retained_pages):
                 self.db.update_security(app_id, session_preserved=0)
+                self.db.set_setting(f'manual_session:{app_id}', None)
+                if self.db.application(app_id)['application_state'] == 'READY_FOR_MANUAL_SUBMIT':
+                    self.db.update_security(app_id, application_state='READY_TO_SUBMIT')
                 self.db.event(app_id, "manual_session_ended", "Worker/browser shutdown; automatic retry remains disabled")
                 archive_application(self.config, self.db, app_id)
         finally:

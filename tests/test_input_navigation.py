@@ -149,6 +149,11 @@ async def test_restart_reconstructs_only_resolved_input(config,db,browser,listin
     restarted = Engine(config,db)
     try:
         await restarted.service_manual_requests()
+        assert db.application(1)['status']=='MANUAL_REVIEW'
+        assert not site[1]  # A dead same-session token cannot authorize reconstruction.
+        assert db.one("SELECT state FROM manual_commands ORDER BY created_at LIMIT 1")['state']=='FAILED'
+        restarted.control.command('resume 1')  # Explicit fresh reconstruction request.
+        await restarted.service_manual_requests()
         assert db.application(1)['status']=='SUBMITTED'
         assert len(site[1])==1
         assert not db.rows('SELECT * FROM manual_requests')

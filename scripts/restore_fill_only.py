@@ -1,4 +1,4 @@
-"""Restore one verified fill-only checkpoint for the user to submit manually.
+"""Restore and revalidate one saved fill-only checkpoint for the user to submit manually.
 
 Usage: python scripts/restore_fill_only.py APPLICATION_ID
 Close the browser tab or interrupt this command when finished. No final action is automated.
@@ -23,16 +23,15 @@ async def restore(config, db, app_id):
         raise ValueError('Protected application excluded')
     path = config.private / 'fill-only-checkpoints' / f'{app_id}.json'
     saved = json.loads(path.read_text(encoding='utf-8'))
-    if not saved.get('reconstruction_verified'):
-        raise ValueError('This application has no verified reconstruction checkpoint')
+    if saved.get('readiness') not in {'RECONSTRUCTABLE_CHECKPOINT','RECONSTRUCTION_VERIFIED'} and not saved.get('reconstruction_verified'):
+        raise ValueError('This application has no reconstructable checkpoint')
     verify_safety(db)
     if db.submission_conflict(app_id):
         raise ValueError('Submission history prevents reconstruction')
     engine = Engine(config, db, fill_only=True)
     try:
         db.set_setting('paused', False)
-        db.update_security(app_id, retry_allowed=1)
-        db.transition(app_id, 'RETRY', 'User requested restoration of verified fill-only checkpoint', retry_at=None)
+        db.lifecycle.restore_checkpoint(app_id)
         await engine.process_one(app_id)
         page = engine.retained_pages.get(app_id)
         if not page or db.application(app_id)['application_state'] != 'READY_FOR_MANUAL_SUBMIT':

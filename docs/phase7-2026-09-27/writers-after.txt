@@ -1,0 +1,177 @@
+scripts\controlled_once.py:38:    db.set_setting('controlled_application_id', app_id)
+scripts\controlled_once.py:76:                AND a.retry_allowed=1 AND a.submit_intent_at IS NULL AND (a.retry_at IS NULL OR a.retry_at<=?)
+scripts\audit_smartrecruiters_5310.py:17:    session = db.execute("SELECT value FROM settings WHERE key='manual_session:5310'").fetchone()
+scripts\audit_smartrecruiters_5310.py:25:    'state':{key:app[key] for key in ('status','security_state','security_provider','error_category','session_preserved',
+scripts\audit_smartrecruiters_5310.py:26:                                    'manual_resume_allowed','submit_intent_at','submission_confirmation_seen','failure_reason')},
+scripts\finalize_smartrecruiters_5310_hold.py:17:        if app['submit_intent_at'] or app['submission_confirmation_seen']:
+scripts\finalize_smartrecruiters_5310_hold.py:22:            db.set_setting('manual_session:5310',None)
+scripts\finalize_smartrecruiters_5310_hold.py:25:            db.transition(5310,State.MANUAL_REVIEW,reason,stage='security hold; session unavailable')
+scripts\finalize_smartrecruiters_5310_hold.py:28:                               manual_action_required=1,manual_action_reason=reason,session_preserved=0,
+scripts\fill_only_batch.py:36:        if str(status) in {'SUBMITTING','SUBMITTED'} or fields.get('submit_intent_at'):
+scripts\fill_only_batch.py:40:        return super().transition(app_id,status,reason,**fields)
+scripts\fill_only_batch.py:127:            if app['submit_intent_at']: raise RuntimeError('UNEXPECTED_SUBMISSION_INTENT')
+scripts\fill_only_batch.py:163:                db.update_security(i,application_state='MANUAL_REQUIRED',session_preserved=0,
+scripts\repair_5310_once.py:30:                if (app['status'] != 'QUEUED' or app['attempts'] != 1 or app['submit_intent_at']
+autoapply\control.py:17:            j.posted_at,j.listing_status,a.submit_intent_at,a.manual_action_required
+autoapply\control.py:19:            WHERE (j.listing_active=1 OR a.submit_intent_at IS NOT NULL OR a.manual_action_required=1) AND q.status='PENDING' AND a.status NOT IN ('SUBMITTED','ALREADY_APPLIED','INELIGIBLE','CLOSED','INVALID','DUPLICATE') ORDER BY q.id""")
+autoapply\control.py:21:        return [row for row in rows if row['submit_intent_at']
+autoapply\control.py:43:                    self.db.lifecycle.transition(app["id"], State.INVALID, "Confirmed posting date is outside the listing age window")
+autoapply\control.py:46:                    self.db.lifecycle.transition(app["id"], State.INELIGIBLE, "User confirmed ineligibility")
+autoapply\control.py:68:        if self.db.one("SELECT application_id FROM manual_requests WHERE application_id=?", (app['id'],)):
+autoapply\control.py:73:        if self.db.setting("controlled_application_id") is not None:
+autoapply\control.py:77:                and app["manual_resume_allowed"] and not app["submit_intent_at"]
+autoapply\control.py:86:        if app['submit_intent_at'] or app['submission_confirmation_seen'] or self.db.automation_retired(app_id):
+autoapply\control.py:96:            self.db.lifecycle.transition(row["application_id"], State.MANUAL_REVIEW, "User skipped required question; answer remains unresolved")
+autoapply\control.py:128:                "manual_session": self.db.setting(f"manual_session:{app_id}"),
+autoapply\control.py:147:        target = self.db.setting("controlled_application_id")
+autoapply\control.py:156:        if app['error_category'] != 'INPUT_REQUIRED' or app['submit_intent_at']:
+autoapply\control.py:167:        target = self.db.setting("controlled_application_id")
+autoapply\control.py:214:            ManualCommands(self.db).cancel(int(parts[1]) if len(parts)>1 else self.db.setting("controlled_application_id"))
+autoapply\control.py:216:        if cmd == "status" and len(parts)==1 and self.db.setting("controlled_application_id") is not None:
+autoapply\control.py:217:            return self.explain(self.db.setting("controlled_application_id"))
+autoapply\control.py:226:        if self.db.setting("controlled_application_id") is not None and cmd in {"retry","resume-manual","verification","application","inspect","ask","inspect-manual","reconcile"}:
+scripts\restore_fill_only.py:45:            db.update_security(app_id, session_preserved=0, application_state='MANUAL_REQUIRED',
+autoapply\archive.py:451:                        db.conn.execute('UPDATE applications SET screenshot_path=? WHERE id=?', (str(new_path), app_id))
+autoapply\archive.py:459:                    events=events, confirmation={key: app[key] for key in ('status', 'submitted_at', 'confirmation_text', 'confirmation_url')})
+autoapply\conflicts.py:20:    if db.automation_retired(app_id) or app['submit_intent_at'] or app['submission_confirmation_seen']:
+autoapply\conflicts.py:26:        (a.submit_intent_at IS NOT NULL OR a.submission_confirmation_seen=1 OR
+autoapply\conflicts.py:37:        if not (other.get('submit_intent_at') or other.get('submission_confirmation_seen') or
+autoapply\candidate_policy.py:67:    if (candidate.get('submit_intent_at') or candidate.get('submission_confirmation_seen')
+autoapply\candidate_policy.py:129:                    controlled_target=db.setting('controlled_application_id'), mode=mode,
+autoapply\database.py:29:    "diagnostics_at": "TEXT", "session_preserved": "INTEGER NOT NULL DEFAULT 0",
+autoapply\database.py:57: confirmation_text TEXT, confirmation_url TEXT, failure_reason TEXT DEFAULT '', stage TEXT DEFAULT '',
+autoapply\database.py:58: attempts INTEGER DEFAULT 0, retry_at TEXT, submit_intent_at TEXT, eligibility_override INTEGER DEFAULT 0);
+autoapply\database.py:87:CREATE TABLE IF NOT EXISTS manual_requests (
+autoapply\database.py:126:                        self.conn.execute("UPDATE applications SET attempt_started=1 WHERE attempts>0 AND status IN ('CHECKING','APPLYING','SUBMITTING')")
+autoapply\database.py:151:                for row in self.rows("SELECT a.id,a.status,a.confirmation_text,a.submit_intent_at,a.failure_reason,a.updated_at,j.ats FROM applications a JOIN jobs j ON j.id=a.job_id"):
+autoapply\database.py:152:                    confirmed = bool(row["confirmation_text"] and row["status"] == "SUBMITTED")
+autoapply\database.py:155:                        submission_confirmation_seen=int(confirmed), submission_confirmation_reason=row["confirmation_text"] or "",
+autoapply\database.py:156:                        retry_allowed=int(not row["submit_intent_at"] and row["status"] not in FINAL and row["status"] != "MANUAL_REVIEW"),
+autoapply\database.py:160:                    self.execute("UPDATE applications SET updated_at=? WHERE id=?", (row["updated_at"], row["id"]))
+autoapply\database.py:381:                self.update_security(app_id, application_state='DISCOVERED', retry_allowed=1)
+autoapply\database.py:441:        return self.lifecycle.transition(app_id, status, reason, legacy=True, **fields)
+autoapply\database.py:524:            self.transition(app_id, State.DUPLICATE, f"Resolved to existing job {other['id']}")
+autoapply\eligibility_repair.py:32:        if any(app[k] for k in ('submit_intent_at', 'submitted_at', 'resume_used', 'resume_sha256',
+autoapply\eligibility_repair.py:33:                'confirmation_text', 'confirmation_url', 'submission_confirmation_seen',
+autoapply\eligibility_repair.py:34:                'submission_confirmation_reason', 'url_before_submit', 'url_after_submit', 'session_preserved')):
+autoapply\eligibility_repair.py:52:        db.execute("UPDATE applications SET status='QUEUED',application_state='DISCOVERED',"
+autoapply\eligibility_repair.py:53:                   "retry_allowed=1,failure_reason='',updated_at=? WHERE id=?", (now(), application_id))
+autoapply\engine.py:103:        evidence = {"confirmation_text": reason, "confirmation_url": safe_url(self.db.application(app_id)["canonical_url"])} if state == State.ALREADY_APPLIED else {}
+autoapply\engine.py:108:            self.db.lifecycle.transition(app_id, state, reason, **evidence)
+autoapply\engine.py:113:        return self.db.one("SELECT count(*) n FROM applications WHERE substr(submit_intent_at,1,10)=?", (datetime.now(timezone.utc).date().isoformat(),))["n"]
+autoapply\engine.py:179:            if result.security.state == "RATE_LIMITED" and not self.db.application(app_id)["submit_intent_at"]:
+autoapply\engine.py:254:            target = self.db.setting("controlled_application_id")
+autoapply\engine.py:360:            self.db.lifecycle.transition(app_id, State.APPLYING, stage="opening form")
+autoapply\engine.py:642:            if not current['submit_intent_at'] and isinstance(exc, TargetUnstableError):
+autoapply\engine.py:645:            if current["submit_intent_at"]:
+autoapply\engine.py:665:                            unknown=bool(current['submit_intent_at']))
+autoapply\engine.py:666:                    elif current["submit_intent_at"]:
+autoapply\engine.py:684:                if (self.db.setting('controlled_application_id') == app['id'] and page
+autoapply\engine.py:691:                        unknown=bool(current['submit_intent_at']))
+autoapply\engine.py:704:                        self.db.set_setting(f"manual_session:{app['id']}", None)
+autoapply\engine.py:705:                        self.db.update_security(app['id'], session_preserved=0, manual_resume_allowed=0)
+autoapply\engine.py:743:            target = self.db.setting("controlled_application_id")
+autoapply\engine.py:757:                self.db.update_security(app_id, session_preserved=0)
+autoapply\engine.py:759:                        and not app["submit_intent_at"] and not app["submission_confirmation_seen"]
+autoapply\engine.py:808:            if app["submit_intent_at"]:
+autoapply\engine.py:831:    async def service_manual_requests(self):
+autoapply\engine.py:833:        for request in self.db.rows("SELECT * FROM manual_requests ORDER BY created_at"):
+autoapply\engine.py:841:                target = self.db.setting('controlled_application_id')
+autoapply\engine.py:848:                    if target is not None or app['error_category'] != 'INPUT_REQUIRED' or app['submit_intent_at']:
+autoapply\engine.py:855:                    self.db.set_setting(f'manual_session:{app_id}', {'token': token, 'state': 'MANUAL_INTERVENTION_COMPLETE', 'busy': True})
+autoapply\engine.py:870:                    self.db.set_setting(f'manual_session:{app_id}', {'token': token, 'state': 'WAITING_FOR_MANUAL_INTERVENTION', 'busy': False})
+autoapply\engine.py:875:            await self.service_manual_requests()
+autoapply\engine.py:882:                self.db.update_security(app_id, session_preserved=0)
+autoapply\engine.py:883:                self.db.set_setting(f'manual_session:{app_id}', None)
+autoapply\engine.py:917:                await self.service_manual_requests()
+autoapply\engine.py:920:                        if self.db.setting("controlled_application_id") is None:
+autoapply\fill_batch.py:28:        self.initial_intents = {r['id']: r['submit_intent_at'] for r in db.rows('SELECT id,submit_intent_at FROM applications')}
+autoapply\fill_batch.py:36:        intents = sum(bool(r['submit_intent_at']) and r['submit_intent_at'] != self.initial_intents.get(r['id'])
+autoapply\fill_batch.py:37:                      for r in self.db.rows('SELECT id,submit_intent_at FROM applications'))
+autoapply\fill_batch.py:99:        engine.db.set_setting(f'manual_session:{app_id}', None)
+autoapply\fill_batch.py:100:        fields = dict(session_preserved=0)
+autoapply\fill_batch.py:121:    if db.setting('controlled_application_id') is not None:
+autoapply\fill_batch.py:123:    if db.rows('SELECT * FROM manual_requests'):
+autoapply\fill_batch.py:131:        AND a.retry_allowed=1 AND a.manual_action_required=0
+autoapply\fill_batch.py:133:        AND a.submit_intent_at IS NULL AND a.submission_confirmation_seen=0
+autoapply\handoff.py:31:            self.db.set_setting(f"manual_session:{app_id}", {"token": token, "state": "WAITING_FOR_MANUAL_INTERVENTION", "busy": False})
+autoapply\handoff.py:33:                      session_preserved=int(preserved), error_category=category,
+autoapply\handoff.py:34:                      manual_resume_allowed=int(not app["submit_intent_at"] and
+autoapply\handoff.py:118:        preserved = "Browser session preserved." if app['session_preserved'] else "Saved application state retained."
+autoapply\history_statistics.py:68:        attempts += max(len(submit_events), int(bool(record.get('submit_intent_at'))), int(state == 'SUBMITTED'))
+autoapply\history_statistics.py:69:        if state == 'FAILED' and (submit_events or record.get('submit_intent_at')):
+autoapply\maintenance.py:12:    if not tracker or tracker.selected or tracker.requests or engine.db.application(app_id)['submit_intent_at']:
+autoapply\manual.py:64:            pending = self.db.one('SELECT * FROM manual_requests WHERE application_id=?', (command.application_id,))
+autoapply\manual.py:69:            self.db.execute('INSERT INTO manual_requests VALUES (?,?,?)', (command.application_id, command.encode(), now()))
+autoapply\manual.py:81:                self.db.execute('DELETE FROM manual_requests WHERE application_id=? AND action=? AND created_at=?',
+autoapply\manual.py:88:            deleted = self.db.execute('DELETE FROM manual_requests WHERE application_id=? AND action=? AND created_at=?',
+autoapply\manual.py:113:            for request in self.db.rows('SELECT * FROM manual_requests' + suffix, args):
+autoapply\manual.py:125:    target = db.setting('controlled_application_id')
+autoapply\manual.py:126:    session = db.setting(f'manual_session:{app_id}')
+autoapply\manual.py:136:    target = db.setting('controlled_application_id')
+autoapply\manual.py:143:    session = db.setting(f'manual_session:{app_id}')
+autoapply\manual.py:145:    if session and app['session_preserved']:
+autoapply\manual.py:151:              and app['manual_resume_allowed'] and not app['submit_intent_at']):
+autoapply\listing_store.py:122:        if not migration and self.setting('controlled_application_id') is not None:
+autoapply\listing_store.py:144:                    AND a.submit_intent_at IS NULL THEN 1 ELSE 0 END queued_count
+autoapply\listing_store.py:324:            if not app['submit_intent_at'] and not app['manual_action_required'] and app['status'] in {'QUEUED','RETRY','CHECKING','APPLYING','READY'}:
+autoapply\listing_store.py:325:                self.transition(app_id, 'CLOSED' if status in {'CLOSED','REMOVED'} else 'INVALID', reason)
+autoapply\lifecycle.py:53:            if app['submit_intent_at'] and status in RUNNABLE and not reconciled:
+autoapply\lifecycle.py:55:            if self.fill_only and (status == 'SUBMITTING' or fields.get('submit_intent_at')):
+autoapply\lifecycle.py:59:            if status == 'SUBMITTED' and not str(fields.get('confirmation_text') or '').strip():
+autoapply\lifecycle.py:62:                       'confirmation_text', 'confirmation_url', 'retry_at', 'submit_intent_at',
+autoapply\lifecycle.py:66:            if 'submit_intent_at' in fields and app['submit_intent_at'] and not reconciled:
+autoapply\lifecycle.py:76:            if status in {'SUBMITTED', 'ALREADY_APPLIED'} and fields.get('confirmation_text'):
+autoapply\lifecycle.py:77:                fields.update(submission_confirmation_seen=1, submission_confirmation_reason=fields['confirmation_text'], retry_allowed=0)
+autoapply\lifecycle.py:79:            self.db.execute('UPDATE applications SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE id=?', (*fields.values(), app_id))
+autoapply\lifecycle.py:87:            self.db.execute('UPDATE applications SET ' + ','.join(f'{k}=?' for k in fields) + ',updated_at=? WHERE id=?', (*fields.values(), now(), app_id))
+autoapply\lifecycle.py:97:            self.db.execute('UPDATE applications SET attempts=attempts+1,attempt_started=1,max_retries=?,delivery_state=? WHERE id=?',
+autoapply\lifecycle.py:102:            self.db.execute('UPDATE applications SET delivery_state=? WHERE id=?', (str(Delivery(value)), app_id))
+autoapply\lifecycle.py:114:                fields['confirmation_text'] = app['confirmation_text'] or app['submission_confirmation_reason']
+autoapply\lifecycle.py:115:            self.transition(app_id, status, reason, **fields)
+autoapply\lifecycle.py:120:                  app['security_state'] in SAFE_SECURITY and self.db.setting('controlled_application_id') is None)}
+autoapply\lifecycle.py:122:            fields = dict(application_state='READY_FOR_MANUAL_SUBMIT', session_preserved=1,
+autoapply\lifecycle.py:124:        self.transition(app_id, 'READY', 'Ready for manual submission; no final Submit performed' if live else 'Auto-submit is disabled; retry to revalidate', **fields)
+autoapply\lifecycle.py:132:            self.transition(app_id, 'SUBMITTING', stage='submission intent', submit_intent_at=now(), delivery_state=Delivery.POSSIBLY_DELIVERED)
+autoapply\lifecycle.py:135:        self.transition(app_id, 'SUBMITTED', confirmation_text=evidence, confirmation_url=url,
+autoapply\lifecycle.py:145:            held = bool(app['manual_action_required'] or self.db.setting('controlled_application_id') is not None or
+autoapply\lifecycle.py:147:            decision = RetryPolicy().decide(failure, app['attempts'], max_retries, bool(app['submit_intent_at']), held=held)
+autoapply\lifecycle.py:149:            if app['submit_intent_at'] or failure.delivery != Delivery.NOT_STARTED:
+autoapply\lifecycle.py:151:                                 'SUBMISSION_UNKNOWN' if app['submit_intent_at'] else 'STEP_TRANSITION_UNKNOWN', unknown=True)
+autoapply\lifecycle.py:156:                self.transition(app_id, 'RETRY', failure.reason, retry_at=retry_at, retry_allowed=1,
+autoapply\lifecycle.py:159:                self.transition(app_id, 'FAILED', failure.reason, retry_at=None, retry_allowed=0,
+autoapply\lifecycle.py:165:            self.db.set_setting(f'manual_session:{app_id}', None)
+autoapply\lifecycle.py:166:            self.db.update_security(app_id, manual_action_required=0, manual_action_reason='', session_preserved=0)
+autoapply\lifecycle.py:172:            if (app['status'] != 'NEEDS_INPUT' or app['submit_intent_at']
+autoapply\lifecycle.py:175:                    or self.db.setting('controlled_application_id') is not None
+autoapply\lifecycle.py:179:            self.transition(app_id, 'RETRY' if decision.allowed else 'FAILED', 'All pending questions resolved',
+autoapply\lifecycle.py:189:                    or self.db.setting('controlled_application_id') is not None):
+autoapply\lifecycle.py:193:            self.transition(app_id, 'APPLYING', 'Explicit reconstruction verification', attempt_started=0)
+autoapply\lifecycle.py:202:                    or self.db.submission_conflict(app_id) or self.db.setting('controlled_application_id') is not None
+autoapply\lifecycle.py:208:            self.transition(app_id, 'RETRY', 'User requested checkpoint restoration; revalidation required',
+autoapply\lifecycle.py:209:                            retry_allowed=1, retry_at=None, attempt_started=0)
+autoapply\lifecycle.py:214:            if (app['submit_intent_at'] or app['submission_confirmation_seen'] or self.db.automation_retired(app_id)
+autoapply\lifecycle.py:220:                if self.db.setting('controlled_application_id') is not None:
+autoapply\lifecycle.py:226:            self.transition(app_id, 'RETRY' if reconstruct else 'APPLYING', 'Explicit reconstruction' if reconstruct else 'Manual step completed; revalidating preserved form',
+autoapply\lifecycle.py:235:            if not app['submit_intent_at'] or app['status'] != 'MANUAL_REVIEW' or not evidence.strip():
+autoapply\lifecycle.py:238:                                  or self.db.setting('controlled_application_id') is not None):
+autoapply\lifecycle.py:240:            self.db.event(app_id, 'submission_intent_reconciled', json.dumps({'prior_submit_intent_at': app['submit_intent_at'],
+autoapply\lifecycle.py:248:                self.transition(app_id, 'RETRY' if decision.allowed else 'FAILED', 'User verified no submission: ' + evidence,
+autoapply\lifecycle.py:249:                                reconciled=True, submit_intent_at=None, retry_at=None, retry_allowed=int(decision.allowed),
+autoapply\lifecycle.py:251:                                session_preserved=0, attempt_started=0, delivery_state=Delivery.NOT_STARTED)
+autoapply\lifecycle.py:256:        target = self.db.setting("controlled_application_id")
+autoapply\lifecycle.py:266:                WHERE j.listing_active=1 AND j.listing_status='ACTIVE' AND a.status IN ('QUEUED','RETRY') AND a.retry_allowed=1 AND a.manual_action_required=0 AND a.security_state IN ('NONE','PASSIVE_PROTECTION_DETECTED') AND a.submit_intent_at IS NULL AND (a.retry_at IS NULL OR a.retry_at<=?)
+autoapply\lifecycle.py:279:            self.transition(row["id"], State.CHECKING, started_at=previous["started_at"] or now(), stage="checking", attempt_started=0)
+autoapply\lifecycle.py:287:            for row in self.db.rows("SELECT id FROM applications WHERE session_preserved=1"):
+autoapply\lifecycle.py:288:                self.db.set_setting(f"manual_session:{row['id']}", None)
+autoapply\lifecycle.py:289:                self.db.update_security(row['id'], session_preserved=0)
+autoapply\lifecycle.py:294:                if not row['attempt_started'] and not row['submit_intent_at'] and row['status'] == 'CHECKING' and not row['manual_action_required'] and self.db.setting('controlled_application_id') is None and row['security_state'] in SAFE_SECURITY:
+autoapply\lifecycle.py:296:                    self.transition(row['id'], 'RETRY', 'Recovered unused reservation', retry_at=None)
+autoapply\lifecycle.py:309:        if (app["manual_action_required"] or app["security_state"] not in SAFE_SECURITY or self.db.setting("controlled_application_id") is not None):
+autoapply\lifecycle.py:313:        if app["submit_intent_at"]:
+autoapply\lifecycle.py:321:        self.transition(app_id, State.RETRY, "User requested retry", retry_at=None, attempt_started=0)
+autoapply\lifecycle.py:338:            self.db.execute("UPDATE applications SET " + ",".join(f"{k}=?" for k in fields) + ",updated_at=? WHERE id=?", (*fields.values(), now(), app_id))
+autoapply\status.py:16:        'submission': {'intent_at': app['submit_intent_at'], 'confirmed': bool(app['submission_confirmation_seen']),
+autoapply\status.py:18:        'session': {'preserved_flag': bool(app['session_preserved']), 'live_page': live,
+scripts\smartrecruiters_5310_once.py:25:    if app['submit_intent_at'] or app['submission_confirmation_seen'] or db.automation_retired(5310):
+scripts\smartrecruiters_5310_once.py:54:    db.set_setting('controlled_application_id',5310)

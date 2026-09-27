@@ -23,20 +23,12 @@ class ManualHandoffManager:
         reason = safe_text(reason)
         app = self.db.application(app_id)
         confirmed = bool(app["submission_confirmation_seen"])
-        if not confirmed:
-            self.db.transition(app_id, State.MANUAL_REVIEW, reason)
         preserved = page is not None and not page.is_closed()
         if preserved:
             self.pages[app_id] = page
             token = uuid.uuid4().hex
             self.sessions[app_id] = token
             self.db.set_setting(f"manual_session:{app_id}", {"token": token, "state": "WAITING_FOR_MANUAL_INTERVENTION", "busy": False})
-            try:
-                await get_cursor(page).enter_manual_mode()
-            except Exception as exc:
-                # The cursor is already stopped. Persist the hold even if the
-                # browser could not acknowledge input cleanup.
-                self.db.event(app_id, "cursor_cleanup_unavailable", type(exc).__name__)
         fields = dict(manual_action_required=1, manual_action_reason=safe_text(reason), retry_allowed=0,
                       session_preserved=int(preserved), error_category=category,
                       manual_resume_allowed=int(not app["submit_intent_at"] and
@@ -45,7 +37,17 @@ class ManualHandoffManager:
             fields["application_state"] = "UNKNOWN" if unknown else "MANUAL_REQUIRED"
         if (app["security_state"] in VERIFICATION or app["security_state"] == "INTERACTIVE_CHALLENGE") and app["verification_state"] not in {"FAILED", "SKIPPED", "PASSED"}:
             fields["verification_state"] = "PENDING"
-        self.db.update_security(app_id, **fields)
+        fields.pop("application_state", None)
+        fields.pop("manual_action_reason", None)
+        fields.pop("error_category", None)
+        self.db.lifecycle.record_hold(app_id, reason, category, unknown=unknown, **fields)
+        if preserved:
+            try:
+                await get_cursor(page).enter_manual_mode()
+            except Exception as exc:
+                # The cursor is already stopped. Persist the hold even if the
+                # browser could not acknowledge input cleanup.
+                self.db.event(app_id, "cursor_cleanup_unavailable", type(exc).__name__)
         await self.diagnostics(app_id, page)
         self.notify(app_id, reason)
         log.info("[MANUAL] User intervention requested application=%s category=%s", app_id, category)
@@ -120,6 +122,5 @@ class ManualHandoffManager:
     def release(self, app_id):
         page = self.pages.pop(app_id, None)
         self.sessions.pop(app_id, None)
-        self.db.set_setting(f"manual_session:{app_id}", None)
-        self.db.update_security(app_id, manual_action_required=0, manual_action_reason="", session_preserved=0)
+        self.db.lifecycle.release_hold(app_id)
         return page

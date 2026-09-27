@@ -84,7 +84,7 @@ async def run(config,db,baseline):
                     engine.handoff.pages[5310]=page
                     await engine.handoff.request(5310,page,'Reconstructed once; adapter ready for normal revalidation','INPUT_REQUIRED')
                     db.set_setting('paused',False)
-                    await engine.resume_manual(5310,strict_session=True)
+                    await engine.resume_manual(5310,strict_session=True,session_token=engine.handoff.sessions[5310])
                     print(json.dumps({'status':db.application(5310)['status'],'reason':db.application(5310)['failure_reason']}),flush=True)
                     await engine.wait_for_manual()
                     break

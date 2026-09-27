@@ -17,13 +17,20 @@ def parser():
     listings.add_argument("action", choices=["cleanup", "stats"])
     history = sub.add_parser('history', help='Maintain private application history')
     history.add_argument('action', choices=['migrate', 'validate', 'stats', 'rebuild-stats'])
-    for name in ["init", "doctor", "run", "scan", "queue", "pending", "recent", "status", "pause", "resume", "privacy", "gmail-auth", "discord-check"]:
+    for name in ["init", "doctor", "run", "scan", "queue", "pending", "recent", "pause", "privacy", "gmail-auth", "discord-check"]:
         sub.add_parser(name)
+    for name in ["resume", "status"]:
+        command = sub.add_parser(name)
+        command.add_argument("id", type=int, nargs="?")
+        command.add_argument("--token")
     for name in ["retry", "inspect", "stop", "resume-manual", "inspect-manual"]:
-        sub.add_parser(name).add_argument("id", type=int)
+        command = sub.add_parser(name)
+        command.add_argument("id", type=int)
+        command.add_argument("--token")
     verification = sub.add_parser("verification")
     verification.add_argument("id", type=int)
     verification.add_argument("value", choices=["passed", "failed", "skipped"])
+    verification.add_argument("--token")
     answer = sub.add_parser("answer")
     answer.add_argument("id", type=int)
     answer.add_argument("value")
@@ -151,10 +158,12 @@ async def execute(args, config, db):
         print(json.dumps(controller.inspect(args.id), indent=2))
     else:
         text = args.command
-        if hasattr(args, "id"):
+        if getattr(args, "id", None) is not None:
             text += " " + str(args.id)
         if hasattr(args, "value"):
             text += " " + args.value
+        if getattr(args, "token", None):
+            text += " --token " + args.token
         print(controller.command(text))
     return 0
 

@@ -1,0 +1,11 @@
+{
+  "before": {
+    "protected_sql_scans": 1,
+    "history_scans": 1
+  },
+  "after": {
+    "protected_sql_scans": 1,
+    "history_scans": 1
+  },
+  "method": "One nonconflicting known requisition against one submitted same-title record. Counts are per policy call, not time or asymptotic improvements."
+}

@@ -68,6 +68,9 @@ class Browser:
         self.application_tabs_opened = 0
         self.browser_pid = None
         self.network_policy = None
+        self.fill_invariant = None
+        self._fill_route_installed = False
+        self.unexpected_popup_violations = 0
 
     def check_tab_limit(self, *, opening=False):
         count = len(self.context.pages) if self.context else 0
@@ -80,6 +83,9 @@ class Browser:
     async def enforce_application_limit(self, limit):
         self.max_active_application_tabs = limit
         if self.context:
+            if self.fill_invariant and not self._fill_route_installed:
+                await self.fill_invariant.install(self.context)
+                self._fill_route_installed = True
             for page in list(self.context.pages):
                 if page.url == 'about:blank' and page not in self.leases:
                     await page.close()  # Only the dedicated context's unowned startup page.
@@ -92,6 +98,7 @@ class Browser:
             self.check_tab_limit()
         except RuntimeError:
             # A popup must not become another application session.
+            self.unexpected_popup_violations += 1
             task = asyncio.create_task(self.release_page(page))
             self.pending_closes.add(task)
             def finished(task):
@@ -121,11 +128,14 @@ class Browser:
         self.context = await self.playwright.chromium.launch_persistent_context(
             str(self.config.private / "browser_profile"), headless=self.config["browser"]["headless"],
             channel=self.config["browser"]["channel"], accept_downloads=False,
-            service_workers='block' if self.network_policy else 'allow',
+            service_workers='block' if self.network_policy or self.fill_invariant else 'allow',
             **geometry, args=["--window-size=1460,1000"])
         self.context.set_default_timeout(self.config["browser"]["timeout_ms"])
         if self.network_policy:
             await self.context.route('**/*', self.network_policy.route)
+        if self.fill_invariant:
+            await self.fill_invariant.install(self.context)
+            self._fill_route_installed = True
         if self.max_active_application_tabs is not None and self.context.browser:
             session = await self.context.browser.new_browser_cdp_session()
             try:
@@ -382,6 +392,7 @@ class Browser:
                 if self.playwright:
                     await self.playwright.stop()
             finally:
+                self._fill_route_installed = False
                 self.context = self.playwright = None
                 self.leases.clear()
                 self.observations.clear()

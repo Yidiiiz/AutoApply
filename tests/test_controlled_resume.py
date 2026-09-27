@@ -77,7 +77,8 @@ async def test_explicit_untouched_upload_protocol_refresh(held,db):
     engine,page=held
     original=page._autoapply_uploads=UploadTracker()
     db.set_setting('refresh_upload_protocol:1',True)
-    await engine.resume_manual(1,inspect_only=True)
+    from autoapply.maintenance import refresh_untouched_upload_protocol
+    refresh_untouched_upload_protocol(engine, 1)
     assert page._autoapply_uploads is original
     assert not db.setting('refresh_upload_protocol:1')
     engine._process_one.assert_not_awaited()
@@ -90,7 +91,8 @@ async def test_upload_protocol_refresh_cannot_discard_selection(held,db):
     page._autoapply_uploads.select()
     db.set_setting('refresh_upload_protocol:1',True)
     with pytest.raises(ValueError,match='untouched'):
-        await engine.resume_manual(1,inspect_only=True)
+        from autoapply.maintenance import refresh_untouched_upload_protocol
+        refresh_untouched_upload_protocol(engine, 1)
     engine.inspect_security.assert_not_awaited()
 
 

@@ -1,0 +1,52 @@
+{
+  "separate_events": {
+    "db_commits": 20,
+    "history_flushes": 10,
+    "history_syncs": 10,
+    "bundle_exports": 10,
+    "statistics_calculations": 10,
+    "db_writes": 10,
+    "security_writes": 0,
+    "file_rewrites": 20
+  },
+  "batched_events": {
+    "db_commits": 2,
+    "history_flushes": 1,
+    "history_syncs": 1,
+    "bundle_exports": 1,
+    "statistics_calculations": 1,
+    "db_writes": 10,
+    "security_writes": 0,
+    "file_rewrites": 2
+  },
+  "unchanged_security": {
+    "db_commits": 10,
+    "history_flushes": 0,
+    "history_syncs": 0,
+    "bundle_exports": 0,
+    "statistics_calculations": 0,
+    "db_writes": 0,
+    "security_writes": 0,
+    "file_rewrites": 0
+  },
+  "small_mutation": {
+    "db_commits": 2,
+    "history_flushes": 1,
+    "history_syncs": 1,
+    "bundle_exports": 1,
+    "statistics_calculations": 1,
+    "db_writes": 1,
+    "security_writes": 0,
+    "file_rewrites": 2
+  },
+  "probe_observations": {
+    "db_commits": 20,
+    "history_flushes": 0,
+    "history_syncs": 0,
+    "bundle_exports": 0,
+    "statistics_calculations": 0,
+    "db_writes": 30,
+    "security_writes": 0,
+    "file_rewrites": 0
+  }
+}

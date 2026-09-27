@@ -1,0 +1,122 @@
+[
+  {
+    "file": "baseline-focused.xml",
+    "tests": 249.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 241.249
+  },
+  {
+    "file": "delivery-repair.xml",
+    "tests": 11.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 15.123
+  },
+  {
+    "file": "durable-delivery.xml",
+    "tests": 13.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 14.0
+  },
+  {
+    "file": "edge.xml",
+    "tests": 53.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 42.31
+  },
+  {
+    "file": "fill-repair.xml",
+    "tests": 13.0,
+    "failures": 1.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 66.888
+  },
+  {
+    "file": "fill.xml",
+    "tests": 9.0,
+    "failures": 2.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 15.983
+  },
+  {
+    "file": "focused.xml",
+    "tests": 274.0,
+    "failures": 5.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 221.411
+  },
+  {
+    "file": "full-suite-first.xml",
+    "tests": 930.0,
+    "failures": 2.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 1230.491
+  },
+  {
+    "file": "initial.xml",
+    "tests": 91.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 68.169
+  },
+  {
+    "file": "integration.xml",
+    "tests": 182.0,
+    "failures": 4.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 258.362
+  },
+  {
+    "file": "ledger-repair.xml",
+    "tests": 5.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 4.751
+  },
+  {
+    "file": "lifecycle.xml",
+    "tests": 52.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 29.077
+  },
+  {
+    "file": "listing-repair.xml",
+    "tests": 11.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 11.082
+  },
+  {
+    "file": "new.xml",
+    "tests": 76.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 82.554
+  },
+  {
+    "file": "restart-repair.xml",
+    "tests": 1.0,
+    "failures": 0.0,
+    "errors": 0.0,
+    "skipped": 0.0,
+    "time": 31.111
+  }
+]

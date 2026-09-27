@@ -6,6 +6,13 @@ from urllib.parse import urlsplit
 from .archive import atomic_json
 from .models import now
 
+
+def is_final_submission(url, method, body=None):
+    if method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return False
+    return bool(re.search(r'(?:submit|finalize)(?:application)?', urlsplit(url).path, re.I)
+                or isinstance(body, str) and re.search(r'"(?:operationName|action)"\s*:\s*"[^\"]*(?:submit|finalize)', body, re.I))
+
 PAYLOADS = [
  'resume.pdf', 'first and last name', 'email address', 'phone number',
  'current city/location', 'university/school', 'degree', 'major', 'graduation date',
@@ -52,11 +59,8 @@ class ApprovedDestinations:
   parsed=urlsplit(url)
   if not self.current or parsed.scheme!='https' or parsed.hostname!=self.current['domain']:
    return 'UNAPPROVED_DOMAIN'
-  if method not in {'GET','HEAD','OPTIONS'}:
-   if re.search(r'(?:submit|finalize)(?:application)?',parsed.path,re.I):
-    return 'FINAL_SUBMISSION_FORBIDDEN'
-   if isinstance(body,str) and re.search(r'"(?:operationName|action)"\s*:\s*"[^"]*(?:submit|finalize)',body,re.I):
-    return 'FINAL_SUBMISSION_FORBIDDEN'
+  if is_final_submission(url, method, body):
+   return 'FINAL_SUBMISSION_FORBIDDEN'
   if navigation:
    approved=urlsplit(self.current['canonical_url']).path.rstrip('/')
    if parsed.path.rstrip('/')!=approved and not parsed.path.startswith(approved+'/'):

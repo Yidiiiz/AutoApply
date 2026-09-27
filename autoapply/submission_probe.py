@@ -109,6 +109,8 @@ class SubmissionProbe:
         self.db.flush_history()
 
     async def physical_click(self):
+        if getattr(self.db.lifecycle, "fill_only", False):
+            raise SubmitObstructed("Fill-only forbids final submission")
         """One mouse call; never fall back to a locator click or retry after intent."""
         if self.db.automation_retired(self.app_id):
             raise SubmitObstructed('User-reported submission permanently excludes further Submit interaction')

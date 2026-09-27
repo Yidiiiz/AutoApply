@@ -1,0 +1,40 @@
+{
+  "baseline_commit": "146293a06d3c8d41c430a5c469a735925762ac1d",
+  "prior_artifacts": [
+    {
+      "path": "docs/phase2-2026-09-25.md",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "c1c136bb34677cf5b7a47cf710737a268d28f6f8e66455c029f9527cd4757d47"
+    },
+    {
+      "path": "docs/phase3-2026-09-25.md",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "df2cfabec40fc9df6a698c383560763b626bf01b7bdc4053e4a13638033a0732"
+    },
+    {
+      "path": "docs/phase4-2026-09-25.md",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "2aa80167b982c30b2afd920c9d14627da5a3430495c20109850826e804d8c3ca"
+    },
+    {
+      "path": "docs/phase5-2026-09-25.md",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "1ce3fb4ab6cc625120dea19266c5f303ec782123a504c0c0dd1da979970f306d"
+    },
+    {
+      "path": "docs/phase6-2026-09-26.md",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "19a201afc737de1ba97b9a1a1a4be394399c1f37926f87aa36ea0876dfbf0086"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/test-results.json",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "7c9bde00cff44f33a87781c928ddbbc51b0430c15af6fa0c2dddc73b23678cd9"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/offline_validation.py",
+      "unchanged_from_baseline": true,
+      "normalized_sha256": "6bfa665aa15811249adc87836e334244f34d555a245412886714d4d1a216499b"
+    }
+  ]
+}

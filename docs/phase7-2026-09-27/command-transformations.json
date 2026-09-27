@@ -1,0 +1,12 @@
+{
+  "method": "Static source-path counts for the shared retry command; actual Phase 7 command counts also recorded by the offline pytest plugin.",
+  "before": {
+    "CLI retry command text parses": 1,
+    "Discord retry command text parses": 2
+  },
+  "after": {
+    "CLI retry command text parses": 1,
+    "Discord retry command text parses": 1
+  },
+  "source_baseline_sha256": "050a5eec711bee9ff4d346156672a1092b67bff7d1cfc06dc87c7c83ecda5629"
+}
