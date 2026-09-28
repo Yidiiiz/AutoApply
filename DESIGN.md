@@ -42,7 +42,7 @@ One asyncio worker owns browser application processing. Discord handles interact
 | `database` | Schema, queue, source provenance, questions, audit and recovery |
 | `jobs`, `sources` | Identity, dates, location, eligibility and source parsing |
 | `browser`, `applications` | Persistent Playwright lifecycle, detection and form adapters |
-| `answers`, `ai` | Verified fact matching, writing bank and configured browser providers |
+| `answers`, `narratives`, `ai`, `codex_writer` | Verified fact matching, deterministic writing templates, immutable narrative signatures, separate unverified proposal cache, and session-owned configured providers |
 | `gmail` | Read-only OAuth and scoped verification extraction |
 | `control`, `discord_bot` | Shared CLI/DM controls, pending questions and durable outbox |
 | `engine`, `runtime` | Worker orchestration and exclusive process lock |

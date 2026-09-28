@@ -1,0 +1,58 @@
+{
+  "baseline-focused.xml": {
+    "total": 108,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 94.33
+  },
+  "baseline-providers.xml": {
+    "total": 12,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 1.429
+  },
+  "broad.xml": {
+    "total": 559,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 480.139
+  },
+  "focused.xml": {
+    "total": 159,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 111.978
+  },
+  "full-suite-first.xml": {
+    "total": 1023,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 859.107
+  },
+  "initial.xml": {
+    "total": 85,
+    "failures": 5,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 80.27
+  },
+  "new-first.xml": {
+    "total": 86,
+    "failures": 5,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 31.633
+  },
+  "review-focused.xml": {
+    "total": 134,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 59.63
+  }
+}

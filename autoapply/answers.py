@@ -144,6 +144,10 @@ class AnswerResolver:
                 or data.get('provenance', {}).get('fact_revision') != self._revision[1]):
             return None
         answer = answer_from_row(row)
+        if answer.source.startswith('grounded_ai:') or answer.source == 'narrative_template':
+            # Narrative compatibility additionally binds listing, writing and provider
+            # policy revisions. The narrative service owns that check, not a receipt.
+            return None
         try:
             validate_answer(q, answer.value)
         except (ValueError, TypeError):
@@ -337,13 +341,16 @@ def is_writing_question(q):
     if q.kind not in {"text", "textarea"} or concept(q.label):
         return False
     text = question_text(q.label)
-    if re.search(r"citizen|visa|sponsor|export|salary|gpa|clearance|certif|attest|convict|disab|veteran|years of|license|gender|ethnic|race|religion|medical|prefer not|privacy|sms|consent|authorization|previous employer|prior employ|government connect", text):
+    if re.search(r"citizen|visa|sponsor|export|salary|gpa|clearance|certif|attest|convict|disab|veteran|years of|license|gender|ethnic|race|religion|medical|prefer not|privacy|sms|consent|authorization|previous employer|prior employ|government connect|social security|birth|\blegal\b|criminal|arrest|passport|marital|\bssn\b|email|phone|address|graduation date", text):
         return False
-    return bool(re.match(r"why\b|describe\b|tell us\b|what interests you\b|share (?:an example|a project)\b", text))
+    if re.match(r'why\b|what interests you\b', text):
+        return True
+    return bool(re.match(r'describe\b|tell us\b|share (?:an example|a project)\b', text)
+                and re.search(r'\b(experience|projects?|challenge|teamwork|leadership|education|skills|availability|links|yourself|motivation|interests?|contribut\w*)\b', text))
 
 
 def written_reuse(db, q, app, profile_revision=None):
-    if not is_writing_question(q):
+    if not is_writing_question(q) or q.policy in {'DO_NOT_ANSWER', 'REQUIRE_USER'}:
         return None
     if 'id' not in app:
         # A draft preview may lack a persisted application. It cannot establish
@@ -358,7 +365,8 @@ def written_reuse(db, q, app, profile_revision=None):
         if (profile_revision and row.get('profile_revision') == profile_revision
                 and row.get("question_signature") == descriptor.signature
                 and (not q.max_length or len(row["answer"]) <= q.max_length)):
-            return Answer(row["answer"], "verified_writing_bank", verified=True, provenance={"writing_id": row["id"]})
+            return Answer(row["answer"], "verified_writing_bank", verified=True,
+                          provenance={"writing_id": row["id"], "kind": "VERIFIED_WRITING_MEMORY"})
     return None
 
 

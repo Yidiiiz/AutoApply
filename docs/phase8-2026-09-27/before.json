@@ -1,0 +1,39 @@
+{
+  "representative": {
+    "snapshot_checks": 5,
+    "profile_file_reads": 31,
+    "writing_bank_lookups": 5,
+    "selects": 40,
+    "provider_constructions": 5,
+    "readiness_checks": 10,
+    "provider_calls": 10,
+    "model_selections": 10,
+    "prompt_builds": 5,
+    "writes": 10,
+    "proposals": 5,
+    "input_required": 2,
+    "seconds": 0.280341,
+    "input_characters": 14257,
+    "repeated_identical_calls": 0,
+    "events": 5,
+    "context_builds": 5
+  },
+  "repeated_20": {
+    "snapshot_checks": 20,
+    "profile_file_reads": 121,
+    "writing_bank_lookups": 20,
+    "selects": 160,
+    "provider_constructions": 20,
+    "readiness_checks": 40,
+    "provider_calls": 40,
+    "model_selections": 40,
+    "prompt_builds": 20,
+    "writes": 40,
+    "proposals": 20,
+    "seconds": 0.93741,
+    "input_characters": 57460,
+    "repeated_identical_calls": 38,
+    "events": 20,
+    "context_builds": 20
+  }
+}

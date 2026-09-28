@@ -1,0 +1,425 @@
+{
+  "baseline_commit": "f39b2346da7d203507fae4554b52841c2051d3e4",
+  "files": [
+    {
+      "path": "docs/audit-2026-09-25/AUDIT.md",
+      "unchanged": true,
+      "sha256": "a09f65e06c399d1afd2292ba31ca97b9e55a637c23ffe898c55162b2fb2783e6"
+    },
+    {
+      "path": "docs/audit-2026-09-25/measure.py",
+      "unchanged": true,
+      "sha256": "f040c132c71d2ad403344f920e95a3f4be5c0410b19c5f11dcbc65bc902b65e8"
+    },
+    {
+      "path": "docs/audit-2026-09-25/measurements.json",
+      "unchanged": true,
+      "sha256": "2feb60aad6e50f76df39075f4325dc966319127e9939361cc14865b5662b15d2"
+    },
+    {
+      "path": "docs/audit-2026-09-25/policy-probes.json",
+      "unchanged": true,
+      "sha256": "7be80714630addc9fdc430c625386a386699168c01ef1f6998b6e819bbf1f177"
+    },
+    {
+      "path": "docs/audit-2026-09-25/probe_policies.py",
+      "unchanged": true,
+      "sha256": "5fe7d063064d8f815f64a98a9256b9fed7449a4f4a7db791c565885d29efdb12"
+    },
+    {
+      "path": "docs/audit-2026-09-25/test-results.json",
+      "unchanged": true,
+      "sha256": "181ec53e7bec82a49c25a084a71141514466fb4415b42e20021779d0ee100987"
+    },
+    {
+      "path": "docs/phase2-2026-09-25.md",
+      "unchanged": true,
+      "sha256": "c1c136bb34677cf5b7a47cf710737a268d28f6f8e66455c029f9527cd4757d47"
+    },
+    {
+      "path": "docs/phase3-2026-09-25.md",
+      "unchanged": true,
+      "sha256": "df2cfabec40fc9df6a698c383560763b626bf01b7bdc4053e4a13638033a0732"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/after.json",
+      "unchanged": true,
+      "sha256": "832dfc926c7e3e98eb2ac95c3ce745d1b06babfdd1ddeb97d835edba7bf0e1cb"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/before.json",
+      "unchanged": true,
+      "sha256": "4167e015d6b3b664cf413e409cc5cdc5084f48804627ecc641c280d7d6e4ced8"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/event-index.json",
+      "unchanged": true,
+      "sha256": "1fe57204deb4f648aeeb86bcc9b0254feaac3be14b8ad106394f1d30aaa47196"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/maintenance-plans.json",
+      "unchanged": true,
+      "sha256": "cfeac5820a248ea25a407f616b07925d2c03d57948ef30c11a8b4c09d897f072"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/measure.py",
+      "unchanged": true,
+      "sha256": "7ed192e8c27f5bc78f5ad67bed59ca2235aefceb51aa19ace91cd0512e6de6ec"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/measure_event_index.py",
+      "unchanged": true,
+      "sha256": "db6cb8fff803dd375de1bfc2d5ef58b431a602fc3fcdd1f8168b1c0230dbad78"
+    },
+    {
+      "path": "docs/phase3-2026-09-25/test-results.json",
+      "unchanged": true,
+      "sha256": "29727e01d851522f45a3448d9f5c5dbd2c7ff421f9e2726e16ebf7ac2d5385f9"
+    },
+    {
+      "path": "docs/phase4-2026-09-25.md",
+      "unchanged": true,
+      "sha256": "2aa80167b982c30b2afd920c9d14627da5a3430495c20109850826e804d8c3ca"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/after.json",
+      "unchanged": true,
+      "sha256": "a10a6b9997a8ac0c6af0b4cb17857a0b3cc47ac213f378e44df014118072dfab"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/audit-preservation.json",
+      "unchanged": true,
+      "sha256": "f03c1770d681df115e31979b4dbe1ec1286c2f2783fa62fa33a6c7e6f0323cf3"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/baseline-ids.json",
+      "unchanged": true,
+      "sha256": "38b80304c90d20ad6f2006ce2fad2567888c5f2457365737e6c6de7a3f64fe6f"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/before.json",
+      "unchanged": true,
+      "sha256": "cfc239c4bc070fd7ffdbbafb00f6df67df4abbc75940804d32ce2f12fec53153"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/maintenance-after.json",
+      "unchanged": true,
+      "sha256": "fb28c339340d57e5e01b1b748eb2c081c0e5970e776480fece4ac66ba769485a"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/measure.py",
+      "unchanged": true,
+      "sha256": "de55f87479d0a2898182f4c36ff55d63481989b7a892df8c896421305f534724"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/test-results.json",
+      "unchanged": true,
+      "sha256": "0b67327165db9619ea973175cbafc58796c781ce4cb2c6d706ddc6bd9ebcc21f"
+    },
+    {
+      "path": "docs/phase4-2026-09-25/verify_results.py",
+      "unchanged": true,
+      "sha256": "5ead8ede2db6576a6fbe1f5454d886f4ca566034920e845b282f597eaf40575b"
+    },
+    {
+      "path": "docs/phase5-2026-09-25.md",
+      "unchanged": true,
+      "sha256": "1ce3fb4ab6cc625120dea19266c5f303ec782123a504c0c0dd1da979970f306d"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/after.json",
+      "unchanged": true,
+      "sha256": "970c5646d6d46f83d5ed8c6883f886c6d56fee5212f1e7d37b45076e9633ad08"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/audit-preservation.json",
+      "unchanged": true,
+      "sha256": "d45a3d0e083001fda33af85b98360da2f71ae4eb9f61401221da07632e51376b"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/baseline-ids.json",
+      "unchanged": true,
+      "sha256": "3f07706d7f9ed9d1b50054db56d305f6084cf7ca147cad9b7f741ee778f71c3a"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/before.json",
+      "unchanged": true,
+      "sha256": "32404886e33a847663933a1d4e38efa2de8b3d0de0db9487937d3f2db9c0a6c9"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/maintenance-after.json",
+      "unchanged": true,
+      "sha256": "534885d71ccff8b79e2d8c1066017cb395157931ac7fadead8307f1229b61082"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/maintenance-compatibility.json",
+      "unchanged": true,
+      "sha256": "68c597a52323f80e377fffa09b4961e763e9ffdf7caeb27c95e9b44e875bf31a"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/measure.py",
+      "unchanged": true,
+      "sha256": "a0b3f344522e091b42d0a2dc19638cf0e61925f0d425c84d3a80f543b527cf28"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/offline_validation.py",
+      "unchanged": true,
+      "sha256": "6bfa665aa15811249adc87836e334244f34d555a245412886714d4d1a216499b"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/persistence-after.json",
+      "unchanged": true,
+      "sha256": "849f86225b7c670a65bc4b482015d471b56c4ac37c14448bf103c231b2866750"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/persistence-compatibility.json",
+      "unchanged": true,
+      "sha256": "37bb30a6012ed6f053d867adbb81245ae8f5a6df1ee073e2a31e1f44fd17f62b"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/test-results.json",
+      "unchanged": true,
+      "sha256": "27ab7a13972c74473cbce1c1b2d404dd6cfb040a4d1ce68dc884e9b62990dc8e"
+    },
+    {
+      "path": "docs/phase5-2026-09-25/verify_results.py",
+      "unchanged": true,
+      "sha256": "5d7d87ca637c36700786bea8e3f2aad4de1a3f1128b106f44e68f99f3e16062c"
+    },
+    {
+      "path": "docs/phase6-2026-09-26.md",
+      "unchanged": true,
+      "sha256": "19a201afc737de1ba97b9a1a1a4be394399c1f37926f87aa36ea0876dfbf0086"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/after.json",
+      "unchanged": true,
+      "sha256": "50d4b8c82512ef09016d30391172c1df19932c282aef8b8a0116953c75fcb7c0"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/audit-integrity.json",
+      "unchanged": true,
+      "sha256": "6580ff5aab914dae882066a6b5c71427098b4a6b74e23b8525f66cfd634db082"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/baseline-ids.json",
+      "unchanged": true,
+      "sha256": "fe24fa524190bd960593e45ff515cd65d4f69c098c65e914bce69b53f25e6817"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/before.json",
+      "unchanged": true,
+      "sha256": "e932444f57cce8974d310a9e291a09ebaa22983115c164062e12cb1cb468013a"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/browser_work.py",
+      "unchanged": true,
+      "sha256": "ead9ea55d033624901db0e9b75f705995424580ee35a13aafafd4017c5a31e11"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/maintenance-after.json",
+      "unchanged": true,
+      "sha256": "1d1149e65f2428f0961b288c75cbb625dbf7d9ffdb6b54de32fe4edb138fbb47"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/maintenance-compatibility.json",
+      "unchanged": true,
+      "sha256": "207a3e84c7b79daab1e497f899ba599a9b40fead707d060d4fd816ce34e3be79"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/measure.py",
+      "unchanged": true,
+      "sha256": "475b901be57b87c3abdbf2640296c9de3d65f764e99092ae1fda3b855b0712f0"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/persistence-after.json",
+      "unchanged": true,
+      "sha256": "0f5a3e3d611ddd1ee65555defab0efd28d87aff3ae341080b901da741e2008b5"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/persistence-compatibility.json",
+      "unchanged": true,
+      "sha256": "221729074671a3caa3f2da3c519bec45a592bc670e3b5d77df3a2a61023ae920"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/submit-integrity.json",
+      "unchanged": true,
+      "sha256": "6e9f0ed3bf22a39f08393a73d76f9e1d12f4e2724a0348cac9f0e9366b19a67e"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/test-results.json",
+      "unchanged": true,
+      "sha256": "7c9bde00cff44f33a87781c928ddbbc51b0430c15af6fa0c2dddc73b23678cd9"
+    },
+    {
+      "path": "docs/phase6-2026-09-26/verify_results.py",
+      "unchanged": true,
+      "sha256": "7cc920ddea35b19a2e4bd600015a909bc32fc7eebf35bea5991a1fc06cc58cd2"
+    },
+    {
+      "path": "docs/phase7-2026-09-27.md",
+      "unchanged": true,
+      "sha256": "dd5ecec629e68cea6ec74a2b8086a4a63410c85540211d1e092fc3bc8ad1e32f"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/after.json",
+      "unchanged": true,
+      "sha256": "eadcaebe73ae0260e6fe52fbf3ad014d1b272e29f362476f3200992ff77aa875"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/audit-integrity.json",
+      "unchanged": true,
+      "sha256": "24ff2fe56cb19cf96ce49c53d239364007897baa87151710cf1b4b05232b4f99"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/baseline-ids.json",
+      "unchanged": true,
+      "sha256": "497c88c3cd51afc945d37031a8ce8eea70d9471b993aaa52200ba77e13dbf321"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/before.json",
+      "unchanged": true,
+      "sha256": "7b4e6414f15b59ae83511919183b7eb1cbc84dc00f867456f042c80e07d780c5"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/command-transformations.json",
+      "unchanged": true,
+      "sha256": "7b6b074dd42903e4f0a8f0fba4f880fa05b5d73e2ecc7aa39ab20b8fe910a5e0"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/conflict-scans.json",
+      "unchanged": true,
+      "sha256": "8ea8206a4eb5e6714786cbd5c3941f73abc8a0a05156291e523da041b4d7ffaf"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/control-work.json",
+      "unchanged": true,
+      "sha256": "523f4b922f29d7f1cb31e7bee3e7a9acbaa6b76a6253f9f55c70dc4ccd1a5daf"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/control_work.py",
+      "unchanged": true,
+      "sha256": "5f187719475d4c63a8a1ab31f0cf93860acfa37f462b4907d2b6cdc07511e9bc"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/first-run-summary.json",
+      "unchanged": true,
+      "sha256": "7d26d1c5c8e542f2aad3424627e1ecefe100fd6da2c557613b30c4175011a513"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/focused-results.json",
+      "unchanged": true,
+      "sha256": "8b874f97ece902447c6269a0d7e53d337ce7d5257e0530eb3e0c66582c244864"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/maintenance-after.json",
+      "unchanged": true,
+      "sha256": "2c7013b22c32b2a8ff7129e8560ba3c4cee756c552a35519deaff8744d3c4b2a"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/maintenance-compatibility.json",
+      "unchanged": true,
+      "sha256": "68c597a52323f80e377fffa09b4961e763e9ffdf7caeb27c95e9b44e875bf31a"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/measure.py",
+      "unchanged": true,
+      "sha256": "63064e8b31543738dc35412fbc4d5644692e72fb94fd91fff1dde6a5e666945c"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/measure_conflicts.py",
+      "unchanged": true,
+      "sha256": "13b945f943a3006ab5e1648f03cccca394d8ea101d1b7d91cb2086219c2e4852"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/persistence-after.json",
+      "unchanged": true,
+      "sha256": "28cc502cf5de2dd96d528367acc7e85df37ac8b3c0f2932375459d659b57691c"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/persistence-compatibility.json",
+      "unchanged": true,
+      "sha256": "915ef1982b2811061a46bbb35d83e309a5057b537e11eaeb8d39efd505e8d54f"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/test-results.json",
+      "unchanged": true,
+      "sha256": "e983d5b621a045abf9b92e3c51dbc6f583c9c29c05a044f49ace26423e469118"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/verify_results.py",
+      "unchanged": true,
+      "sha256": "aa06b9998b095802d34f41ba8f0b2ea807021198e474412f3422d398c8ffee18"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/writers-after.txt",
+      "unchanged": true,
+      "sha256": "a78fcb73e893680da5e9e0c5aeebe4e1df3935b215ef03ba0f30297be11d92bc"
+    },
+    {
+      "path": "docs/phase7-2026-09-27/writers-before.txt",
+      "unchanged": true,
+      "sha256": "82578ed983bcfdce90f06c5f4bb0621cc261a3e3a6a2736ea15da572012f9e8c"
+    },
+    {
+      "path": "autoapply/lifecycle.py",
+      "unchanged": true,
+      "sha256": "4d88acd1272857b4ec26b305d8f588d35cc1e2f196f40c8b38a69d1d18810395"
+    },
+    {
+      "path": "autoapply/retry.py",
+      "unchanged": true,
+      "sha256": "3daedd6236ce2c021ae1165080f10f1f68db53ca60c0f31e8ceb147b2d2e8440"
+    },
+    {
+      "path": "autoapply/manual.py",
+      "unchanged": true,
+      "sha256": "ffefbbc2fa8d8457e840a259ac83bde61f871992dec38db70e9e599220f161fd"
+    },
+    {
+      "path": "autoapply/fill_batch.py",
+      "unchanged": true,
+      "sha256": "b18cc34f85059ea147133d1730a396416f2ca450d2d0079f6d21ee61605f4d9a"
+    },
+    {
+      "path": "autoapply/submission_probe.py",
+      "unchanged": true,
+      "sha256": "c3a328a3f0f0f0cc1228c946318f4ab0679cb742ca942ca8b899c6f1061b26ce"
+    },
+    {
+      "path": "autoapply/browser.py",
+      "unchanged": true,
+      "sha256": "783e071ba7c7dba128f2de2845555d29eb731f394d3ae765897bbba3439ca7b4"
+    },
+    {
+      "path": "autoapply/security.py",
+      "unchanged": true,
+      "sha256": "03999cf23928e9785bcf61d84efa63896e9595ca5af7a278019036c519c244bd"
+    },
+    {
+      "path": "autoapply/uploads.py",
+      "unchanged": true,
+      "sha256": "61a335333832290fd0af6c25d099589cdcebbe363ab61bc356d28959ca4619de"
+    },
+    {
+      "path": "autoapply/listing_store.py",
+      "unchanged": true,
+      "sha256": "fcb5208f472616a66f71b8ff02b95b67a247c8cc367bef455e5452f7a3f2270a"
+    },
+    {
+      "path": "autoapply/field_mapping.py",
+      "unchanged": true,
+      "sha256": "259381e9738ba2edd2562e549c17224e839d62ccf8a444f87571b6b0d3fc7829"
+    },
+    {
+      "path": "autoapply/profile_snapshot.py",
+      "unchanged": true,
+      "sha256": "3bb5348d52cf1dc14a28d6ed2c32c9a82fb3f48385229ab8555d553f6bb437e5"
+    },
+    {
+      "path": "config/config.example.yaml",
+      "unchanged": true,
+      "sha256": "14c34f1303571945ed3a85a8553cacb5a75d6ca71d65cface3ccfdbcf5e056cc"
+    }
+  ]
+}

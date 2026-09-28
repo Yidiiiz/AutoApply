@@ -1,0 +1,14 @@
+{
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Describe your citizenship]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Tell us your visa status]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Describe your criminal history]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Explain your disability]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Tell us your gender]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Describe your GPA]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_requested_adversarial_labels_never_generate[Tell us your graduation year]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_lifecycle_commit_export_failure_restart[intent]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_lifecycle_commit_export_failure_restart[confirmation]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_lifecycle_commit_export_failure_restart[manual_command]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_lifecycle_commit_export_failure_restart[retry]": "passed",
+  "docs/final-acceptance-2026-09-27/test_audit_contracts.py::test_lifecycle_commit_export_failure_restart[checkpoint]": "passed"
+}

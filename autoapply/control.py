@@ -36,6 +36,8 @@ class Controller:
         with self.db.transaction():
             self.db.save_answer(question_id, Answer(value, "user_confirmed", verified=True,
                 provenance={'question_id': question_id,
+                            'replaces_proposal': (json.loads(row.get('answer_provenance') or '{}').get('provenance')
+                                                 or self.db.setting(f'draft_provenance:{question_id}')),
                             'canonical_profile_revision': self.config.profile_snapshot().revision}), verified=q.kind != "file")
             if q.key == "listing-date":
                 self.db.execute("UPDATE jobs SET posted_at=?,date_evidence='user confirmed' WHERE id=?", (value, app["job_id"]))
@@ -113,6 +115,7 @@ class Controller:
         result = await self.ai.draft(q, app)
         with self.db.transaction():
             self.db.set_setting(f"draft:{question_id}", result.value)
+            self.db.set_setting(f"draft_provenance:{question_id}", result.provenance)
             self.db.event(app["id"], "ai_draft", f"Draft for question {question_id}; source {result.source}")
         return result.value
 

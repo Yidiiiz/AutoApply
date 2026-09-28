@@ -1,0 +1,381 @@
+[
+  {
+    "id": "S1",
+    "production_enforcement": "Unknown facts never invented: `AnswerResolver`, field policy and narrative admission abstain.",
+    "primary_outcomes": {
+      "tests/test_phase5_resolution.py::test_abstention_is_structured[UNKNOWN_FIELD-True-USER_INPUT_REQUIRED]": "passed",
+      "tests/test_phase5_resolution.py::test_abstention_is_structured[UNKNOWN_FIELD-False-OPTIONAL_SKIP]": "passed",
+      "tests/test_phase5_resolution.py::test_abstention_is_structured[REJECTED_FIELD-True-REJECTED]": "passed",
+      "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Security check</h1><p>Verify you are human</p>-BOT_CHALLENGE]": "passed",
+      "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Software Engineering Intern Summer 2027</h1>\\n<p>Software engineering internship for undergraduate students in New York, NY.</p>\\n<form><label>Unknown factual identifier<input name=\"unknown\" required></label>\\n<label>Resume<input name=\"resume\" type=\"file\" required></label><button type=\"submit\">Submit application</button></form>\\n<script>window.finalClicks=0;document.querySelector('button').onclick=()=>window.finalClicks++;\\ndocument.querySelector('form').onsubmit=e=>{e.preventDefault();fetch('/submit',{method:'POST'})}</script>-INPUT_REQUIRED]": "passed",
+      "tests/test_phase7_fill.py::test_held_local_form_is_checkpoint_not_ready[<h1>Software Engineering Intern Summer 2027</h1>\\n<p>Software engineering internship for undergraduate students in New York, NY.</p>\\n<form><label>First Name<input name=\"first_name\" type=\"color\" required></label>\\n<label>Resume<input name=\"resume\" type=\"file\" required></label><button type=\"submit\">Submit application</button></form>\\n<script>window.finalClicks=0;document.querySelector('button').onclick=()=>window.finalClicks++;\\ndocument.querySelector('form').onsubmit=e=>{e.preventDefault();fetch('/submit',{method:'POST'})}</script>-UNSUPPORTED_CONTROL]": "passed"
+    },
+    "secondary_defense_or_limit": "Required field hold; adversarial-label audit. Arbitrary model entailment is not formally proved.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S2",
+    "production_enforcement": "Null != false: `ProfileSnapshot`, fact lookup and explicit bool override parsing.",
+    "primary_outcomes": {
+      "tests/test_phase5_resolution.py::test_snapshot_null_false_original_and_immutable": "passed",
+      "tests/test_phase5_resolution.py::test_null_authorization_and_sponsorship_not_derived_from_citizenship": "passed"
+    },
+    "secondary_defense_or_limit": "No citizenship-to-authorization fallback.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S3",
+    "production_enforcement": "Factual fields invoke zero AI: `is_writing_question`, manager admission and Engine ordering.",
+    "primary_outcomes": {
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[First name]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Email]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Phone number]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Degree]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[School]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[GPA]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Graduation date]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[GitHub]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Sponsorship now]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Sponsorship future]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Are you a US citizen?]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Do you require sponsorship now?]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Gender]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Privacy consent]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your legal name]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Tell us your social security number]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your date of birth]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your email]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Why do you need visa sponsorship?]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your disability]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe years of experience]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your legal history]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe employee number]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Tell us your address]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe your age]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe criminal background]": "passed",
+      "tests/test_phase8_narratives.py::test_factual_provider_calls_are_zero[Describe marital status]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[First name-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Last name-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Email-email]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Phone-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[School-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Degree-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Major-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Graduation date-date]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[City-text]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Are you authorized to work in the US?-radio]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Do you require sponsorship now?-radio]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Have you ever worked for us?-radio]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Do you have any conflicts of interest with us?-radio]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Privacy acknowledgement-checkbox]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[SMS recruiting preference-radio]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Gender-select]": "passed",
+      "tests/test_phase5_resolution.py::test_factual_fields_never_enter_provider[Technical interests-select]": "passed"
+    },
+    "secondary_defense_or_limit": "Audit checks both provider transports for requested labels.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S4",
+    "production_enforcement": "REJECTED_FIELD cannot reach weaker fallback: descriptor/resolver hard stop.",
+    "primary_outcomes": {
+      "tests/test_phase5_resolution.py::test_rejected_field_never_uses_profile_or_narrative": "passed"
+    },
+    "secondary_defense_or_limit": "Exact compatible verified answer exception is explicit; manager repeats rejection.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S5",
+    "production_enforcement": "Generated prose remains unverified: manager proposal, writing insert `verified=0`, structured receipts.",
+    "primary_outcomes": {
+      "tests/test_phase5_resolution.py::test_generated_provenance_stays_unverified": "passed",
+      "tests/test_phase8_narratives.py::test_user_correction_outranks_cache_and_preserves_proposal": "passed"
+    },
+    "secondary_defense_or_limit": "Explicit user acceptance separate from generation/use.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S6",
+    "production_enforcement": "Incompatible narrative scope not reused: full field/narrative signature and revisions.",
+    "primary_outcomes": {
+      "tests/test_phase8_narratives.py::test_invalidation[profile]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[graduation]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[project]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[skills]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[employer]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[requisition]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[role]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[description]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[wording]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[characters]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[words]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[policy_version]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[writing_policy]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[model]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[provider]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[credential_revision]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[sample]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[verified_fact]": "passed",
+      "tests/test_phase8_narratives.py::test_invalidation[writing_bank]": "passed",
+      "tests/test_phase8_narratives.py::test_explicit_employer_scope_still_obeys_phase5_requisition_signature": "passed"
+    },
+    "secondary_defense_or_limit": "Answer hash, post-await revision check; whole-profile invalidation is conservative.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S7",
+    "production_enforcement": "Stale listing cannot start application work: `guard_listing` at claim/start/final.",
+    "primary_outcomes": {
+      "tests/test_listing_maintenance.py::test_claim_never_trusts_cached_active": "passed",
+      "tests/test_listing_maintenance.py::test_attempt_start_rechecks_after_claim": "passed"
+    },
+    "secondary_defense_or_limit": "Pure freshness filter/preflight and final listing guard.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S8",
+    "production_enforcement": "Protected identity prevents duplicate execution: `submission_conflict`, preflight, retirement/lifecycle guards.",
+    "primary_outcomes": {
+      "tests/test_history.py::test_imported_submission_blocks_duplicate": "passed",
+      "tests/test_security.py::test_unresolved_duplicate_protects_new_alias[MANUAL_REVIEW]": "passed",
+      "tests/test_security.py::test_unresolved_duplicate_protects_new_alias[SUBMITTING]": "passed"
+    },
+    "secondary_defense_or_limit": "Final intent conflict check; claim reservation is not browser execution.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S9",
+    "production_enforcement": "Same-title distinct requisitions distinct: `identity_match`, ATS opportunity keys.",
+    "primary_outcomes": {
+      "tests/test_phase5_candidates.py::test_same_title_distinct_requisitions_and_exact_alias": "passed",
+      "tests/test_phase7_lifecycle.py::test_exact_identity_distinct_tenants_and_requisitions": "passed"
+    },
+    "secondary_defense_or_limit": "Incomplete legacy title similarity is explicitly ambiguous, never exact.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S10",
+    "production_enforcement": "Durable intent before final interaction: Engine ordering and lifecycle atomic commit.",
+    "primary_outcomes": {
+      "tests/test_persistence_browser.py::test_intent_is_committed_before_final_interaction[False]": "passed",
+      "tests/test_persistence_browser.py::test_intent_is_committed_before_final_interaction[True]": "passed"
+    },
+    "secondary_defense_or_limit": "Export failure aborts before click; physical probe itself is an internal transport, not an independent intent authorizer.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S11",
+    "production_enforcement": "SUBMITTED requires affirmative evidence: classifier plus lifecycle nonempty confirmation guard.",
+    "primary_outcomes": {
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Thank you for applying-True]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Application submitted-True]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Your application has been received-True]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Application confirmation number: ABC-12345-True]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Your application has not been submitted-False]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[If successful, you will see Thank you for applying-False]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[When your application has been submitted we will email you-False]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[We could not display application submitted-False]": "passed",
+      "tests/test_security.py::test_confirmation_requires_affirmative_evidence[Submit clicked-False]": "passed",
+      "tests/test_submission_probe.py::test_effect_without_confirmation_remains_unknown": "passed"
+    },
+    "secondary_defense_or_limit": "Confirmation recorded before optional screenshot I/O. Lifecycle cannot independently authenticate operator evidence.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S12",
+    "production_enforcement": "Ambiguous final delivery cannot auto-retry: durable intent and `RetryPolicy`.",
+    "primary_outcomes": {
+      "tests/test_security.py::test_no_confirmation_stays_unknown_and_cannot_resubmit": "passed",
+      "tests/test_phase7_lifecycle.py::test_crash_after_possible_delivery_holds[False]": "passed",
+      "tests/test_phase7_lifecycle.py::test_crash_after_possible_delivery_holds[True]": "passed"
+    },
+    "secondary_defense_or_limit": "Manual reconciliation requires evidence and preserves prior intent event.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S13",
+    "production_enforcement": "Manual/security/controlled holds block retry: lifecycle policy plus session checks.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[manual]": "passed",
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[security]": "passed",
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[controlled]": "passed",
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[retired]": "passed",
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[intent]": "passed",
+      "tests/test_phase7_lifecycle.py::test_holds_override_retry[confirmed]": "passed",
+      "tests/test_execution_approval.py::test_execution_approval_hold_does_not_request_applicant_answers[EXTERNAL_EXECUTION_APPROVAL_REQUIRED]": "passed",
+      "tests/test_execution_approval.py::test_execution_approval_hold_does_not_request_applicant_answers[EXECUTION_APPROVAL_BLOCKED]": "passed"
+    },
+    "secondary_defense_or_limit": "Target and in-memory token verification.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S14",
+    "production_enforcement": "Retry budget survives restart: persisted attempts/max_retries and begin_attempt accounting.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_restart_budget_counts_work_not_startups": "passed",
+      "tests/test_phase7_lifecycle.py::test_resolved_answers_cannot_manufacture_retry_budget": "passed"
+    },
+    "secondary_defense_or_limit": "Resume/reconstruct/reconcile consult remaining budget.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S15",
+    "production_enforcement": "Persisted session does not imply live page: `status.snapshot`, lifecycle recovery/release.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_persisted_flags_do_not_prove_live_readiness": "passed"
+    },
+    "secondary_defense_or_limit": "Actual owned, open page required; checkpoint crash audit.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S16",
+    "production_enforcement": "Fill-only creates no intent: Engine early return and lifecycle fill-only guard.",
+    "primary_outcomes": {
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[False]": "passed",
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[True]": "passed",
+      "tests/test_phase7_fill.py::test_whole_run_intent_violation_is_detected": "passed"
+    },
+    "secondary_defense_or_limit": "Whole-run field plus SUBMITTING-event detection.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S17",
+    "production_enforcement": "Fill-only makes no final click/request: Engine early branch; probe blocks; observer/route latch.",
+    "primary_outcomes": {
+      "tests/test_phase7_fill.py::test_actual_final_click_is_observed_and_stops_run": "passed",
+      "tests/test_phase7_fill.py::test_final_request_is_blocked_and_latched": "passed",
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[False]": "passed",
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[True]": "passed"
+    },
+    "secondary_defense_or_limit": "Recognized endpoints/labels are finite; the route classifier is not a universal arbitrary API classifier.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S18",
+    "production_enforcement": "Fill-only max application tabs one: central Browser page limit/lease policy.",
+    "primary_outcomes": {
+      "tests/test_phase6_browser.py::test_direct_fill_only_prestarted_context_enforces_owned_tab_limit": "passed",
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[False]": "passed",
+      "tests/test_phase7_fill.py::test_sequential_checkpoint_batch_local_forms[True]": "passed"
+    },
+    "secondary_defense_or_limit": "Unexpected popup closed and violation latched; a popup can exist transiently before callback closure.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S19",
+    "production_enforcement": "Stale snapshots cannot authorize mutation: generation reads, fresh locators/options/security and validation.",
+    "primary_outcomes": {
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[value]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[required]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[replacement]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[option]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[label]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[validation]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[challenge]": "passed",
+      "tests/test_phase6_browser.py::test_snapshot_invalidation_and_fresh_boundaries[navigation]": "passed",
+      "tests/test_phase6_browser.py::test_changed_dropdown_options_cannot_replay": "passed"
+    },
+    "secondary_defense_or_limit": "Cursor fresh hit test; no claim of atomicity against arbitrary browser changes between awaits.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S20",
+    "production_enforcement": "Upload receipt invalidates on relevant change: tracker revision, UI/control/network/session evidence.",
+    "primary_outcomes": {
+      "tests/test_phase6_browser.py::test_upload_receipt_reuse_and_invalidation[removed]": "passed",
+      "tests/test_phase6_browser.py::test_upload_receipt_reuse_and_invalidation[busy]": "passed",
+      "tests/test_phase6_browser.py::test_upload_receipt_reuse_and_invalidation[warning]": "passed",
+      "tests/test_phase6_browser.py::test_upload_receipt_reuse_and_invalidation[late_failure]": "passed",
+      "tests/test_phase6_browser.py::test_upload_receipt_reuse_and_invalidation[replacement]": "passed",
+      "tests/test_phase6_browser.py::test_transient_upload_mutation_requires_new_stability": "passed"
+    },
+    "secondary_defense_or_limit": "Final upload recheck and fresh file hash; ATS-specific stronger acceptance rules.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S21",
+    "production_enforcement": "Final lifecycle states monotonic: transition/confirmed-dimension/retirement guards.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_forbidden_transitions[QUEUED-APPLYING]": "passed",
+      "tests/test_phase7_lifecycle.py::test_forbidden_transitions[FAILED-APPLYING]": "passed",
+      "tests/test_phase7_lifecycle.py::test_forbidden_transitions[SUBMITTED-QUEUED]": "passed",
+      "tests/test_phase7_lifecycle.py::test_forbidden_transitions[SUBMITTED-APPLYING]": "passed",
+      "tests/test_phase7_lifecycle.py::test_forbidden_transitions[INELIGIBLE-RETRY]": "passed",
+      "tests/test_security.py::test_confirmed_submission_then_persona_keeps_submission[FAILED]": "passed",
+      "tests/test_security.py::test_confirmed_submission_then_persona_keeps_submission[SKIPPED]": "passed",
+      "tests/test_security.py::test_confirmed_submission_then_persona_keeps_submission[PASSED]": "passed"
+    },
+    "secondary_defense_or_limit": "Guarded historical 5310 eligibility repair is an explicit non-submission exception, not ordinary reopen.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S22",
+    "production_enforcement": "Reconciliation preserves evidence: lifecycle writes prior timestamp/outcome/source before clearing uncertain intent.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_reconciliation_retains_intent_evidence[False]": "passed",
+      "tests/test_phase7_lifecycle.py::test_reconciliation_retains_intent_evidence[True]": "passed",
+      "tests/test_submission_probe.py::test_user_reconciliation_preserves_prior_intent": "passed"
+    },
+    "secondary_defense_or_limit": "Imported unknown fields/assets retained by archive merge.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S23",
+    "production_enforcement": "Manual commands durable/idempotent: ledger, unique ID, atomic claim/ack, interrupted-command failure.",
+    "primary_outcomes": {
+      "tests/test_phase7_lifecycle.py::test_claim_crash_has_evidence_and_never_replays": "passed",
+      "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[{bad-json]": "passed",
+      "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[[]]": "passed",
+      "tests/test_phase7_lifecycle.py::test_malformed_legacy_request_has_durable_failure[{\"action\":\"inspect\",\"id\":[]}]": "passed"
+    },
+    "secondary_defense_or_limit": "Audit export-failure/manual-command case.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S24",
+    "production_enforcement": "Dirty-history durability survives export failure: mutation commit + dirty trigger; export ack rollback.",
+    "primary_outcomes": {
+      "tests/test_persistence.py::test_critical_commit_survives_export_failure_and_restart[False]": "passed",
+      "tests/test_persistence.py::test_critical_commit_survives_export_failure_and_restart[True]": "passed",
+      "tests/test_persistence.py::test_atomic_replace_failure_keeps_old_file_and_pending_work[events.json]": "passed",
+      "tests/test_persistence.py::test_atomic_replace_failure_keeps_old_file_and_pending_work[job_description.txt]": "passed",
+      "tests/test_persistence.py::test_atomic_replace_failure_keeps_old_file_and_pending_work[statistics.json]": "passed"
+    },
+    "secondary_defense_or_limit": "Audit repeats five lifecycle operations; existing DB-before-history lock protocol.",
+    "validation_only": false,
+    "result": "PASS"
+  },
+  {
+    "id": "S25",
+    "production_enforcement": "Validation requires no external network/provider: explicit offline plugins and synthetic configuration.",
+    "primary_outcomes": {
+      "tests/test_phase8_narratives.py::test_offline_validation_blocks_external_services_and_providers": "passed"
+    },
+    "secondary_defense_or_limit": "**Validation-only enforcement**, not a production network ban. Python socket/DNS guards, Chromium route/DNS restrictions, blocked real transports, temporary credential metadata.",
+    "validation_only": true,
+    "result": "PASS"
+  }
+]

@@ -1,0 +1,192 @@
+{
+  "separate_events": {
+    "db_commits": [
+      20,
+      20
+    ],
+    "history_flushes": [
+      10,
+      10
+    ],
+    "history_syncs": [
+      10,
+      10
+    ],
+    "bundle_exports": [
+      10,
+      10
+    ],
+    "statistics_calculations": [
+      10,
+      10
+    ],
+    "db_writes": [
+      10,
+      10
+    ],
+    "security_writes": [
+      0,
+      0
+    ],
+    "file_rewrites": [
+      20,
+      20
+    ],
+    "sqlite_changes_including_triggers": [
+      30,
+      30
+    ]
+  },
+  "batched_events": {
+    "db_commits": [
+      2,
+      2
+    ],
+    "history_flushes": [
+      1,
+      1
+    ],
+    "history_syncs": [
+      1,
+      1
+    ],
+    "bundle_exports": [
+      1,
+      1
+    ],
+    "statistics_calculations": [
+      1,
+      1
+    ],
+    "db_writes": [
+      10,
+      10
+    ],
+    "security_writes": [
+      0,
+      0
+    ],
+    "file_rewrites": [
+      2,
+      2
+    ],
+    "sqlite_changes_including_triggers": [
+      12,
+      12
+    ]
+  },
+  "unchanged_security": {
+    "db_commits": [
+      10,
+      10
+    ],
+    "history_flushes": [
+      0,
+      0
+    ],
+    "history_syncs": [
+      0,
+      0
+    ],
+    "bundle_exports": [
+      0,
+      0
+    ],
+    "statistics_calculations": [
+      0,
+      0
+    ],
+    "db_writes": [
+      0,
+      0
+    ],
+    "security_writes": [
+      0,
+      0
+    ],
+    "file_rewrites": [
+      0,
+      0
+    ],
+    "sqlite_changes_including_triggers": [
+      0,
+      0
+    ]
+  },
+  "small_mutation": {
+    "db_commits": [
+      2,
+      2
+    ],
+    "history_flushes": [
+      1,
+      1
+    ],
+    "history_syncs": [
+      1,
+      1
+    ],
+    "bundle_exports": [
+      1,
+      1
+    ],
+    "statistics_calculations": [
+      1,
+      1
+    ],
+    "db_writes": [
+      1,
+      1
+    ],
+    "security_writes": [
+      0,
+      0
+    ],
+    "file_rewrites": [
+      2,
+      2
+    ],
+    "sqlite_changes_including_triggers": [
+      3,
+      3
+    ]
+  },
+  "probe_observations": {
+    "db_commits": [
+      20,
+      20
+    ],
+    "history_flushes": [
+      0,
+      0
+    ],
+    "history_syncs": [
+      0,
+      0
+    ],
+    "bundle_exports": [
+      0,
+      0
+    ],
+    "statistics_calculations": [
+      0,
+      0
+    ],
+    "db_writes": [
+      30,
+      30
+    ],
+    "security_writes": [
+      0,
+      0
+    ],
+    "file_rewrites": [
+      0,
+      0
+    ],
+    "sqlite_changes_including_triggers": [
+      31,
+      31
+    ]
+  }
+}

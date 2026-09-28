@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -15,6 +16,31 @@ class CodexWritingProvider:
         self.executable = settings.get('executable') or shutil.which('codex')
         if settings.get('billing') != 'included' or not self.executable:
             raise ValueError('Codex writing requires an installed CLI and included billing')
+        self._ready_until = 0.0
+        self._ready_revision = None
+
+    def credential_revision(self):
+        from .profile_snapshot import fingerprint
+        home = Path(os.environ.get('CODEX_HOME') or Path.home()/'.codex')
+        path = home/'auth.json'
+        try:
+            stat = path.stat()
+            token = (str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+        except OSError:
+            token = (str(path), None)
+        return fingerprint([self.settings, token])
+
+    async def ensure_ready(self, folder):
+        from .ai import ProviderUnavailable
+        revision = self.credential_revision()
+        if revision == self._ready_revision and time.monotonic() < self._ready_until:
+            return
+        self._ready_until = 0.0
+        status = await self.run(['login', 'status'], folder)
+        if 'Logged in using ChatGPT' not in status:
+            raise ProviderUnavailable('Codex writing requires an existing ChatGPT subscription login', 'AUTHENTICATION')
+        self._ready_revision = revision
+        self._ready_until = time.monotonic() + 60
 
     async def run(self, args, cwd, prompt=None):
         from .ai import ProviderUnavailable
@@ -30,20 +56,32 @@ class CodexWritingProvider:
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(prompt.encode() if prompt else None),
                                                     self.settings.get('timeout_seconds', 180))
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             proc.kill()
             await proc.wait()
-            raise ProviderUnavailable('Codex writing timed out or was cancelled; no answer used') from None
+            self._ready_until = 0.0
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise ProviderUnavailable('Codex writing timed out or was cancelled; no answer used', 'TRANSPORT_TIMEOUT') from None
         if proc.returncode:
-            raise ProviderUnavailable('Codex writing unavailable; check CLI login and subscription usage')
+            self._ready_until = 0.0
+            error = stderr.decode('utf-8', errors='replace').lower()
+            category = ('RATE_LIMIT' if any(s in error for s in ('rate limit', 'usage limit', '429')) else
+                        'AUTHENTICATION' if any(s in error for s in ('unauthorized', 'authentication', '401')) else 'UNAVAILABLE')
+            raise ProviderUnavailable('Codex writing unavailable; check CLI login and subscription usage', category)
         return stdout.decode('utf-8', errors='replace') + ('\n'+stderr.decode('utf-8', errors='replace') if args[:2] == ['login','status'] else '')
 
     async def generate_response(self, request):
+        try:
+            return await self._generate_response(request)
+        except BaseException:
+            self._ready_until = 0.0
+            raise
+
+    async def _generate_response(self, request):
         from .ai import ProviderUnavailable
         with tempfile.TemporaryDirectory(prefix='autoapply-writing-') as folder:
-            status = await self.run(['login','status'], folder)
-            if 'Logged in using ChatGPT' not in status:
-                raise ProviderUnavailable('Codex writing requires an existing ChatGPT subscription login')
+            await self.ensure_ready(folder)
             output = Path(folder)/'answer.json'
             args = ['exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check',
                     '--sandbox', 'read-only', '-c', 'approval_policy="never"',
@@ -71,11 +109,11 @@ class CodexWritingProvider:
                     'Include current job description and user evidence.\n')
             await self.run(args+['-'], folder, prompt+json.dumps(request))
             if not output.exists():
-                raise ProviderUnavailable('Codex returned no structured writing result')
+                raise ProviderUnavailable('Codex returned no structured writing result', 'EMPTY_RESPONSE')
             try:
                 result = json.loads(output.read_text(encoding='utf-8'))
             except ValueError:
-                raise ProviderUnavailable('Codex returned invalid JSON; no answer used') from None
+                raise ProviderUnavailable('Codex returned invalid JSON; no answer used', 'MALFORMED_RESPONSE') from None
             if not isinstance(result,dict):
-                raise ProviderUnavailable('Codex returned a non-object result')
+                raise ProviderUnavailable('Codex returned a non-object result', 'MALFORMED_RESPONSE')
             return result

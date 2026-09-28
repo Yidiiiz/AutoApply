@@ -1,0 +1,34 @@
+{
+  "runs": {
+    "full-suite": {
+      "passed": 1023,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "audit": {
+      "passed": 12,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "audit-final": {
+      "passed": 12,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "control-work": {
+      "passed": 83,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "safety_invariants": 25,
+  "gates_passed": 10,
+  "report_sections": 17,
+  "relative_links_valid": true,
+  "audit_whitespace_valid": true,
+  "baseline_source_changed": false
+}

@@ -50,10 +50,16 @@ async def test_generate_grounded_narratives(config, db, listing, grounded, label
     assert writing_topic(label) == topic
     request = grounded[1][0]
     assert request['verified_facts']['project'].rstrip('.') in answer.value
-    assert request['job_description'] == listing.description
-    assert request['company'] in answer.value
+    assert request['job_context']['job.description'] == listing.description
+    assert request['job_context']['job.company'] in answer.value
+    # Generation is a proposal, not a use event. Evidence is recorded on commitment.
+    assert not db.one("SELECT detail FROM events WHERE kind='grounded_narrative'")
+    row = db.question(1, Question('why', label, 'textarea', required))
+    with db.transaction():
+        db.save_answer(row['id'], answer)
     audit = json.loads(db.one("SELECT detail FROM events WHERE kind='grounded_narrative'")['detail'])
-    assert audit['supporting_facts']['job.description'] == listing.description
+    assert any(e['source_id'] == 'job.description' and e['quote_hash'] for e in audit['evidence'])
+    assert audit['kind'] == 'GENERATED_PROPOSAL'
     assert not db.rows('SELECT * FROM notifications')
 
 

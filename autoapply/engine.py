@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 
 from .ai import AIManager, ProviderUnavailable
-from .answers import AnswerResolver, validate_answer, written_reuse, is_writing_question
+from .answers import AnswerResolver, validate_answer, is_writing_question
 from .applications import UnsupportedForm, adapter_for
 from .archive import archive_application
 from .browser import Browser, page_condition, classify_page_condition
@@ -33,9 +33,9 @@ class Engine:
     def __init__(self, config, db, browser=None, *, fill_only=False):
         self.config, self.db = config, db
         self.browser = browser or Browser(config)
-        self.ai = AIManager(config, db, self.browser)
-        self.control = Controller(config, db, self.ai)
         self.resolver = AnswerResolver(config, db)
+        self.ai = AIManager(config, db, self.browser, resolver=self.resolver)
+        self.control = Controller(config, db, self.ai)
         self.next_application = 0.0
         self.stop_event = asyncio.Event()
         self.classifier = SubmissionClassifier()
@@ -456,7 +456,7 @@ class Engine:
                     if not answer and row['status'] == 'ANSWERED':
                         answer = self.resolver.replay(row, q, app)
                     if not answer and is_writing_question(q) and policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}:
-                        answer = written_reuse(self.db, q, app, self.config.profile_snapshot().revision)
+                        answer = self.ai.verified_reuse(q, app, self.resolver.snapshot)
                     if not answer and is_writing_question(q) and policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'} and (not adapter.requires_explicit_narrative_policy or policy == 'GENERATE_GROUNDED'):
                         try:
                             answer = await self.ai.draft(q, app)

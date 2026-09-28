@@ -1,0 +1,99 @@
+[
+  {
+    "name": "audit",
+    "exit_code": 0,
+    "seconds": 12.756,
+    "command": [
+      "-m",
+      "pytest",
+      "-p",
+      "offline_validation",
+      "-q",
+      "--tb=short",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\docs\\final-acceptance-2026-09-27\\test_audit_contracts.py",
+      "--junitxml=C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\audit.xml"
+    ]
+  },
+  {
+    "name": "phase3",
+    "exit_code": 0,
+    "seconds": 113.721,
+    "command": [
+      "docs/phase3-2026-09-25/measure.py"
+    ]
+  },
+  {
+    "name": "phase4",
+    "exit_code": 0,
+    "seconds": 2.86,
+    "command": [
+      "docs/phase4-2026-09-25/measure.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\phase4.json"
+    ]
+  },
+  {
+    "name": "phase5",
+    "exit_code": 0,
+    "seconds": 1.76,
+    "command": [
+      "docs/phase5-2026-09-25/measure.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\phase5.json"
+    ]
+  },
+  {
+    "name": "phase6",
+    "exit_code": 0,
+    "seconds": 49.506,
+    "command": [
+      "docs/phase6-2026-09-26/measure.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\phase6.json"
+    ]
+  },
+  {
+    "name": "phase7",
+    "exit_code": 0,
+    "seconds": 1.263,
+    "command": [
+      "docs/phase7-2026-09-27/measure.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\phase7.json"
+    ]
+  },
+  {
+    "name": "control-work",
+    "exit_code": 0,
+    "seconds": 105.425,
+    "command": [
+      "-m",
+      "pytest",
+      "-p",
+      "offline_validation",
+      "-p",
+      "control_work",
+      "--phase7-work",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\control-work.json",
+      "-q",
+      "--tb=short",
+      "tests/test_phase7_lifecycle.py",
+      "tests/test_phase7_fill.py",
+      "--junitxml=C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\control-work.xml"
+    ]
+  },
+  {
+    "name": "phase8",
+    "exit_code": 0,
+    "seconds": 1.657,
+    "command": [
+      "docs/phase8-2026-09-27/measure.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\phase8.json"
+    ]
+  },
+  {
+    "name": "ratio",
+    "exit_code": 0,
+    "seconds": 1.143,
+    "command": [
+      "docs/phase8-2026-09-27/ratio.py",
+      "C:\\Users\\yzhao\\Documents\\GitHub\\AutoApply\\.tmp\\final-acceptance-2026-09-27\\ratio.json"
+    ]
+  }
+]

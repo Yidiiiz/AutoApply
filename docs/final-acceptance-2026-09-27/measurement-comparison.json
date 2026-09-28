@@ -1,0 +1,45 @@
+{
+  "phase3": {
+    "baseline": "phase7-2026-09-27/maintenance-after.json",
+    "non_timing_differences": [
+      {
+        "path": "/0/plans_before/written_reuse/0",
+        "before": "SCAN written_responses",
+        "after": "SEARCH written_responses USING INDEX verified_writing_lookup (question=? AND company=? AND job_title=?)"
+      },
+      {
+        "path": "/1/plans_before/written_reuse/0",
+        "before": "SCAN written_responses",
+        "after": "SEARCH written_responses USING INDEX verified_writing_lookup (question=? AND company=? AND job_title=?)"
+      }
+    ]
+  },
+  "phase4": {
+    "baseline": "phase7-2026-09-27/persistence-after.json",
+    "non_timing_differences": []
+  },
+  "phase5": {
+    "baseline": "phase5-2026-09-25/after.json",
+    "non_timing_differences": []
+  },
+  "phase6": {
+    "baseline": "phase6-2026-09-26/after.json",
+    "non_timing_differences": []
+  },
+  "phase7": {
+    "baseline": "phase7-2026-09-27/after.json",
+    "non_timing_differences": []
+  },
+  "control-work": {
+    "baseline": "phase7-2026-09-27/control-work.json",
+    "non_timing_differences": []
+  },
+  "phase8": {
+    "baseline": "phase8-2026-09-27/after.json",
+    "non_timing_differences": []
+  },
+  "ratio": {
+    "baseline": "phase8-2026-09-27/ratio.json",
+    "non_timing_differences": []
+  }
+}

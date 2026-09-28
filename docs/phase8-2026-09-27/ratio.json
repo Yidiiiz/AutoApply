@@ -1,0 +1,76 @@
+{
+  "counts": {
+    "deterministically_resolved": 10,
+    "user_input_required": 3,
+    "narrative_template": 1,
+    "provider_generated": 2,
+    "provider_calls": 4
+  },
+  "fields": [
+    {
+      "question": "First name",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Last name",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Email",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Phone number",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "School",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Degree",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Major",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Graduation date",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Are you a US citizen?",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Sponsorship now",
+      "outcome": "deterministically_resolved"
+    },
+    {
+      "question": "Privacy consent",
+      "outcome": "user_input_required"
+    },
+    {
+      "question": "Describe your legal history",
+      "outcome": "user_input_required"
+    },
+    {
+      "question": "Unknown applicant identifier",
+      "outcome": "user_input_required"
+    },
+    {
+      "question": "Describe your education",
+      "outcome": "narrative_template"
+    },
+    {
+      "question": "Why this company?",
+      "outcome": "provider_generated"
+    },
+    {
+      "question": "Why are you interested in this role?",
+      "outcome": "provider_generated"
+    }
+  ],
+  "meaning": "Synthetic architecture counts, not a quality score"
+}

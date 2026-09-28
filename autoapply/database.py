@@ -114,7 +114,8 @@ class Database(ListingStore):
                           'field_policy': "TEXT DEFAULT ''", 'answer_provenance': 'TEXT',
                           'min_selections': 'INTEGER', 'max_selections': 'INTEGER'},
             'known_answers': {'question_signature': 'TEXT', 'provenance': 'TEXT'},
-            'written_responses': {'question_signature': 'TEXT', 'profile_revision': 'TEXT'},
+            'written_responses': {'question_signature': 'TEXT', 'profile_revision': 'TEXT',
+                                  'narrative_provenance': 'TEXT'},
         }.items():
             columns = {row['name'] for row in self.conn.execute(f'PRAGMA table_info({table})')}
             for name, definition in additions.items():
@@ -127,7 +128,23 @@ class Database(ListingStore):
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS answer_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
             INSERT OR IGNORE INTO answer_revision VALUES (1,0);
+            CREATE TABLE IF NOT EXISTS writing_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+            INSERT OR IGNORE INTO writing_revision VALUES (1,0);
+            CREATE TABLE IF NOT EXISTS narrative_cache (
+                signature TEXT PRIMARY KEY, writing_id INTEGER NOT NULL REFERENCES written_responses(id),
+                provenance TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS verified_writing_lookup
+                ON written_responses(question,company,job_title,id) WHERE verified=1;
         ''')
+        for verb, operation, condition in (
+            ('INSERT', 'INSERT', 'NEW.verified=1'),
+            ('DELETE', 'DELETE', 'OLD.verified=1'),
+            ('UPDATE', 'UPDATE OF answer,verified,question,company,job_title,question_signature,profile_revision',
+             'OLD.verified=1 OR NEW.verified=1'),
+        ):
+            self.conn.executescript(f'''CREATE TRIGGER IF NOT EXISTS writing_revision_{verb}
+                AFTER {operation} ON written_responses WHEN {condition} BEGIN
+                UPDATE writing_revision SET revision=revision+1 WHERE id=1; END;''')
         for table, operations in {
             'known_answers': ('INSERT', 'DELETE', 'UPDATE OF answer,verified,source,scope,question_signature,provenance'),
             'settings': ('INSERT', 'DELETE', 'UPDATE'),
@@ -305,6 +322,14 @@ class Database(ListingStore):
             self._answer_revision_value = self.one('SELECT revision FROM answer_revision WHERE id=1')['revision']
             self._answer_revision_token = token
         return self._answer_revision_value
+
+    def writing_revision(self):
+        token = (self.conn.total_changes, self.conn.in_transaction,
+                 self.conn.execute('PRAGMA data_version').fetchone()[0])
+        if getattr(self, '_writing_revision_token', None) != token:
+            self._writing_revision_value = self.one('SELECT revision FROM writing_revision WHERE id=1')['revision']
+            self._writing_revision_token = token
+        return self._writing_revision_value
 
     def set_setting(self, key, value):
         if key == 'listing_max_age_days':
