@@ -1,6 +1,7 @@
 """Loopback-only discovery dashboard and bounded semi-auto run controls."""
 
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import hmac
@@ -329,51 +330,77 @@ class Dashboard:
             raise AppliedRejected(404, 'application not found')
         return dict(job)
 
+    def _writing_settings(self, label='AI'):
+        settings = next((p for p in self.config['ai']['providers'] if p.get('type') == 'codex_cli'), None)
+        if not self.config['ai']['enabled'] or settings is None:
+            raise AppliedRejected(409, label + ' writing needs an AI provider in Settings')
+        return dict(settings)
+
+    def run_writing(self, request, label='AI'):
+        from .codex_writer import CodexWritingProvider
+        from .ai import ProviderUnavailable
+        settings = self._writing_settings(label)
+        provider = None
+        try:
+            provider = CodexWritingProvider(settings, None, None, self.config['ai']['allow_paid'])
+            return asyncio.run(provider.generate_response(request))
+        except ProviderUnavailable as exc:
+            status = 400 if exc.category == 'MALFORMED_RESPONSE' else 409
+            raise AppliedRejected(status, label + ' writing unavailable: ' + str(exc)) from None
+        except ValueError as exc:
+            status = 409 if provider is None else 400
+            message = label + ' writing unavailable: ' + str(exc) if provider is None else str(exc)
+            raise AppliedRejected(status, message) from None
+        except Exception as exc:
+            raise AppliedRejected(409, label + ' writing unavailable: ' + type(exc).__name__) from None
+
+    def writing_job(self, job):
+        """Enrich matched jobs without holding a connection during the fetch."""
+        if 'job_id' in job and len(job.get('description') or '') < 200:
+            description = descriptions.fetch_description(job['canonical_url'])
+            if description:
+                with self.connection(writable=True) as db:
+                    descriptions.store(db, job['job_id'], description)
+                job['description'] = description
+        return job
+
     def generate_cv(self, application_id, answers=None):
-        job = self._cv_job(application_id)
+        return self.generate_cover_letter(self._cv_job(application_id), answers, application_id=application_id)
+
+    def generate_cover_letter(self, job, answers=None, *, application_id=None, extension=False):
         if answers is not None and (not isinstance(answers, list) or len(answers) > 20 or any(
                 not isinstance(item, dict) or set(item) != {'question', 'answer'} or
                 any(not isinstance(item[k], str) for k in ('question', 'answer')) or not item['question'].strip()
                 for item in answers)):
             raise AppliedRejected(400, 'Cover letter answers must contain a non-empty question and an answer string')
-        settings = next((p for p in self.config['ai']['providers'] if p.get('type') == 'codex_cli'), None)
-        if not self.config['ai']['enabled'] or settings is None:
-            raise AppliedRejected(409, 'Cover letter writing needs an AI provider in Settings')
+        label = 'AI' if extension else 'Cover letter'
+        self._writing_settings(label)
         with self._mutex:
-            lock = self._cv_locks.setdefault(application_id, threading.Lock())
+            lock = (self._cv_locks.setdefault(application_id, threading.Lock())
+                    if application_id is not None else threading.Lock())
         if not lock.acquire(blocking=False):
             raise AppliedRejected(409, 'Cover letter generation already running for this application')
         try:
-            if len(job['description'] or '') < 200:
-                description = descriptions.fetch_description(job['canonical_url'])
-                if description:
-                    with self.connection(writable=True) as db:
-                        descriptions.store(db, job['job_id'], description)
-                    job['description'] = description
+            self.writing_job(job)
             with self.answers.mutex:
                 profile = self.config.profile
             folder = self.config.private / 'documents/cv'
             stem = str(application_id) + '-' + cv.company_slug(job['company'])
             answers_path = folder / (stem + '.answers.json')
-            saved = json.loads(answers_path.read_text(encoding='utf-8')) if answers_path.exists() else []
+            saved = (json.loads(answers_path.read_text(encoding='utf-8'))
+                     if application_id is not None and answers_path.exists() else [])
             combined = {item['question']: item['answer'] for item in saved}
             combined.update({item['question'].strip(): item['answer'].strip() for item in answers or []})
             answers = [dict(question=q, answer=a) for q, a in combined.items()]
-            from .codex_writer import CodexWritingProvider
-            from .ai import ProviderUnavailable
+            payload = cv.cover_letter_request(profile, job, self.config.private / 'cover_letter_samples', answers)
+            result = self.run_writing(payload, label)
             try:
-                provider = CodexWritingProvider(dict(settings), None, None, self.config['ai']['allow_paid'])
-                payload = cv.cover_letter_request(profile, job, self.config.private / 'cover_letter_samples', answers)
-                result = asyncio.run(provider.generate_response(payload))
                 kind, items = cv.validate_letter_result(result)
-            except ProviderUnavailable as exc:
-                raise AppliedRejected(409, 'Cover letter writing unavailable: ' + str(exc)) from None
             except ValueError as exc:
                 raise AppliedRejected(400, str(exc)) from None
-            except Exception as exc:
-                raise AppliedRejected(409, 'Cover letter writing unavailable: ' + type(exc).__name__) from None
-            folder.mkdir(parents=True, exist_ok=True)
-            if answers:
+            if application_id is not None:
+                folder.mkdir(parents=True, exist_ok=True)
+            if answers and application_id is not None:
                 with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=folder, delete=False) as output:
                     temporary_answers = Path(output.name)
                     json.dump(answers, output, ensure_ascii=False)
@@ -386,15 +413,24 @@ class Dashboard:
             html = cv.build_cover_letter(profile, job, items, salutation=result.get('salutation'))
             warnings = []
             # Rendering owns only this request thread; no DB or dashboard lock.
-            with tempfile.TemporaryDirectory(dir=folder, prefix='render-') as temporary:
+            with tempfile.TemporaryDirectory(dir=folder if application_id is not None else None,
+                                             prefix='render-') as temporary:
                 pdf = Path(temporary) / 'cv.pdf'
                 try:
                     cv.render_pdf(html, pdf)
-                    if not pdf.read_bytes().startswith(b'%PDF-'):
+                    content = pdf.read_bytes()
+                    if not content.startswith(b'%PDF-'):
                         raise ValueError('invalid PDF')
                 except Exception:
+                    if extension:
+                        raise AppliedRejected(409, 'Cover letter PDF rendering failed; please retry') from None
                     warnings.append('Cover letter PDF rendering failed; opened the print-ready HTML cover letter instead')
                     pdf = None
+                response = dict(filename=cv.profile_name(profile) + ' - Cover Letter - ' +
+                                unescape(cv.text(job.get('company'))) + '.pdf', mime='application/pdf',
+                                base64=base64.b64encode(content).decode('ascii')) if extension else None
+                if application_id is None:
+                    return response
                 draft = Path(temporary) / 'cv.html'
                 draft.write_text(html, encoding='utf-8')
                 if pdf is not None:
@@ -402,7 +438,7 @@ class Dashboard:
                 else:
                     (folder / (stem + '.pdf')).unlink(missing_ok=True)
                 os.replace(draft, folder / (stem + '.html'))
-            return dict(file='/api/cv/' + str(application_id), warnings=warnings)
+            return response if extension else dict(file='/api/cv/' + str(application_id), warnings=warnings)
         finally:
             lock.release()
 
@@ -984,14 +1020,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = {}
             if self.command == 'POST':
                 lengths = self.headers.get_all('Content-Length', [])
+                writing = self.path in {'/ext/write', '/ext/chat', '/ext/cover-letter'}
+                maximum = 64 * 1024 if writing else 1024 * 1024
                 if (len(lengths) != 1 or self.headers.get('Transfer-Encoding') or not lengths[0].isdigit()
-                        or not 0 < int(lengths[0]) <= 1024 * 1024):
-                    raise SettingsRejected('A JSON body of at most 1 MB is required')
+                        or not 0 < int(lengths[0]) <= maximum):
+                    raise SettingsRejected('A JSON body of at most ' + ('64 KB' if writing else '1 MB') + ' is required')
                 payload = json.loads(self.rfile.read(int(lengths[0])))
                 if not isinstance(payload, dict):
                     raise SettingsRejected('A JSON object is required')
             self._reply(200, extension_api.dispatch(dashboard, payload, method=self.command, path=self.path))
-        except SettingsRejected as exc:
+        except (SettingsRejected, AppliedRejected) as exc:
             self._reply(exc.status, dict(error=str(exc)))
         except (ValueError, UnicodeError):
             self._reply(400, dict(error='Invalid JSON request'))

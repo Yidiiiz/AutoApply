@@ -3,9 +3,10 @@
 import base64
 from dataclasses import replace
 import json
+import re
 from urllib.parse import urlsplit
 
-from . import answers, descriptions, question_rules
+from . import answers, cv, descriptions, question_rules
 from .dashboard_settings import SettingsRejected
 from .field_mapping import answer_signature
 from .jobs import ats_identity, canonical_url, normalize
@@ -184,6 +185,94 @@ def resume(dashboard, payload):
                 base64=base64.b64encode(dashboard.settings.resume_bytes()).decode('ascii'))
 
 
+def _writing_job(dashboard, payload):
+    page = payload.get('page', {})
+    if not isinstance(page, dict) or any(not isinstance(page.get(k, ''), str)
+                                        for k in ('url', 'title', 'company', 'description')):
+        raise SettingsRejected('page must contain text values')
+    if payload.get('application_id') is not None:
+        application_id = _id(payload['application_id'])
+        return dashboard._cv_job(application_id), application_id
+    url = payload.get('url', page.get('url'))
+    if url is not None:
+        url = _url(url)
+        with dashboard.connection() as db:
+            app = _match(db, url)
+        if app:
+            _unprotected(app)
+            return dashboard._cv_job(app['id']), app['id']
+    return dict(canonical_url=url or '', **{k: page.get(k, '')
+                for k in ('title', 'company', 'description')}), None
+
+
+def _text(payload, key, maximum, *, required=False):
+    value = payload.get(key, '')
+    if not isinstance(value, str) or len(value) > maximum or required and not value.strip():
+        raise SettingsRejected(key + ' must be text' + (' and non-empty' if required else '') +
+                               ' of at most ' + str(maximum) + ' characters')
+    return value
+
+
+def _limits(question):
+    limits = {}
+    for key, unit in (('words', 'words?'), ('chars', 'characters?|chars?')):
+        matches = re.findall(r'\b(?:' + unit + r')\s+limit\s*[:=]?\s*(\d[\d,]*)\b|'
+                             r'\b(\d[\d,]*)\s*(?:' + unit + r')\b', question, re.I)
+        if matches:
+            limits[key] = min(int(a.replace(',', '') or b.replace(',', '')) for a, b in matches)
+    return limits
+
+
+def _writing_result(value, key):
+    if (not isinstance(value, dict) or set(value) != {key} or
+            not isinstance(value[key], str) or not value[key].strip()):
+        raise SettingsRejected('AI provider returned invalid output; expected ' + key + ' text')
+    return value[key].strip()
+
+
+def write(dashboard, payload):
+    question = _text(payload, 'question', 8000, required=True)
+    instruction = _text(payload, 'instruction', 8000)
+    previous = _text(payload, 'previous', 16000)
+    limits = _limits(question)
+    dashboard._writing_settings()
+    job, _ = _writing_job(dashboard, payload)
+    dashboard.writing_job(job)
+    with dashboard.answers.mutex:
+        facts = cv.profile_facts(dashboard.config.profile)
+    result = dashboard.run_writing(dict(task='question_answer', profile=facts, job=cv.job_context(job),
+                                       question=question, instruction=instruction, previous=previous, limits=limits))
+    answer = _writing_result(result, 'answer')
+    response = dict(answer=answer, words=len(answer.split()), chars=len(answer))
+    warnings = [f'{key} limit exceeded ({response[key]}/{maximum})' for key, maximum in limits.items()
+                if response[key] > maximum]
+    if warnings:
+        response['warning'] = '; '.join(warnings)
+    return response
+
+
+def chat(dashboard, payload):
+    messages = payload.get('messages')
+    if not isinstance(messages, list) or not messages or any(
+            not isinstance(item, dict) or item.get('role') not in ('user', 'assistant') or
+            not isinstance(item.get('text'), str) or not item['text'].strip() for item in messages):
+        raise SettingsRejected('messages must contain user or assistant text')
+    history = [dict(role=item['role'], text=item['text'][:2000]) for item in messages[-12:]]
+    dashboard._writing_settings()
+    job, _ = _writing_job(dashboard, payload)
+    dashboard.writing_job(job)
+    with dashboard.answers.mutex:
+        facts = cv.profile_facts(dashboard.config.profile)
+    result = dashboard.run_writing(dict(task='chat', profile=facts, job=cv.job_context(job), messages=history))
+    return dict(reply=_writing_result(result, 'reply'))
+
+
+def cover_letter(dashboard, payload):
+    job, application_id = _writing_job(dashboard, payload)
+    return dashboard.generate_cover_letter(job, payload.get('answers'),
+                                           application_id=application_id, extension=True)
+
+
 def run_status(dashboard, payload):
     with dashboard._ext_mutex:
         items = [dict(item) for item in dashboard._ext_run]
@@ -242,6 +331,8 @@ def run_result(dashboard, payload):
 
 ROUTES = {('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
+          ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
+          ('POST', '/ext/cover-letter'): cover_letter,
           ('GET', '/ext/resume'): resume, ('GET', '/ext/run/next'): run_next,
           ('POST', '/ext/run/result'): run_result}
 

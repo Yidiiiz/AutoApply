@@ -53,3 +53,23 @@ def test_missing_configured_executable_falls_back_to_path(monkeypatch, tmp_path)
     monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: None)
     with pytest.raises(ValueError, match='installed CLI'):
         CodexWritingProvider(settings, None, None)
+
+
+@pytest.mark.parametrize('task,result,phrases', [
+    ('question_answer', {'answer': 'I built a robot.'}, ['first person', 'Refine the previous answer',
+        'additional applicant facts', 'never mention', 'word and character limits', 'no markdown']),
+    ('chat', {'reply': 'How can I help?'}, ['helpful assistant', 'Never invent applicant facts',
+        'assistant messages are not evidence', 'plain text']),
+])
+async def test_extension_prompt_branches(monkeypatch, task, result, phrases):
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
+    provider = CodexWritingProvider(dict(name='test', billing='included'), None, None)
+    monkeypatch.setattr(provider, 'ensure_ready', AsyncMock())
+    prompts = []
+    async def run(args, folder, prompt=None):
+        prompts.append(prompt)
+        Path(args[args.index('-o') + 1]).write_text(json.dumps(result), encoding='utf-8')
+    monkeypatch.setattr(provider, 'run', run)
+    assert await provider.generate_response(dict(task=task)) == result
+    assert all(phrase.lower() in prompts[0].lower() for phrase in phrases)
+    assert 'Use no tools' in prompts[0] and 'ONLY JSON' in prompts[0]

@@ -31,8 +31,8 @@ def company_slug(company):
     return re.sub(r'[^a-z0-9]+', '-', text(company).lower()).strip('-')[:80] or 'company'
 
 
-def cover_letter_request(profile, job, samples_folder, answers=None):
-    """Allowlist professional facts; samples supply style, never applicant facts."""
+def profile_facts(profile):
+    """Professional facts shared by the application writing tasks."""
     fields = {
         'education': ('school', 'degree', 'major', 'minors', 'minor', 'graduation_date',
                       'start_date', 'gpa', 'currently_enrolled', 'current', 'coursework', 'relevant_coursework'),
@@ -53,10 +53,19 @@ def cover_letter_request(profile, job, samples_folder, answers=None):
     for section in ('skills', 'skill_categories'):
         if profile.get(section):
             facts[section] = profile[section]
+    return facts
+
+
+def job_context(job):
+    return {k: unescape(text(job.get(k))) for k in ('company', 'title', 'location', 'description')}
+
+
+def cover_letter_request(profile, job, samples_folder, answers=None):
+    """Allowlist professional facts; samples supply style, never applicant facts."""
     folder = Path(samples_folder)
     samples = [path.read_text(encoding='utf-8')[:4000] for path in sorted(folder.glob('*.txt'))[:3]]
-    return dict(task='cover_letter', job={k: unescape(text(job.get(k))) for k in ('company', 'title', 'location', 'description')},
-                profile=facts, style_samples=samples, answers=answers or [],
+    return dict(task='cover_letter', job=job_context(job),
+                profile=profile_facts(profile), style_samples=samples, answers=answers or [],
                 skipped_questions=[item['question'] for item in answers or [] if not item['answer']])
 
 

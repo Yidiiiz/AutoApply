@@ -9,7 +9,8 @@ from unittest.mock import Mock
 import pytest
 
 from autoapply.dashboard import Dashboard
-from test_dashboard import dashboard, http_dashboard, queue, request, protected_queue
+from test_dashboard import (dashboard, http_dashboard, queue, request, protected_queue,
+                            writing_provider, offline_descriptions)
 
 
 def ext(pair, method, path, payload=None, **headers):
@@ -227,3 +228,188 @@ def test_protected_and_invalid(http_dashboard, db, listing):
                     dict(url='https://a.test', application_id=True, fields=[]),
                     dict(url='https://a.test', fields=[dict(label='Animal', kind=[])])):
         assert ext(http_dashboard, 'POST', '/ext/answers', payload)[0] == 400
+
+
+@pytest.mark.parametrize('question,limits', [
+    ('Tell us about robotics. word limit 300', {'words': 300}),
+    ('Tell us about robotics (300 words)', {'words': 300}),
+    ('Tell us about robotics. max 300 words', {'words': 300}),
+    ('Tell us about robotics. 1,000 characters', {'chars': 1000}),
+    ('Word limit: 300; max 200 words; 500 characters', {'words': 200, 'chars': 500}),
+    ('Tell us about robotics.', {}),
+])
+def test_write_limits_and_refine(http_dashboard, writing_provider, question, limits):
+    writing_provider.result = {'answer': 'I built a robot.'}
+    payload = dict(question=question, previous='I built a machine.', instruction='Add my robotics project.',
+                   page=dict(title='Intern', company='Example', description='Build robots.'))
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/write', payload)
+    assert status == 200 and result == dict(answer='I built a robot.', words=4, chars=16)
+    sent = writing_provider.requests[-1]
+    assert sent['task'] == 'question_answer' and sent['limits'] == limits
+    assert sent['previous'] == payload['previous'] and sent['instruction'] == payload['instruction']
+    assert sent['question'] == question and sent['job']['description'] == 'Build robots.'
+    assert sent['profile']['name'] == 'Test Student'
+    assert 'contact' not in sent['profile'] and 'work_authorization' not in sent['profile']
+
+
+def test_write_warns_without_truncating(http_dashboard, writing_provider):
+    writing_provider.result = {'answer': 'I built a robot.'}
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/write', dict(question='Max 2 words, 10 characters'))
+    assert status == 200 and result['answer'] == 'I built a robot.'
+    assert result['words'] == 4 and result['chars'] == 16
+    assert 'words limit exceeded (4/2)' in result['warning']
+    assert 'chars limit exceeded (16/10)' in result['warning']
+
+
+def test_write_matched_job_fetches_description(http_dashboard, config, db, listing, monkeypatch, writing_provider):
+    app_id = queue(db, config, replace(listing, description=''), 1)[0]
+    before = db.application(app_id)
+    description = 'Build robots using Python. ' * 12
+    def fetch(url):
+        assert url == before['canonical_url']
+        with http_dashboard[1].connection(writable=True) as other:
+            with other.transaction():
+                pass
+        return description
+    monkeypatch.setattr('autoapply.descriptions.fetch_description', fetch)
+    writing_provider.result = {'answer': 'I study computer science.'}
+    payload = dict(url=before['canonical_url'], question='What can you contribute?')
+    assert ext(http_dashboard, 'POST', '/ext/write', payload)[0] == 200
+    assert writing_provider.requests[-1]['job']['company'] == before['company']
+    assert writing_provider.requests[-1]['job']['description'] == description.strip()
+    assert db.application(app_id) == dict(before, description=description)
+    assert db.rows('SELECT * FROM questions') == []
+
+
+def test_chat_trimmed_history_and_job(http_dashboard, config, db, listing, writing_provider):
+    app_id = queue(db, config, listing, 1)[0]
+    before = db.application(app_id)
+    writing_provider.result = {'reply': 'What would you like to highlight?'}
+    messages = [dict(role='user' if i % 2 else 'assistant', text=str(i) + 'x' * 2200) for i in range(20)]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/chat', dict(application_id=app_id, messages=messages))
+    assert status == 200 and result == writing_provider.result
+    sent = writing_provider.requests[-1]
+    assert sent['task'] == 'chat'
+    assert sent['messages'] == [dict(role=m['role'], text=m['text'][:2000]) for m in messages[-12:]]
+    assert sent['profile']['name'] == 'Test Student' and sent['job']['company'] == 'Company 0'
+    assert db.application(app_id) == before
+
+
+def test_cover_letter_questions_pdf_and_persistence(http_dashboard, config, db, listing, monkeypatch, writing_provider):
+    app_id = queue(db, config, listing, 1)[0]
+    before = db.application(app_id)
+    payload = dict(application_id=app_id)
+    renderer = Mock(side_effect=lambda html, path: path.write_bytes(b'%PDF-1.4 fixture'))
+    monkeypatch.setattr('autoapply.cv.render_pdf', renderer)
+    writing_provider.result = {'questions': ['When can you start?']}
+    assert ext(http_dashboard, 'POST', '/ext/cover-letter', payload)[:2] == (200, writing_provider.result)
+    renderer.assert_not_called()
+    payload['answers'] = [dict(question='When can you start?', answer='June 2027'),
+                          dict(question='Why this company?', answer='')]
+    writing_provider.result = dict(paragraphs=['I study computer science.'], salutation='Dear Ms. Lee,')
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/cover-letter', payload)
+    assert status == 200 and result['filename'] == 'Test Student - Cover Letter - Company 0.pdf'
+    assert result['mime'] == 'application/pdf' and base64.b64decode(result['base64']) == b'%PDF-1.4 fixture'
+    assert '<p>Dear Ms. Lee,</p>' in renderer.call_args.args[0]
+    assert 'font:12pt/1.15' in renderer.call_args.args[0]
+    assert ext(http_dashboard, 'POST', '/ext/cover-letter', dict(application_id=app_id))[0] == 200
+    assert writing_provider.requests[-1]['answers'] == payload['answers']
+    assert writing_provider.requests[-1]['skipped_questions'] == ['Why this company?']
+    saved = config.private / f'documents/cv/{app_id}-company-0.answers.json'
+    assert json.loads(saved.read_text(encoding='utf-8')) == payload['answers']
+    assert db.application(app_id) == before
+
+
+@pytest.mark.parametrize('path,output', [('/ext/write', {'answer': 'I study computer science.'}),
+    ('/ext/chat', {'reply': 'I can help with this role.'}),
+    ('/ext/cover-letter', {'paragraphs': ['I study computer science.']})])
+def test_writing_unmatched_page(http_dashboard, config, db, monkeypatch, writing_provider, path, output):
+    writing_provider.result = output
+    fetcher = Mock(side_effect=AssertionError('Unmatched pages must use supplied context'))
+    monkeypatch.setattr('autoapply.descriptions.fetch_description', fetcher)
+    monkeypatch.setattr('autoapply.cv.render_pdf', lambda html, path: path.write_bytes(b'%PDF-1.4 fixture'))
+    payload = dict(page=dict(url='https://unmatched.test/job', company='A &amp; B', title='Intern',
+                            description='Build tools.'), question='Why?', messages=[dict(role='user', text='Help me.')],
+                   answers=[dict(question='Start?', answer='June')])
+    status, result, _ = ext(http_dashboard, 'POST', path, payload)
+    assert status == 200
+    sent = writing_provider.requests[-1]
+    assert sent['job']['company'] == 'A & B' and sent['job']['description'] == 'Build tools.'
+    if path == '/ext/cover-letter':
+        assert result['filename'] == 'Test Student - Cover Letter - A & B.pdf'
+        assert base64.b64decode(result['base64']).startswith(b'%PDF-')
+    assert not (config.private / 'documents/cv').exists()
+    assert db.rows('SELECT * FROM applications') == []
+    fetcher.assert_not_called()
+
+
+@pytest.mark.parametrize('path', ['/ext/write', '/ext/chat', '/ext/cover-letter'])
+def test_writing_pairing_size_and_ai_disabled(http_dashboard, config, monkeypatch, path):
+    payload = dict(question='Why?', messages=[dict(role='user', text='Help')])
+    provider = Mock(side_effect=AssertionError('Do not invoke disabled provider'))
+    monkeypatch.setattr('autoapply.codex_writer.CodexWritingProvider', provider)
+    assert request(http_dashboard[0], 'POST', path, {}, json.dumps(payload))[0] == 403
+    status, result, _ = ext(http_dashboard, 'POST', path, payload)
+    assert status == 409 and result['error'] == 'AI writing needs an AI provider in Settings'
+    config.data['ai']['enabled'] = True  # Still no configured Codex provider.
+    assert ext(http_dashboard, 'POST', path, payload)[0] == 409
+    status, result, _ = ext(http_dashboard, 'POST', path, dict(payload, padding='x' * 65536))
+    assert status == 400 and '64 KB' in result['error']
+    provider.assert_not_called()
+
+
+@pytest.mark.parametrize('path,output', [('/ext/write', None), ('/ext/write', {'answer': ''}),
+    ('/ext/write', {'answer': 3}), ('/ext/chat', {'reply': []}), ('/ext/cover-letter', {'paragraphs': []})])
+def test_writing_invalid_output(http_dashboard, writing_provider, path, output):
+    writing_provider.result = output
+    payload = dict(question='Why?', messages=[dict(role='user', text='Help')])
+    status, result, _ = ext(http_dashboard, 'POST', path, payload)
+    assert status == 400 and 'invalid output' in result['error']
+
+
+@pytest.mark.parametrize('path', ['/ext/write', '/ext/chat', '/ext/cover-letter'])
+def test_writing_provider_failure(http_dashboard, writing_provider, path):
+    from autoapply.ai import ProviderUnavailable
+    writing_provider.result = ProviderUnavailable('Fixture unavailable')
+    status, result, _ = ext(http_dashboard, 'POST', path,
+                             dict(question='Why?', messages=[dict(role='user', text='Help')]))
+    assert status == 409 and 'Fixture unavailable' in result['error']
+
+
+@pytest.mark.parametrize('path,payload', [('/ext/write', {}), ('/ext/write', {'question': []}),
+    ('/ext/write', {'question': 'Why?', 'previous': True}), ('/ext/chat', {'messages': []}),
+    ('/ext/chat', {'messages': [{'role': 'system', 'text': 'Help'}]}),
+    ('/ext/chat', {'messages': [{'role': [], 'text': 'Help'}]}),
+    ('/ext/cover-letter', {'page': []}), ('/ext/cover-letter', {'application_id': True}),
+    ('/ext/cover-letter', {'answers': [{'question': 'Q', 'answer': 3}]})])
+def test_writing_invalid_requests(http_dashboard, writing_provider, path, payload):
+    assert ext(http_dashboard, 'POST', path, payload)[0] == 400
+    assert writing_provider.requests == []
+
+
+@pytest.mark.parametrize('path', ['/ext/write', '/ext/chat', '/ext/cover-letter'])
+def test_writing_protected_application(http_dashboard, db, listing, writing_provider, path):
+    protected_queue(db, listing)
+    before = db.application(3556)
+    status, _, _ = ext(http_dashboard, 'POST', path, dict(application_id=3556, question='Why?',
+                                                        messages=[dict(role='user', text='Help')]))
+    assert status == 403 and db.application(3556) == before
+    assert writing_provider.requests == []
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('Render failed'), None])
+def test_cover_letter_requires_valid_pdf(http_dashboard, monkeypatch, writing_provider, failure):
+    renderer = Mock(side_effect=failure) if failure else Mock(side_effect=lambda html, path: path.write_bytes(b'not PDF'))
+    monkeypatch.setattr('autoapply.cv.render_pdf', renderer)
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/cover-letter', dict(page=dict(company='Example')))
+    assert status == 409 and 'PDF rendering failed' in result['error']
+
+
+def test_writing_unavailable_configuration_and_malformed_json(http_dashboard, writing_provider, monkeypatch):
+    from autoapply.ai import ProviderUnavailable
+    monkeypatch.setattr('autoapply.codex_writer.CodexWritingProvider', Mock(side_effect=ValueError('CLI missing')))
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/write', dict(question='Why?'))
+    assert status == 409 and 'CLI missing' in result['error']
+    monkeypatch.setattr('autoapply.codex_writer.CodexWritingProvider', lambda *args: writing_provider)
+    writing_provider.result = ProviderUnavailable('Invalid JSON', 'MALFORMED_RESPONSE')
+    assert ext(http_dashboard, 'POST', '/ext/write', dict(question='Why?'))[0] == 400

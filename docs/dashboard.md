@@ -379,6 +379,30 @@ cancel or clear existing application holds or change auto-submit settings.
 
 ## Answers
 
+The paired Chrome extension can also use these writing endpoints with
+`X-AutoApply-Key` and a `chrome-extension://` Origin. POST bodies are limited to
+64 KB. Generation runs in the request thread and uses the configured Codex
+writing provider and the same professional profile facts as cover letters.
+
+| Endpoint | Request and result |
+| --- | --- |
+| `POST /ext/write` | `{url?, application_id?, page?: {title, company, description}, question, instruction?, previous?}` returns `{answer, words, chars, warning?}`. Pass the current answer as `previous` and the refinement prompt as `instruction`; the side panel can retain response history. Word/character limits in the question guide writing; over-limit output gets a warning without truncation. |
+| `POST /ext/chat` | `{messages: [{role: user\|assistant, text}], application_id?, page?: {url, title, company, description}}` returns `{reply}`. Keeps the last 12 messages, each capped at 2000 characters. |
+| `POST /ext/cover-letter` | `{url?, application_id?, page?, answers?: [{question, answer}]}` returns `{questions}` or `{filename, mime: 'application/pdf', base64}`. The filename is `<Name> - Cover Letter - <Company>.pdf`. |
+
+Matched jobs use the stored listing and fetch missing descriptions through the
+existing cover-letter path. Unmatched pages use supplied page context. Cover
+letters share the fixed layout, salutation validation, and saved per-application
+answers with `/api/cv`; unmatched pages create no per-application files. A blank
+cover-letter answer skips that question. Writing and chat use only professional
+facts, job context and user-supplied facts, and never infer applicant experience.
+Disabled or unconfigured AI returns 409 with
+`AI writing needs an AI provider in Settings`; provider failures return 409 and
+invalid output returns 400. Extension PDF rendering failures return an error so
+that the response always contains a PDF when generation succeeds. Protected
+applications remain rejected. No writing endpoint changes application state,
+the canonical resume or submission settings.
+
 Queue, Needs you and Applied listings have a **Generate Cover letter** document
 icon in list and grid views. Save profile edits in Answers first. Generation uses
 the configured Codex writing provider and saved education, employment, projects,

@@ -7,7 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from autoapply.cv import build_cover_letter, company_slug, cover_letter_request, render_pdf, validate_letter_result
+from autoapply.cv import (build_cover_letter, company_slug, cover_letter_request, profile_facts,
+                          render_pdf, validate_letter_result)
 from autoapply.codex_writer import CodexWritingProvider
 
 
@@ -93,6 +94,7 @@ def test_provider_request_professional_facts_and_bounded_samples(tmp_path):
     request = cover_letter_request(profile, {'company': 'Example', 'title': 'Intern', 'description': 'Python',
                                            'location': 'Boston', 'private': 'SECRET'}, samples, answers)
     assert request['task'] == 'cover_letter' and request['answers'] == answers
+    assert request['profile'] == profile_facts(profile)
     assert 'SECRET' not in json.dumps(request)
     assert request['profile']['education']['minors'] == ['Math']
     assert request['profile']['employment'][0]['description'] == 'Taught Python'
