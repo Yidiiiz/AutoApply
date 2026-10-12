@@ -52,7 +52,14 @@
   }
   function comboContainer(element) {
     const control = element.closest('[class*="-control"],[class*="__control"]');
-    return control?.parentElement || element.parentElement;
+    if (control) return control.parentElement;
+    // Some react-select themes omit control classes and nest the input separately.
+    for (let container = element.parentElement; container && !container.matches("form,body"); container = container.parentElement) {
+      const inputs = container.querySelectorAll('input:not([type="hidden"]),textarea,select,[role="combobox"]');
+      if (Array.from(inputs).some(input => input !== element && !element.contains(input))) break;
+      if (container.querySelector('[class*="singleValue"],[class*="single-value"]')) return container;
+    }
+    return element.parentElement;
   }
   function comboOptions(element) {
     const ids = clean(element.getAttribute("aria-controls") || element.getAttribute("aria-owns") || element.getAttribute("list")).split(" ");
@@ -229,17 +236,19 @@
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
       if (kind === "combobox") {
-        try {
-          openCombo(element);
-          await waitFor(() => comboOptions(element).length);
-          // Editable menus may expose only a first page; these are not exhaustive choices.
-          const input = comboInput(element);
-          options = input && input.getAttribute("aria-autocomplete") !== "none" ? [] : comboOptions(element).map(text).filter(Boolean);
-        } finally { closeCombo(element); }
+        if (!comboSelection(element) && !clean(comboInput(element)?.value)) {
+          try {
+            openCombo(element);
+            // Retain the available choices even for editable or paginated menus.
+            options = (await settledComboOptions(element, 2000)).map(text);
+          } finally { closeCombo(element); }
+        }
       }
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
-        options, section: sectionHint(element), max_length: element.maxLength >= 0 ? element.maxLength : null});
+        options, ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
+        section: sectionHint(element), max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
+      fields[fields.length - 1].answered = occupied(records.get(key));
     }
     return {page: pageInfo(), fields};
   }
@@ -247,7 +256,9 @@
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return element.files.length > 0;
-    if (field.kind === "combobox" && comboSelection(element)) return true;
+    if (field.kind === "combobox") return Boolean(comboSelection(element) || clean(comboInput(element)?.value));
+    if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
+      !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
     return Boolean(clean(element.isContentEditable || !("value" in element) ? element.textContent : element.value));
   }
 
@@ -316,13 +327,14 @@
   }
 
   async function fill(answers, files = {}) {
-    const summary = {filled: 0, needs_input: [], needs_writing: [], skipped: 0};
+    const summary = {filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
     for (const answer of answers) {
       const record = records.get(answer.key);
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record)) { summary.skipped++; continue; }
       const {element, members, field} = record;
       const unresolved = writing => {
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
+        summary[writing ? "writing" : "pending"].push({...field});
         if (field.required) mark(record, "#d99022");
       };
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
@@ -336,11 +348,22 @@
           const bytes = Uint8Array.from(atob(file.base64), char => char.charCodeAt(0));
           const transfer = new DataTransfer();
           transfer.items.add(new File([bytes], file.filename, {type: file.mime}));
+          const container = fileContainer(element);
+          const region = container.parentElement || container;
           nativeSet(element, "files", transfer.files);
           events(element);
-          const attached = element.files[0]?.name === file.filename;
-          const shown = visible(element) || await waitFor(() => filenameShown(element, file.filename), 6000);
-          if (!attached || !shown) { unresolved(false); continue; }
+          const outcome = await waitFor(() => {
+            const error = Array.from(region.querySelectorAll('[role="alert"],[class*="error"],[class*="Error"]'))
+              .find(node => visible(node) && /upload|file|attach/i.test(text(node)));
+            if (error) return {error: text(error)};
+            const shown = Array.from(region.querySelectorAll('*')).some(node => visible(node) &&
+              (text(node).includes(file.filename) || node.matches('button,[role="button"],a') && /remove/i.test(label(node))));
+            if (shown || element.isConnected && visible(element) && element.files[0]?.name === file.filename) return {ok: true};
+          }, 10000);
+          if (!outcome?.ok) {
+            summary.errors.push(outcome?.error ? `Upload failed: ${outcome.error}` : `Upload not yet confirmed: ${file.filename}. Check the page before retrying.`);
+            unresolved(false); continue;
+          }
         } else if (field.kind === "combobox") {
           if (!await fillCombo(element, answer.value)) { unresolved(false); continue; }
         } else if (field.kind === "select") {

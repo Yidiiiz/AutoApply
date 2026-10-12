@@ -13,3 +13,24 @@ label { display: block; margin: 16px 0 6px; } input { width: 100%; padding: 9px;
 .actions { display: flex; gap: 10px; margin-top: 16px; } .options main { max-width: 550px; margin: 30px auto; }
 ul { margin-top: 0; padding-left: 20px; }
 @media (prefers-color-scheme: dark) { :root { --surface: #171c22; --border: #39424e; --accent: #326c50; --muted: #b1bbc9; } #error { color: #efb377; } }
+details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; }
+summary { cursor: pointer; font-weight: 600; }
+main { padding: 12px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { margin: 8px 0; }
+textarea, select { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 5px; font: inherit; background: var(--surface); color: inherit; }
+textarea { resize: vertical; }
+label { margin: 8px 0 4px; }
+button { padding: 6px 9px; margin: 3px 0; }
+.actions { margin: 5px 0; align-items: center; flex-wrap: wrap; gap: 8px; }
+.prompt { border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.prompt p { margin-bottom: 5px; }
+.prompt-actions { display: flex; gap: 6px; margin-top: 5px; }
+.prompt-actions button { flex: 0 0 auto; width: auto; padding: 4px 9px; margin: 0; }
+.prompt p:empty { display: none; }
+#messages { max-height: 260px; overflow-y: auto; }
+#messages p, #upload-errors { white-space: pre-wrap; }
+#answer { margin-top: 5px; }
+#needs-writing:empty { display: none; }
+a { color: var(--accent); }
+@media (prefers-color-scheme: dark) { a { color: #95d9b6; } }

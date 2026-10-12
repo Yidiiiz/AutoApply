@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from playwright.sync_api import Error, sync_playwright
+from playwright.sync_api import Error, expect, sync_playwright
 
 pytestmark = pytest.mark.browser
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,7 +62,7 @@ def extension_server():
                 self.ext(None)
                 return
             file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
-                    "/async_search.html": "async_search.html"}.get(self.path)
+                    "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html"}.get(self.path)
             if not file:
                 self.send_error(404)
                 return
@@ -90,6 +90,18 @@ def extension_server():
                 self.response(200, {"application_id": 42, "company": "Fixture Company", "title": "Fixture Intern"})
             elif self.path == "/ext/resume":
                 self.response(200, {"filename": "fixture-resume.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
+            elif self.path == "/ext/write":
+                answer = "Refined fixture answer." if payload.get("previous") else "I enjoy building useful local tools."
+                self.response(200, {"answer": answer, "words": len(answer.split()), "chars": len(answer)})
+            elif self.path == "/ext/remember":
+                self.response(200, {"ok": True})
+            elif self.path == "/ext/chat":
+                self.response(200, {"reply": "Fixture chat reply."})
+            elif self.path == "/ext/cover-letter":
+                if "answers" not in payload:
+                    self.response(200, {"questions": ["Which project should the letter highlight?", "Anything else?"]})
+                else:
+                    self.response(200, {"filename": "fixture-cover.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
             elif self.path == "/ext/answers":
                 answers = []
                 for field in payload["fields"]:
@@ -173,9 +185,9 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert "error" not in result, result
     assert result["matched"]["application_id"] == 42
     summary = result["summary"]
-    assert summary["filled"] == 13
+    assert summary["filled"] == 14
     assert set(summary["needs_input"]) == {"Unresolved required *", "Short answer *"}
-    assert set(summary["needs_writing"]) == {"Why this role? *", "Cover letter *"}
+    assert set(summary["needs_writing"]) == {"Cover letter *"}
     assert summary["skipped"] == 2
     for selector, value in {"#name": "Fixture Student", "#email": "student@example.test", "#phone": "2025550100", "#about": "I build local tools.", "#country": "us", "#city": "Boston", "#website": "https://example.test/", "#existing": "User supplied"}.items():
         assert page.locator(selector).input_value() == value
@@ -187,7 +199,7 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert not page.locator("#java").is_checked()
     assert page.locator("#resume").evaluate("e => [e.files.length, e.files[0].name, e.files[0].type]") == [1, "fixture-resume.pdf", "application/pdf"]
     assert page.locator("#resume").evaluate("async e => Array.from(new Uint8Array(await e.files[0].arrayBuffer()))") == list(RESUME)
-    for selector in ("#missing", "#writing", "#cover", "#too-long"):
+    for selector in ("#missing", "#cover", "#too-long"):
         assert page.locator(selector).evaluate("e => e.style.outline") == "rgb(217, 144, 34) solid 2px"
     assert page.locator("#name").evaluate("e => e.style.outline") == "rgb(104, 168, 121) solid 2px"
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
@@ -205,16 +217,17 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert next(field for field in fields if field["label"] == "About you")["max_length"] == 200
     assert sum(path == "/ext/resume" for path, _, _ in requests) == 1
     assert all(key == KEY for _, key, _ in requests)
-    assert all(path in {"/ext/match", "/ext/answers", "/ext/resume"} for path, _, _ in requests)
+    assert all(path in {"/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter"} for path, _, _ in requests)
+    assert page.locator("#writing").input_value() == "I enjoy building useful local tools."
 
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
     panel.locator("#connection").filter(has_text="Connected — Fixture Student").wait_for()
     assert panel.locator("#company").inner_text() == "Fixture Company"
     assert panel.locator("#job").inner_text() == "Fixture Intern"
-    assert panel.locator("#filled").inner_text() == "Filled 13"
+    assert panel.locator("#filled").inner_text() == "Filled 14"
     assert "Unresolved required *" in panel.locator("#needs-input").inner_text()
-    assert "Cover letter *" in panel.locator("#needs-writing").inner_text()
+    assert "Which project" in panel.locator("#cover-questions").inner_text()
     # Refill through the actual runtime message path, with the fixture tab active.
     page.bring_to_front()
     second = panel.evaluate("() => chrome.runtime.sendMessage({type: 'autofill'})")
@@ -232,7 +245,7 @@ def test_pairing_options_and_errors(loaded_extension, extension_server):
     options.locator("#server").fill(server)
     options.locator("#key").fill(KEY)
     options.get_by_role("button", name="Save", exact=True).click()
-    options.locator("#status").filter(has_text="Pairing saved.").wait_for()
+    expect(options.locator("#status")).to_have_text("Pairing saved.")
     assert worker.evaluate("() => chrome.storage.local.get(['server', 'key'])") == {"server": server, "key": KEY}
     options.get_by_role("button", name="Test connection", exact=True).click()
     options.locator("#status").filter(has_text="Connected — Fixture Student").wait_for()
@@ -280,10 +293,13 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     assert page.locator('#cover_letter').evaluate('e => e.files.length') == 0
     assert page.evaluate('uploadEvents') == [['resume', 'input'], ['resume', 'change']]
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
-    fields = {field['label']: field for field in payload['fields']}
-    # These editable menus filter after typing, so their scan-time lists are partial.
-    assert all(fields[label]['options'] == [] for label in ('School', 'Degree', 'Discipline',
-        'Are you interested in a Spring Co-Op, Summer Internship, or Both?'))
+    fields = {field['label']: field for field in result['fields']}
+    # Search-only menus may start empty; other editable menus retain visible choices.
+    assert fields['School']['options'] == []
+    assert fields['Degree']['options'] == ["Bachelor's Degree", "Master's Degree"]
+    assert fields['Discipline']['options'] == ['Computer Science', 'Mechanical Engineering']
+    assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == ['Spring Co-Op', 'Summer Internship', 'Both']
+    assert all(field['options'] == [] for field in payload['fields'] if field['kind'] == 'combobox')
     assert all(fields[label]['section'] == 'Education' for label in ('Start date month', 'Start date year', 'End date month', 'End date year'))
     assert fields['Resume/CV *']['kind'] == fields['Cover Letter']['kind'] == 'file'
     assert not any(field['label'] == 'Attach' for field in payload['fields'])
@@ -345,6 +361,7 @@ def test_async_school_searches_beyond_first_page(loaded_extension, extension_ser
     if mode == 'failure':
         assert searches[-1]['term'] == ''
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
+    assert result['fields'][0]['options'] == [f'Unrelated School {i + 1}' for i in range(10)]
     assert payload['fields'][0]['options'] == []
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
@@ -387,4 +404,156 @@ def test_upload_field_labels_ignore_generic_buttons(loaded_extension, extension_
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
     assert [field['label'] for field in payload['fields']] == ['Resume/CV *' if resume_label else 'Resume/CV', 'Cover Letter']
     assert [event[1] for event in page.evaluate('uploadEvents')] == ['input', 'change']
+    assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
+
+def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + "/form.html")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    panel.get_by_label("Unresolved required *", exact=True).fill("User fixture answer")
+    panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
+    expect(page.locator("#missing")).to_have_value("User fixture answer")
+    panel.get_by_label("Unresolved required *", exact=True).wait_for(state="detached")
+    remembered = next(payload for path, _, payload in requests if path == "/ext/remember")
+    assert remembered["label"] == "Unresolved required *"
+    assert remembered["value"] == "User fixture answer"
+    assert remembered["application_id"] == 42
+    panel.get_by_label("Which project should the letter highlight?", exact=True).fill("A fixture robotics project")
+    panel.get_by_role("button", name="Generate with answers", exact=True).click()
+    page.wait_for_function("document.querySelector('#cover').files.length === 1")
+    assert page.locator("#cover").evaluate("e => e.files[0].name") == "fixture-cover.pdf"
+    panel.locator("#cover-questions").get_by_role("button").wait_for(state="detached")
+    cover = [payload for path, _, payload in requests if path == "/ext/cover-letter"][-1]
+    assert cover["answers"] == [{"question": "Which project should the letter highlight?", "answer": "A fixture robotics project"}, {"question": "Anything else?", "answer": ""}]
+    panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
+    panel.locator("#generate").click()
+    expect(panel.locator("#version")).to_have_text("1 / 1")
+    first = panel.locator("#answer").input_value()
+    panel.locator("#refinement").fill("Shorter")
+    panel.locator("#refine").click()
+    expect(panel.locator("#version")).to_have_text("2 / 2")
+    assert panel.locator("#answer").input_value() == "Refined fixture answer."
+    refine = [payload for path, _, payload in requests if path == "/ext/write"][-1]
+    assert refine["previous"] == first
+    assert refine["instruction"] == "Shorter"
+    panel.locator("#previous").click()
+    assert panel.locator("#answer").input_value() == first
+    panel.locator("#next").click()
+    assert panel.locator("#answer").input_value() == "Refined fixture answer."
+    panel.reload()
+    panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
+    expect(panel.locator("#version")).to_have_text("2 / 2")
+    panel.locator("#chat-input").fill("How can I improve this answer?")
+    panel.locator("#chat-input").press("Enter")
+    panel.locator("#messages").filter(has_text="Fixture chat reply.").wait_for()
+    chat = next(payload for path, _, payload in requests if path == "/ext/chat")
+    assert chat["messages"] == [{"role": "user", "text": "How can I improve this answer?"}]
+    assert chat["page"]["company"] == "Fixture Company"
+    panel.locator("#clear-chat").click()
+    assert panel.locator("#messages").inner_text() == ""
+    assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_needs_input_choices_and_compact_actions(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + '/needs_input.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert 'error' not in result, result
+    interest = 'Are you interested in a Spring Co-Op, Summer Internship, or Both? *'
+    assert set(result['summary']['needs_input']) == {'Start date month*', interest, 'Schedule *', 'Areas *'}
+    assert result['summary']['skipped'] == 3
+    fields = {field['label']: field for field in result['fields']}
+    assert all(fields[label]['answered'] for label in ('Country *', 'Preselected select *', 'Preselected input *'))
+    assert page.get_by_role('listbox').count() == 0
+
+    panel = context.new_page()
+    panel.set_viewport_size({'width': 360, 'height': 900})
+    panel.emulate_media(color_scheme=theme)
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
+    expect(panel.locator('#needs-input .prompt')).to_have_count(4)
+    assert panel.locator('#needs-input input, #needs-input textarea').count() == 0
+    assert 'Country *' not in panel.locator('#needs-input').inner_text()
+    choices = [
+        ('Start date month*', ['January', 'August'], 'August', '#month', '08'),
+        (interest, ['Spring Co-Op', 'Summer Internship', 'Both'], 'Both', '[name=interest]', 'Both'),
+        ('Schedule *', ['Full time', 'Part time'], 'Part time', '#part-time', None),
+        ('Areas *', ['Hardware', 'Software'], ['Hardware', 'Software'], '#hardware', None),
+    ]
+    for label, options, chosen, selector, expected in choices:
+        prompt = panel.locator('.prompt').filter(has=panel.get_by_label(label, exact=True))
+        control = prompt.get_by_label(label, exact=True)
+        assert control.evaluate('e => e.tagName') == 'SELECT'
+        assert control.locator('option').all_text_contents() == (options if label == 'Areas *' else ['Choose an answer', *options])
+        save = prompt.get_by_role('button', name='Save', exact=True)
+        skip = prompt.get_by_role('button', name='Skip', exact=True)
+        save_box, skip_box = save.bounding_box(), skip.bounding_box()
+        assert save_box['y'] == skip_box['y']
+        assert skip_box['x'] >= save_box['x'] + save_box['width']
+        assert save_box['width'] < 100 and skip_box['width'] < 100
+        control.select_option(label=chosen)
+        save.click()
+        if expected is None:
+            expect(page.locator(selector)).to_be_checked()
+        else:
+            expect(page.locator(selector)).to_have_value(expected)
+        expect(control).to_have_count(0)
+        remembered = [payload for path, _, payload in requests if path == '/ext/remember' and payload['label'] == label]
+        assert len(remembered) == 1
+        assert remembered[0]['value'] == chosen
+        assert remembered[0]['application_id'] == 42
+    assert page.locator('#software').is_checked()
+    assert page.locator('#phone-country').input_value() == ''
+    assert page.locator('.css-phone-singleValue').inner_text() == 'US +1'
+    assert page.evaluate('optionClicks') == ['Both']
+    assert page.locator('#interest').get_attribute('aria-expanded') == 'false'
+    assert page.get_by_role('listbox').count() == 0
+    assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
+def test_preselected_country_and_replaced_upload(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, _ = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + "/greenhouse.html")
+    page.locator('.select[data-id="existing"] label').evaluate("e => e.textContent = 'Phone country *'")
+    page.locator('.select[data-id="existing"] .select__single-value').evaluate("e => e.textContent = 'US +1'")
+    page.evaluate("""() => {
+        document.querySelector('#resume').addEventListener('change', event => {
+            const input = event.target, filename = input.files[0].name;
+            setTimeout(() => {
+                const container = input.closest('.upload');
+                container.innerHTML = '<p>' + filename + '</p><button type="button">Remove</button>';
+            }, 100);
+        });
+    }""")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert "error" not in result
+    assert "Phone country *" not in result["summary"]["needs_input"]
+    assert result["summary"]["skipped"] >= 1
+    assert result["summary"]["errors"] == []
+    replaced_upload = page.locator('.upload').filter(has=page.get_by_role("button", name="Remove", exact=True))
+    expect(replaced_upload).to_have_text("fixture-resume.pdfRemove")
+    expect(replaced_upload.locator("p")).to_have_text("fixture-resume.pdf")
+    expect(replaced_upload.get_by_role("button", name="Remove", exact=True)).to_be_enabled()
+    expect(page.locator('#resume')).to_have_count(0)
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    panel.get_by_role("button", name="Generate with answers", exact=True).click()
+    page.wait_for_function("document.querySelector('#cover_letter').files.length === 1")
+    expect(page.locator('.filename')).to_have_text('fixture-cover.pdf')
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]

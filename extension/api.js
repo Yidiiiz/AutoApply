@@ -4,7 +4,10 @@ export async function api(path, payload) {
   const {server = DEFAULT_SERVER, key} = await chrome.storage.local.get(["server", "key"]);
   if (!key?.trim()) throw new Error("Not paired. Open Pairing settings and save your dashboard key.");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const writing = ["/ext/write", "/ext/chat", "/ext/cover-letter"].includes(path);
+  const timer = setTimeout(() => controller.abort(), writing ? 210000 : 15000);
+  // Keep MV3 alive while a local AI request is pending.
+  const heartbeat = setInterval(() => chrome.runtime.getPlatformInfo().catch(() => {}), 20000);
   try {
     const response = await fetch(server.replace(/\/+$/, "") + path, {
       method: payload === undefined ? "GET" : "POST",
@@ -18,11 +21,13 @@ export async function api(path, payload) {
     if (!response.ok) throw new Error(data.error || `Dashboard request failed (${response.status}).`);
     return data;
   } catch (error) {
+    if (error.name === "AbortError" && writing) throw new Error("AI request timed out. Please retry.");
     if (error.name === "AbortError" || error instanceof TypeError) {
       throw new Error("Dashboard is not reachable. Check the server URL and that the dashboard is running.");
     }
     throw error;
   } finally {
     clearTimeout(timer);
+    clearInterval(heartbeat);
   }
 }

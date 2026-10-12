@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Local needs-input fixture</title>
+<style>body{font:16px sans-serif}label{display:block}input,select{padding:5px}[role=option]{padding:5px;cursor:pointer}</style>
+</head><body><form>
+<div><label for="phone-country">Country *</label><div class="phone-value">
+  <span class="css-phone-singleValue"><span aria-label="United States flag">US</span> +1</span>
+  <div><input id="phone-country" role="combobox" aria-expanded="false" required></div>
+</div></div>
+<label for="existing-select">Preselected select *</label><select id="existing-select" required><option value="">Choose one</option><option value="yes" selected>Yes</option></select>
+<label for="existing-input">Preselected input *</label><input id="existing-input" value="User supplied" required>
+<label for="month">Start date month*</label><select id="month" required><option value="">Month</option><option value="01">January</option><option value="08">August</option></select>
+<div class="select"><label for="interest">Are you interested in a Spring Co-Op, Summer Internship, or Both? *</label>
+<div class="select__control"><span class="select__single-value"></span><div>
+  <input id="interest" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="interest-options" required>
+</div></div><input type="hidden" name="interest"></div>
+<fieldset><legend>Schedule *</legend><label><input id="full-time" type="radio" name="schedule" required>Full time</label><label><input id="part-time" type="radio" name="schedule" required>Part time</label></fieldset>
+<fieldset><legend>Areas *</legend><label><input id="hardware" type="checkbox" required>Hardware</label><label><input id="software" type="checkbox">Software</label></fieldset>
+<button id="submit" type="submit">Submit application</button>
+</form><script>
+window.submissions = 0; window.submitClicks = 0; window.optionClicks = [];
+document.querySelector('form').onsubmit = event => {event.preventDefault(); submissions++;};
+document.querySelector('#submit').onclick = () => submitClicks++;
+const input = document.querySelector('#interest');
+const root = input.closest('.select');
+let timer;
+function close() {
+  clearTimeout(timer);
+  document.querySelector('#interest-options')?.remove();
+  input.setAttribute('aria-expanded', 'false');
+}
+function open() {
+  close(); input.setAttribute('aria-expanded', 'true');
+  const list = document.createElement('div'); list.id = 'interest-options'; list.setAttribute('role', 'listbox');
+  document.body.append(list);
+  list.innerHTML = '<div role="option">Loading...</div>';
+  timer = setTimeout(() => {
+    list.replaceChildren();
+    for (const value of ['Spring Co-Op', 'Summer Internship', 'Both']) {
+      const option = document.createElement('div'); option.setAttribute('role', 'option'); option.textContent = value;
+      option.onmousedown = event => event.preventDefault();
+      option.onclick = () => {
+        optionClicks.push(value);
+        root.querySelector('.select__single-value').textContent = value;
+        root.querySelector('[type=hidden]').value = value;
+        input.value = ''; close();
+      };
+      list.append(option);
+    }
+  }, 120);
+}
+input.onkeydown = event => {if (event.key === 'ArrowDown') open(); if (event.key === 'Escape') close();};
+input.oninput = open;
+root.querySelector('.select__control').onmousedown = open;
+</script></body></html>

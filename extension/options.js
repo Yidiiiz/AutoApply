@@ -31,3 +31,6 @@ document.querySelector("#test").addEventListener("click", async () => {
     status.textContent = `Connected — ${result.profile_name || result.name || "AutoApply"}`;
   } catch (error) { status.textContent = error.message; }
 });
+
+// Stored values and handlers must be ready before the form accepts input.
+document.querySelectorAll("#pairing input, #pairing button").forEach(control => { control.disabled = false; });
