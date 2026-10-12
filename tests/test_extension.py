@@ -61,7 +61,8 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html"}.get(self.path)
+            file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+                    "/async_search.html": "async_search.html"}.get(self.path)
             if not file:
                 self.send_error(404)
                 return
@@ -280,9 +281,9 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     assert page.evaluate('uploadEvents') == [['resume', 'input'], ['resume', 'change']]
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
     fields = {field['label']: field for field in payload['fields']}
-    assert fields['Degree']['options'] == ["Bachelor's Degree", "Master's Degree"]
-    assert fields['Discipline']['options'] == ['Computer Science', 'Mechanical Engineering']
-    assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == ['Spring Co-Op', 'Summer Internship', 'Both']
+    # These editable menus filter after typing, so their scan-time lists are partial.
+    assert all(fields[label]['options'] == [] for label in ('School', 'Degree', 'Discipline',
+        'Are you interested in a Spring Co-Op, Summer Internship, or Both?'))
     assert all(fields[label]['section'] == 'Education' for label in ('Start date month', 'Start date year', 'End date month', 'End date year'))
     assert fields['Resume/CV *']['kind'] == fields['Cover Letter']['kind'] == 'file'
     assert not any(field['label'] == 'Attach' for field in payload['fields'])
@@ -309,6 +310,42 @@ def test_async_school_retries_prefix_and_commits_exact_match(loaded_extension, e
     assert root.locator('[role=combobox]').input_value() == ''
     searches = page.evaluate('schoolSearches')
     assert searches.index('University of Maryland - College Park') < searches.index('University of Maryland')
+    assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
+@pytest.mark.parametrize('mode', ['search', 'prefix', 'failure'])
+def test_async_school_searches_beyond_first_page(loaded_extension, extension_server, mode):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + '/async_search.html')
+    if mode != 'search':
+        page.locator('.select').evaluate("(e, mode) => e.dataset[mode === 'prefix' ? 'prefixOnly' : 'noResults'] = 'true'", mode)
+    # Opening alone renders ten unrelated schools, never the wanted answer.
+    page.locator('#school').press('ArrowDown')
+    assert page.get_by_role('option').count() == 10
+    assert page.evaluate('searchEvents') == []
+    page.locator('#school').press('Escape')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert 'error' not in result, result
+    expected = 'University of Maryland - College Park'
+    assert result['summary']['filled'] == (0 if mode == 'failure' else 1)
+    assert result['summary']['needs_input'] == (['School'] if mode == 'failure' else [])
+    assert page.locator('.select__single-value').inner_text() == ('' if mode == 'failure' else expected)
+    assert page.locator('[name=school]').input_value() == ('' if mode == 'failure' else expected)
+    assert page.locator('#school').input_value() == ''
+    assert page.locator('#school').get_attribute('aria-expanded') == 'false'
+    assert page.get_by_role('listbox').count() == 0
+    searches = page.evaluate('searchEvents')
+    assert searches[0] == {'term': expected, 'inputType': 'insertText', 'data': expected}
+    if mode != 'search':
+        assert searches[1]['term'] == 'University of Maryland'
+    if mode == 'failure':
+        assert searches[-1]['term'] == ''
+    payload = next(payload for path, _, payload in requests if path == '/ext/answers')
+    assert payload['fields'][0]['options'] == []
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
 

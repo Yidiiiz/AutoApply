@@ -88,6 +88,23 @@
     }
   }
   function closeCombo(element) { keypress(element, "Escape"); element.blur(); }
+  function comboInput(element) {
+    return element.matches("input,textarea") ? element : element.querySelector("input,textarea") ||
+      (element.isContentEditable ? element : null);
+  }
+  function searchCombo(element, value) {
+    const input = comboInput(element);
+    if (!input || input.readOnly || input.disabled) return false;
+    input.focus();
+    if (input instanceof HTMLInputElement) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
+    } else if ("value" in input) nativeSet(input, "value", value);
+    else input.textContent = value;
+    // No Enter key or change event: searching must never submit the form.
+    input.dispatchEvent(new InputEvent("input", {bubbles: true,
+      inputType: value ? "insertText" : "deleteContentBackward", data: value || null}));
+    return true;
+  }
   function comboSelection(element) {
     const container = comboContainer(element);
     return text(container.querySelector('[class*="singleValue"],[class*="single-value"]')) ||
@@ -215,7 +232,9 @@
         try {
           openCombo(element);
           await waitFor(() => comboOptions(element).length);
-          options = comboOptions(element).map(text).filter(Boolean);
+          // Editable menus may expose only a first page; these are not exhaustive choices.
+          const input = comboInput(element);
+          options = input && input.getAttribute("aria-autocomplete") !== "none" ? [] : comboOptions(element).map(text).filter(Boolean);
         } finally { closeCombo(element); }
       }
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
@@ -247,7 +266,8 @@
   function best(options, value, getText = item => item) {
     const exact = options.find(item => clean(getText(item)) === clean(value));
     const folded = options.find(item => normal(getText(item)) === normal(value));
-    return exact || folded || (clean(value) ? options.find(item => normal(getText(item)).includes(normal(value))) : undefined);
+    return exact || folded || (clean(value) ? options.find(item => normal(getText(item)).startsWith(normal(value))) ||
+      options.find(item => normal(getText(item)).includes(normal(value))) : undefined);
   }
   function mark(record, color) {
     for (const element of record.members) {
@@ -262,15 +282,13 @@
     try {
       openCombo(element);
       const words = clean(value).split(" ");
-      const searches = [...new Set([String(value), words.slice(0, 3).join(" "), words.slice(0, 2).join(" ")])];
-      let option;
-      for (const search of searches) {
-        if ("value" in element) nativeSet(element, "value", search);
-        else if (element.isContentEditable) element.textContent = search;
-        element.dispatchEvent(new Event("input", {bubbles: true}));
-        // Async search may replace the menu; match the full answer after options settle.
-        await pause(100);
-        option = best(await settledComboOptions(element), value, text);
+      const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
+      const searches = [...new Set([clean(value), prefix])];
+      let option = best(await settledComboOptions(element, 1000), value, text);
+      for (const search of option ? [] : searches) {
+        if (!searchCombo(element, search)) break;
+        // Keep waiting for a match even when an unrelated first page stays rendered.
+        option = await waitFor(() => best(comboOptions(element), value, text), 6000);
         if (option) break;
       }
       if (!option) return false;
@@ -284,16 +302,14 @@
         option.click();
         committed = Boolean(await waitFor(() => {
           const selection = comboSelection(element);
-          return normal(selection) === normal(selected) || selection && !clean(element.value) ||
+          return normal(selection) === normal(selected) ||
             element.getAttribute("aria-expanded") === "false" && normal(element.value) === normal(selected);
         }));
       }
       return committed;
     } finally {
       if (!committed) {
-        if ("value" in element) nativeSet(element, "value", "");
-        else if (element.isContentEditable) element.textContent = "";
-        element.dispatchEvent(new Event("input", {bubbles: true}));
+        searchCombo(element, "");
       }
       closeCombo(element);
     }
