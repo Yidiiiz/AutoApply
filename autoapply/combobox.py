@@ -14,6 +14,13 @@ async def signature_for(field, label):
     return await field.evaluate('(e,label)=>({id:e.id,label,token:e.getAttribute("data-autoapply-field")})', label)
 
 
+async def editable_control(field):
+    # is_editable raises on button-based selects. Only actual text editors can
+    # receive search text; ARIA select buttons must use their owned options.
+    return await field.evaluate("""e => !e.disabled && !e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
+      (e.isContentEditable || e.matches('textarea,input') && !['button','submit','checkbox','radio','file'].includes(e.type))""")
+
+
 def resolve_field(frame, signature):
     if signature.get('id'):
         return frame.locator('[id=' + json.dumps(signature['id']) + ']:visible')
@@ -27,8 +34,13 @@ async def options_for(frame, signature):
     ids = (await control.get_attribute('aria-controls') or await control.get_attribute('aria-owns') or '').split()
     if ids:
         roots = frame.locator(','.join('[id=' + json.dumps(i) + ']:visible' for i in ids))
-        return roots.get_by_role('option')
-    return frame.get_by_role('option')
+        return roots.get_by_role('option').filter(visible=True)
+    # Unlinked menus: page-wide options belong to this control only while it is
+    # expanded; otherwise another control's still-open menu would be read
+    # (every Greenhouse dropdown inherited the open Country list).
+    if await control.count() == 1 and await control.get_attribute('aria-expanded') == 'false':
+        return frame.locator('[data-autoapply-no-options]')
+    return frame.get_by_role('option').filter(visible=True)
 
 
 async def snapshot(frame, signature, desired):
@@ -60,7 +72,7 @@ async def committed_state(frame, signature, desired):
       const closed=!selectable&&(e.getAttribute('aria-expanded')==='false'||
         (menus.length>0&&!menuVisible));
       return {expanded:e.getAttribute('aria-expanded'),closed,invalid:e.getAttribute('aria-invalid')==='true'||!!(e.validity&&!e.validity.valid),
-        value:e.value===value,selected:labels.length===1&&labels[0]===value};
+        value:e.value===value,selected:(e.matches('button,[role="button"]') && e.textContent.trim()===value)||labels.length===1&&labels[0]===value};
     }''',desired)
 
 
@@ -95,13 +107,26 @@ async def _select_combobox(frame, signature, desired, deadline):
             await resolve_field(frame, signature).click(timeout=deadline.milliseconds())
         # Filter editable React controls to the intended option so a long menu
         # cannot move the click target as its internal scroll position changes.
-        if await resolve_field(frame, signature).is_editable():
+        import re
+        exact_pattern = re.compile('^'+re.escape(desired)+'$')
+        available_before_search = (await options_for(frame, signature)).filter(has_text=exact_pattern).filter(visible=True)
+        restore_available = await available_before_search.count() == 1
+        if await editable_control(resolve_field(frame, signature)):
             await resolve_field(frame, signature).fill(desired,timeout=deadline.milliseconds())
+            if restore_available:
+                # A display label (e.g. country plus dial code) need not be a
+                # valid search string. No selection has happened: clear only
+                # this search, then revalidate the originally observed exact
+                # option within the same absolute operation budget.
+                searched = (await options_for(frame, signature)).filter(has_text=exact_pattern)
+                try:
+                    await expect(searched).to_be_visible(timeout=min(1000,deadline.milliseconds()))
+                except AssertionError:
+                    await resolve_field(frame, signature).fill('',timeout=deadline.milliseconds())
         if await resolve_field(frame, signature).get_attribute('aria-expanded') is not None:
             await expect(resolve_field(frame, signature)).to_have_attribute('aria-expanded','true',timeout=deadline.milliseconds())
         await expect((await options_for(frame, signature)).first).to_be_visible(timeout=deadline.milliseconds())
         options = await options_for(frame, signature)
-        import re
         matching = options.filter(has_text=re.compile('^'+re.escape(desired)+'$'))
         await expect(matching).to_have_count(1,timeout=deadline.milliseconds())
         await expect(matching).to_be_visible(timeout=deadline.milliseconds())

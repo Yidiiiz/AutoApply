@@ -1,0 +1,30 @@
+<!doctype html><html><body><form id="application">
+<span id="schedule">Preferred schedule</span>
+<div role="radiogroup" aria-labelledby="schedule" aria-required="true">
+  <button type="button" role="radio" aria-checked="false">Full time</button>
+  <button type="button" role="radio" aria-checked="false">Part time</button>
+</div>
+<button type="button" role="switch" aria-label="Available weekends" aria-checked="false">Toggle</button>
+<span id="city-label">City</span><input aria-labelledby="city-label">
+<input placeholder="Portfolio URL">
+<span id="essay">Why this role?</span><div contenteditable="true" role="textbox" aria-labelledby="essay" aria-required="true"></div>
+<span id="team">Team</span><button id="team-choice" type="button" aria-haspopup="listbox" aria-controls="teams" aria-expanded="false" aria-labelledby="team">Choose</button>
+<div id="teams" role="listbox" hidden><div role="option">Engineering</div><div role="option">Design</div></div>
+<div id="shadow-host"></div>
+<iframe title="Application details" srcdoc="<label>Middle name<input></label>"></iframe>
+<button type="submit" onclick="window.finalClicked=true;return false">Submit application</button>
+</form><script>
+const host=document.getElementById('shadow-host');
+host.attachShadow({mode:'open'}).innerHTML='<span id="label">Last name</span><input aria-labelledby="label" required>';
+for(const radio of document.querySelectorAll('[role=radio]')) radio.onclick=()=>{
+ document.querySelectorAll('[role=radio]').forEach(e=>e.setAttribute('aria-checked',String(e===radio)));
+};
+const toggle=document.querySelector('[role=switch]');
+toggle.onclick=()=>toggle.setAttribute('aria-checked',String(toggle.getAttribute('aria-checked')!=='true'));
+const choice=document.getElementById('team-choice'),menu=document.getElementById('teams');
+choice.onclick=()=>{menu.hidden=false;choice.setAttribute('aria-expanded','true');};
+for(const option of menu.children) option.onclick=()=>{
+ choice.textContent=option.textContent;menu.hidden=true;choice.setAttribute('aria-expanded','false');
+ option.setAttribute('aria-selected','true');
+};
+</script></body></html>

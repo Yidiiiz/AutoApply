@@ -12,6 +12,9 @@ LABELS = {
     "address": "contact.address", "street address": "contact.address",
     "city": "contact.city", "state": "contact.state", "zip code": "contact.postal_code",
     "postal code": "contact.postal_code", "country": "contact.country",
+    "skills": "skills", "gender": "demographics.gender", "gender identity": "demographics.gender",
+    "race": "demographics.race", "race ethnicity": "demographics.race",
+    "disability status": "demographics.disability", "veteran status": "demographics.veteran_status",
     "school": "education.school", "university": "education.school", "college university": "education.school",
     "degree": "education.degree", "degree level": "education.degree",
     "major": "education.major", "discipline": "education.major",
@@ -28,6 +31,8 @@ def question_text(label):
 
 
 def concept(label):
+    if '.' in label and (label in REGISTRY or label in ALIASES):
+        return ALIASES.get(label, label)
     text = question_text(label)
     link = re.fullmatch(r"(?:please )?(?:(?:include|provide|enter|share) (?:your )?|(?:what is )?your )?(linkedin|github|portfolio|personal website)(?: profile)?(?: url| link)?", text)
     if link:
@@ -35,6 +40,13 @@ def concept(label):
     if text in LABELS:
         return LABELS[text]
     exact = {
+        'are you currently enrolled': 'education.currently_enrolled',
+        'are you currently a student': 'education.currently_enrolled',
+        'are you enrolled in a degree program': 'education.currently_enrolled',
+        'are you 18 years or older': 'qualifications.age_18_or_older',
+        'are you at least 18': 'qualifications.age_18_or_older',
+        'are you 18 years of age or older': 'qualifications.age_18_or_older',
+        'are you in good academic standing': 'education.good_academic_standing',
         'sponsorship now': 'work_authorization.sponsorship_now',
         'sponsorship future': 'work_authorization.sponsorship_future',
         'do you require sponsorship now': 'work_authorization.sponsorship_now',
@@ -52,20 +64,23 @@ def concept(label):
     }
     if text in exact_saved_concepts:
         return exact_saved_concepts[text]
+    # Full-clause variants of the combined now/future sponsorship question.
+    if re.fullmatch(r'will you now or in the future require (?:company sponsorship for a visa or work authorization to work in the country where this role is based|visa sponsorship in order to work in the us|([a-z0-9 ]+) to sponsor an employment visa or other employer sponsored immigration benefit in order for you to begin or continue working for \1)', text):
+        return 'sponsorship_combined'
     if text in {"how did you hear about us", "how did you first hear about us", "how did you first learn about us",
                 "how did you hear about this job", "how did you hear about this position", "how did you find this job"}:
         return "application_preferences.discovery_source"
     if not re.search(r"\b(not|unable|cannot|and|or|relocat\w*|expense|visa|sponsor\w*)\b", text):
         if re.fullmatch(r"(?:are you (?:able|willing) to|can you) (?:come into|attend|work (?:in|from)) (?:the |our )?(?:[a-z]+ ){0,5}office (?:5|five) days (?:a|per) week", text):
             return "application_preferences.office_five_days"
-        if re.fullmatch(r"are you willing to work (?:(?:[1-7]|one|two|three|four|five|six|seven) days (?:a|per) week )?(?:in|at|from) (?:the |our )?(?:[a-z]+ ){0,6}(?:office|location)", text):
+        if re.fullmatch(r"are you willing to work (?:in|at|from) any (?:office|location)", text):
             return "application_preferences.willing_to_work_any_location"
     # Deliberately narrow equivalences. Negation or additional clauses never use fuzzy similarity.
     patterns = [
         (r"(?:are you|are you currently|will you be) (?:legally )?authorized to work in (?:the )?(?:united states|u s|us)(?: of america)?", "work_authorization.us_authorized"),
         (r"(?:are you|are you a) (?:u s|us|united states) citizen", "citizenship.us_citizen"),
         (r"(?:are you|have you been) (?:a )?(?:u s|us|united states) citizen since birth", "citizenship.citizen_since_birth"),
-        (r"(?:will you|do you|do you anticipate) (?:now or in the future )?(?:require|requiring|need) (?:employer |visa |employment |immigration )*sponsorship(?: now or in the future)?(?: for employment(?: visa status)?)?(?: e g h 1b visa status)?", "sponsorship_combined"),
+        (r"(?:will you|do you|do you anticipate) (?:now or in the future )?(?:require|requiring|need) (?:employer |visa |employment |immigration )*sponsorship(?: now or in the future)?(?: for employment(?: visa status)?)?(?: e g h 1b visa status)?(?: to (?:be employed|work) (?:at|by|with|for) (?:[a-z0-9]+ ){0,5}[a-z0-9]+)?", "sponsorship_combined"),
         (r"(?:are you|are you currently) (?:enrolled in|pursuing) a bachelor s degree", "education.currently_enrolled"),
         (r"are you willing to relocate", "locations.willing_to_relocate"),
     ]
@@ -88,13 +103,51 @@ class Concept:
 
 
 ALIASES = {'identity.first_name': 'contact.first_name', 'identity.last_name': 'contact.last_name',
-           'identity.full_name': 'contact.full_name', 'links.personal_website': 'links.portfolio'}
-PROFILE_PATHS = {v: k for k, v in ALIASES.items()}
+           'identity.full_name': 'contact.full_name', 'links.personal_website': 'links.portfolio',
+           'demographics.gender_identity': 'demographics.gender',
+           'demographics.racial_ethnic_background': 'demographics.race'}
+PROFILE_PATHS = {v: k for k, v in ALIASES.items() if not k.startswith('demographics.')}
+DEMOGRAPHIC_PATHS = {
+    'demographics.gender': ('demographics.gender', 'demographics.gender_identity', 'application_preferences.gender'),
+    'demographics.race': ('demographics.race', 'demographics.racial_ethnic_background', 'application_preferences.race'),
+    'demographics.disability': ('demographics.disability', 'application_preferences.disability'),
+    'demographics.veteran_status': ('demographics.veteran_status', 'application_preferences.veteran'),
+}
+
+
+def demographic_values(profile, path):
+    from .config import fact
+    return [dict(path=p, value=fact(profile, p)) for p in DEMOGRAPHIC_PATHS.get(path, (path,))
+            if fact(profile, p) not in (None, '')]
+
+
+def equivalent_answer(value):
+    """Comparison only: decline phrasing and Yes/No casing carry equal meaning."""
+    if type(value) is bool:
+        return 'yes' if value else 'no'
+    if not isinstance(value, str):
+        return value
+    text = re.sub(r'[^a-z0-9]+', ' ', value.casefold()).strip()
+    if re.fullmatch(r'(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
+        return 'decline'
+    return text if text in {'yes', 'no'} else value
+
+
+def demographic_value(profile, path):
+    """Legacy fallback is read-only; unresolved conflicting facts require a choice."""
+    values = demographic_values(profile, path)
+    source = (profile.get('fact_sources') or {}).get(path, {})
+    if source.get('basis') == 'Dashboard edit' and values and values[0]['path'] == path:
+        return equivalent_answer(values[0]['value'])
+    if len({str(equivalent_answer(v['value'])).strip().casefold() for v in values}) > 1:
+        return None
+    return equivalent_answer(values[0]['value']) if values else None
 REGISTRY = {}
 for path in set(LABELS.values()) | {
     'work_authorization.us_authorized', 'work_authorization.sponsorship_now',
     'work_authorization.sponsorship_future', 'citizenship.us_citizen',
     'citizenship.citizen_since_birth', 'education.currently_enrolled',
+    'education.good_academic_standing', 'qualifications.age_18_or_older',
     'application_preferences.discovery_source', 'application_preferences.office_five_days',
     'application_preferences.willing_to_work_any_location', 'locations.willing_to_relocate',
     'demographics.gender', 'demographics.gender_identity', 'demographics.race',
@@ -104,10 +157,12 @@ for path in set(LABELS.values()) | {
 }:
     key = ALIASES.get(path, path)
     boolean = path.startswith(('citizenship.', 'work_authorization.')) or path in {
-        'education.currently_enrolled', 'locations.willing_to_relocate',
+        'education.currently_enrolled', 'education.good_academic_standing',
+        'qualifications.age_18_or_older', 'locations.willing_to_relocate',
         'application_preferences.office_five_days', 'application_preferences.willing_to_work_any_location'}
     REGISTRY[key] = Concept(key, tuple(label for label, p in LABELS.items() if p == path),
-                            path, path.split('.')[0], answer_type='boolean' if boolean else 'text')
+                            key if path.startswith('demographics.') else path,
+                            path.split('.')[0], answer_type='boolean' if boolean else 'text')
 for key in ('sponsorship_combined', 'prior_employment', 'conflict_of_interest',
             'government_connections', 'privacy_ack', 'sms_recruiting', 'technical_interests',
             'start_date', 'military_service', 'required_demographic_processing_consent'):

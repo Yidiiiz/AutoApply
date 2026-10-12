@@ -18,9 +18,11 @@ class Controller:
             FROM questions q JOIN applications a ON a.id=q.application_id JOIN jobs j ON j.id=a.job_id
             WHERE (j.listing_active=1 OR a.submit_intent_at IS NOT NULL OR a.manual_action_required=1) AND q.status='PENDING' AND a.status NOT IN ('SUBMITTED','ALREADY_APPLIED','INELIGIBLE','CLOSED','INVALID','DUPLICATE') ORDER BY q.id""")
         days, reference = self.db.listing_days(), utc()
-        return [row for row in rows if row['submit_intent_at']
+        result = [row for row in rows if row['submit_intent_at']
                 or (row['manual_action_required'] and row['application_status'] != 'NEEDS_INPUT')
                 or self.db.listing_decision(row, reference, days=days)[2]]
+        semi = getattr(self, 'semi_auto', None)
+        return [r for r in result if r['application_id'] in semi.ids] if semi else result
 
     def answer(self, question_id, value):
         row = self.db.one("SELECT * FROM questions WHERE id=?", (question_id,))
@@ -43,10 +45,10 @@ class Controller:
                 self.db.execute("UPDATE jobs SET posted_at=?,date_evidence='user confirmed' WHERE id=?", (value, app["job_id"]))
                 if not freshness(value, self.config["jobs"]["max_listing_age_days"]):
                     self.db.lifecycle.transition(app["id"], State.INVALID, "Confirmed posting date is outside the listing age window")
-            elif q.key == "eligibility":
+            elif q.key == "eligibility" or q.key.startswith("eligibility:"):
                 if value == "No":
                     self.db.lifecycle.transition(app["id"], State.INELIGIBLE, "User confirmed ineligibility")
-                else:
+                elif q.key == "eligibility":
                     self.db.lifecycle.metadata(app["id"], eligibility_override=1)
             if q.kind == "textarea":
                 self.db.execute("""INSERT INTO written_responses(question,topic,answer,company,job_title,verified,provider,evidence,created_at)
@@ -54,6 +56,8 @@ class Controller:
                 self.db.execute('UPDATE written_responses SET question_signature=?,profile_revision=? WHERE id=last_insert_rowid()',
                                 (row['question_signature'], self.config.profile_snapshot().revision))
             self.db.event(app["id"], "user_answer", f"Question {question_id} confirmed")
+            from .question_rules import remember
+            remember(self.db, self.config, q, value, question_id)
             from .concepts import REGISTRY
             from .field_mapping import describe
             descriptor = describe(q, app, self.config.profile_snapshot().facts)
@@ -69,19 +73,40 @@ class Controller:
             self._resume_if_ready(app["id"])
         if self.db.one("SELECT application_id FROM manual_requests WHERE application_id=?", (app['id'],)):
             return f"All required answers are available; resuming {app['company']} #{app['id']}."
+        if getattr(self, 'semi_auto', None) and app['id'] in self.semi_auto.ready_to_refill:
+            return 'Answer saved. Same-form revalidation queued; use !lock after finishing manual review.'
         return "Answer saved. " + self.db.application(app["id"])["status"]
 
     def _resume_if_ready(self, app_id):
+        if getattr(self, 'semi_auto', None):
+            return self.semi_auto.answer_ready(app_id)
         if self.db.setting("controlled_application_id") is not None:
             return  # Controlled holds require an explicit same-session resume.
         app = self.db.application(app_id)
         if (app["status"] == "MANUAL_REVIEW" and app["error_category"] == "INPUT_REQUIRED"
                 and app["manual_resume_allowed"] and not app["submit_intent_at"]
                 and app["security_state"] in {"NONE", "PASSIVE_PROTECTION_DETECTED"}
-                and not self.db.one("SELECT id FROM questions WHERE application_id=? AND status='PENDING'", (app_id,))):
+                and not self.pending_input_blocker(app_id)):
             enqueue_inspection(self.db, app_id, reconstruct=True)
         if app["status"] == "NEEDS_INPUT" and self.db.guard_listing(app_id) and not self.db.one("SELECT id FROM questions WHERE application_id=? AND status='PENDING'", (app_id,)):
             self.db.lifecycle.resolve_input(app_id)
+
+    def pending_input_blocker(self, app_id):
+        """A canonical resume can be prepared; its pending row still needs acceptance.
+
+        This grants no retry/session authority and never changes question state.
+        Other documents, mixed requirements and personal questions remain blockers.
+        """
+        import re
+        from .operations import FileSnapshot
+        rows = self.db.rows("SELECT * FROM questions WHERE application_id=? AND status='PENDING'", (app_id,))
+        if not rows:
+            return False
+        if any(r['field_type'] != 'file' or not re.fullmatch(
+                r'\s*(?:resume|curriculum vitae|cv)\s*\*?\s*', r['raw_question'], re.I) for r in rows):
+            return True
+        self.config.profile_snapshot(reload=True)
+        return not (self.config.resume.exists() and FileSnapshot.read(self.config.resume, force=True).is_pdf)
 
     def check_answer_mutation(self, app_id):
         app = self.db.application(app_id)
@@ -147,6 +172,8 @@ class Controller:
         return f"Application {app_id}: {app['company']} — {app['title']}\n{app['status']} / {app['stage']}\nSubmission: {app['application_state']} | Security: {app['security_state']} | Verification: {app['verification_state']}\nConfirmed: {bool(app['submission_confirmation_seen'])} | Retry allowed: {bool(app['retry_allowed'])}\n{app['failure_reason']}\nLive session: {view['session']['availability']} | Readiness: {view['readiness']}\n{app['canonical_url']}\nAsk for description, answers, missing questions, writing, or use resume-manual/retry/stop."
 
     def check_target(self, app_id):
+        if getattr(self, 'semi_auto', None) and app_id not in self.semi_auto.ids:
+            raise ValueError('Semi-auto permits only current batch applications')
         target = self.db.setting("controlled_application_id")
         if target is not None and app_id != target:
             raise ValueError(f"This controlled run permits only application #{target}")
@@ -201,7 +228,7 @@ class Controller:
             self.check_target(identifier)
             validate_session_token(self.db, identifier, command.session_token)
             self.resolve_known_pending(identifier)
-            if self.db.one("SELECT id FROM questions WHERE application_id=? AND status='PENDING'", (identifier,)):
+            if self.pending_input_blocker(identifier):
                 return "Required answers are still pending. The application remains paused."
             app = self.db.application(identifier)
             if not app['manual_action_required']:

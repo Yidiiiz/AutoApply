@@ -1,5 +1,4 @@
 """Bounded directional scrolling with verified movement and nested containers."""
-import asyncio
 import logging
 
 log = logging.getLogger("autoapply.scroll")
@@ -52,12 +51,6 @@ class ScrollController:
                 result = await result
             if result:
                 raise NavigationError("Navigation stopped by interaction guard")
-
-    async def scroll_down(self, target=None):
-        return await self.scroll("DOWN", target)
-
-    async def scroll_up(self, target=None):
-        return await self.scroll("UP", target)
 
     async def scroll(self, direction, target=None):
         if direction not in {"UP", "DOWN"}:
@@ -123,6 +116,8 @@ class ScrollController:
             await self._check()
             visible = await target.evaluate(VISIBILITY)
             if visible['visible']:
+                from .consent import pass_sticky_header
+                await pass_sticky_header(target)
                 return
             if not await self.scroll(visible['direction'], target):
                 raise ScrollFailed("No movement after alternate scroll strategies")

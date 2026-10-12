@@ -52,7 +52,7 @@ REVISION = r'''es => {
    // Password/challenge values are never read by this observation.
    const sensitive=e.type==='password'||/captcha|verification|one.time/i.test(e.name+' '+e.id+' '+e.getAttribute('autocomplete'));
    return [g.ids.get(e),e.getClientRects().length>0,getComputedStyle(e).visibility,
-     e.disabled||false,e.required||false,sensitive?'':e.value||'',!!e.checked||e.getAttribute('aria-checked')==='true',
+     e.disabled||false,e.required||false,sensitive?'':e.isContentEditable?e.textContent:e.value||'',!!e.checked||e.getAttribute('aria-checked')==='true',
      e.validity?e.validity.valid:null,e.validationMessage||'',e.getAttribute('data-autoapply-field')];
  });
  return [g.document,g.revision,location.href,states];
@@ -73,8 +73,9 @@ async def generation(page):
                    urlsplit(frame.url).netloc == urlsplit(page.url).netloc or
                    detect_ats(frame.url).provider not in {'UNKNOWN', 'custom'}))
         if allowed:
+            from .form_controls import CONTROL_SELECTOR
             state = await asyncio.wait_for(
-                frame.locator('input,textarea,select,[role=combobox],[role=checkbox]').evaluate_all(REVISION), timeout=5)
+                frame.locator(CONTROL_SELECTOR).evaluate_all(REVISION), timeout=5)
             result.append((id(frame), state))
         else:
             result.append((id(frame), frame.url))

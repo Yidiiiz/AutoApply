@@ -1,10 +1,69 @@
 # AutoApply
 
-A personal internship application server built with Python, Playwright, SQLite and YAML. It discovers listings, preserves their provenance, fills verified answers, asks for missing information through Discord, and submits supported forms only after validation. All runtime data stays in ignored local storage.
+A personal internship application server built with Python, Playwright, SQLite and YAML. It discovers listings, preserves their provenance, fills verified answers and leaves unknown questions for you. Final submission is disabled by default. All runtime data stays in ignored local storage.
+
+## Semi-auto and VS Code development loop
+
+Follow [the VS Code guide](docs/semi-auto-vscode.md) for the new `semi-auto`
+command: it fills sequentially, retains up to five priority-queue forms, sends
+concise Discord review/input cards, and leaves final submission to you. The
+optional [Claude Code supervisor](docs/agent-supervisor.md) runs serial Codex
+engineering workers with durable reports and enforced budgets. All setup,
+run commands, example task files and copyable prompts are included.
+
+## Sequential fill-only use
+
+Select application IDs from `python -m autoapply queue`, then run:
+
+```powershell
+.venv/Scripts/python.exe -m autoapply fill 1234
+```
+
+Use `python -m autoapply fill` to select the next eligible queued application
+automatically. Eligibility, freshness, protected history and manual holds still
+apply. `--limit 5 --checkpoint-only` selects up to five fresh queue candidates.
+
+This fills supported verified fields and the canonical resume, waits for conditional
+controls and continues through supported non-final steps. It keeps the dedicated
+browser open for missing facts, security steps or final review. Fill missing fields
+yourself, or use `answer QUESTION_ID "your answer"` from another terminal to save
+verified answers for future compatible questions. The running worker services the
+existing `resume-manual ID` command and revalidates the same page. Final submission
+remains disabled while the worker owns this form. Close the application tab to end
+the handoff; Ctrl+C ends the run. A saved checkpoint records progress before closure.
+
+To process several selected applications without waiting on manual holds:
+
+```powershell
+.venv/Scripts/python.exe -m autoapply fill 1234 1235 1236 --checkpoint-only
+```
+
+Each selected ID is considered once, in the listed order, with one application tab.
+Missing answers and site-specific holds are saved and processing continues.
+Browser startup or execution-access failures stop the batch. There is no fallback
+to unrelated jobs and no automatic override of eligibility, protected history,
+manual holds or retry budgets. Discord, Gmail and AI providers are unnecessary for
+these commands. The worker finishes paused with auto-submit off.
+The latest run summary is saved at `data/private/fill-run-result.json`.
+
+For the qualified Country inventory failure that stopped before applicant input,
+`recover-checkpoint ID --source "your explicit authorization"` performs one
+checkpoint-only fill recovery. It binds the exact checkpoint and attempt/hold
+events, fresh browser ownership, listing/history eligibility, canonical resume
+and profile, and the remaining ordinary retry budget. Changed evidence, prior
+field/upload/Next interaction, security holds and submission history reject it.
+It does not enable general retries or consume startup-only continuations. A saved
+resume question remains pending until the fresh ATS upload is accepted.
+
+Check progress with `status ID` and exact missing questions with `pending`. New
+checkpoints distinguish `UNFILLED`, `PARTIAL` and `READY`; saved progress is never
+proof that an ended browser session is ready to submit. `--checkpoint-only` closes
+the form, so choose live handoff when you want to finish it yourself. Existing
+historical checkpoint files and special one-use continuations remain intact.
 
 ## What works
 
-- Git-based polling of all three configured internship repositories, with dynamic default-branch discovery, HTML/Markdown table parsing, revision checkpoints and a configurable 14-day freshness window.
+- Git-based polling of all three configured internship repositories, with dynamic default-branch discovery, HTML/Markdown table parsing, revision checkpoints and a configurable freshness window of at most 30 days.
 - A persistent priority queue, ATS/requisition and URL deduplication, source references, closed/already-applied detection, conservative eligibility checks, and readable JSON archives.
 - A dedicated persistent Chromium profile. Semantic form filling handles native text, email, phone, number, date, select, multi-select, radio, checkbox and file inputs. Some accessible custom dropdowns work; uncertain layouts pause.
 - Greenhouse, Lever and Ashby entry points plus a generic form adapter. The shared form workflow is tested against a local employer fixture, including resume upload, unknown-question pause, user-answer replay and a confirmed submission.
@@ -16,7 +75,7 @@ A personal internship application server built with Python, Playwright, SQLite a
 
 ## Current boundaries
 
-This is an initial implementation, not universal ATS support. Workday and SmartRecruiters use the conservative generic adapter; complex account creation, resume parsers, custom widgets, internal LinkedIn/Handshake application dialogs and site-specific multi-step flows may require manual review. Browser source layouts and user-configured AI selectors need validation with your own authenticated sessions.
+ATS support is qualified with local fixtures. Workday has explicit entry/readiness handling and SmartRecruiters has structured control mapping; both share conservative form and upload primitives. Complex account creation, unfamiliar composite widgets, closed shadow controls, internal LinkedIn/Handshake application dialogs and review pages without inspectable fields may require manual completion. Live employer layouts and user-configured AI selectors still need validation with your own authenticated sessions.
 
 New AI prose is a **proposal**, never a verified personal fact. Ordinary prose may be entered after the existing grounding audit; only explicit user confirmation makes it verified writing memory. Missing facts, ambiguous eligibility, unknown posting dates, legal declarations and numeric salary expectations pause the relevant application. Exact graduation-month boundaries, complex skill requirements and uncertain locations go to the user. Calendar-derived availability is not silently inferred: record the official source and confirm the date in the private profile when needed.
 

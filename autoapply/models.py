@@ -144,3 +144,7 @@ class Eligibility:
     reasons: list[str] = field(default_factory=list)
     uncertainties: list[str] = field(default_factory=list)
     standing_matches: list[dict] = field(default_factory=list)
+
+    @property
+    def status(self):
+        return 'UNKNOWN_REQUIRES_USER' if self.eligible is None else 'ELIGIBLE' if self.eligible else 'INELIGIBLE'

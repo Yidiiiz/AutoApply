@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import zlib
 from urllib.parse import urlsplit
 from .archive import atomic_json
 from .models import now
@@ -10,8 +11,34 @@ from .models import now
 def is_final_submission(url, method, body=None):
     if method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
         return False
-    return bool(re.search(r'(?:submit|finalize)(?:application)?', urlsplit(url).path, re.I)
-                or isinstance(body, str) and re.search(r'"(?:operationName|action)"\s*:\s*"[^\"]*(?:submit|finalize)', body, re.I))
+    if re.search(r'(?:submit|finalize)(?:application)?', urlsplit(url).path, re.I):
+        return True
+    if isinstance(body, bytes):
+        if body.startswith(b'\x1f\x8b'):
+            # Workday sends gzip telemetry. Inspect compressed actions too, with
+            # a bounded expansion; malformed/oversized mutations fail closed.
+            try:
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                body = decoder.decompress(body, 2 * 1024 * 1024 + 1)
+                if len(body) > 2 * 1024 * 1024 or not decoder.eof or decoder.unused_data:
+                    return True
+            except zlib.error:
+                return True
+        # Multipart documents can contain binary data. Replacement preserves
+        # ASCII action markers without forcing Playwright's UTF-8 text accessor.
+        body = body.decode('utf-8', errors='replace')
+    return bool(isinstance(body, str) and re.search(r'"(?:operationName|action)"\s*:\s*"[^\"]*(?:submit|finalize)', body, re.I))
+
+
+def request_body(request):
+    """Use raw Playwright bytes; retain compatibility with text-only test stubs."""
+    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return None
+    unavailable = object()
+    body = getattr(request, 'post_data_buffer', unavailable)
+    if body is unavailable:
+        return request.post_data
+    return body
 
 PAYLOADS = [
  'resume.pdf', 'first and last name', 'email address', 'phone number',
@@ -70,7 +97,7 @@ class ApprovedDestinations:
  async def route(self,route):
   request=route.request
   reason=self.decision(request.url,request.method,navigation=request.is_navigation_request() and request.frame==request.frame.page.main_frame,
-                       body=request.post_data if request.method not in {'GET','HEAD','OPTIONS'} else None)
+                       body=request_body(request))
   if reason:
    parsed=urlsplit(request.url)
    self.blocked.append({'domain':parsed.hostname,'method':request.method,'reason':reason})

@@ -158,7 +158,20 @@ def extract_posting_date(*, structured=None, api=None, ats=None, explicit=None,
                        original.isoformat() if original else None)
 
 
+# Workday and similar boards serve removed requisitions as HTTP 403/404 with this text.
+REMOVED_PAGE = re.compile(r"\bthe page you are looking for (?:doesn'?t|does not|no longer) exists?\b|"
+                          r"\b(?:this |the )?(?:job|position|posting|requisition)s? (?:you are looking for |you requested )?"
+                          r"(?:is|was|has been) (?:not found|removed)\b|"
+                          r"\bjob (?:not found|no longer exists)\b", re.I)
+
+
+def removed_page(text):
+    return bool(text and REMOVED_PAGE.search(text))
+
+
 def closed_status(text='', http_status=None, ats_status='', blocked=False):
+    if not blocked and removed_page(text):
+        return 'REMOVED'
     if blocked or http_status in {401, 403, 429} or http_status and http_status >= 500:
         return None
     if http_status in {404, 410} or str(ats_status).upper() == 'REMOVED':

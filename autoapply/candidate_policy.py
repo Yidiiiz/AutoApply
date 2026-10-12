@@ -5,7 +5,7 @@ import re
 
 from .config import fact
 from .freshness import freshness_state
-from .jobs import normalize, us_location
+from .jobs import normalize, phd_rejection, us_location
 
 
 class CandidateStatus(StrEnum):
@@ -28,27 +28,12 @@ class CandidateDecision:
 
 
 def required_clauses(description):
-    """Preserve section context; no substring-based inference of hard requirements."""
-    required = False
-    preferred = False
-    for line in re.split(r'[\n;]+', description):
-        text = normalize(line)
-        if text in {'preferred qualifications', 'preferred skills', 'preferred skills experience',
-                    'preferred skills and experience', 'preferred experience', 'nice to have', 'bonus qualifications'}:
-            preferred, required = True, False
-            continue
-        if text in {'requirements', 'minimum qualifications', 'required qualifications', 'basic qualifications'}:
-            preferred, required = False, True
-            continue
-        if text in {'responsibilities', 'benefits', 'additional information', 'job description'}:
-            preferred, required = False, False
-            continue
-        if preferred or re.search(r'\b(preferred|a plus|nice to have)\b', text):
-            continue
-        if required or re.match(r'(?:candidates |applicants )?(?:must|are required to)\b', text):
-            yield line, re.sub(r'^(?:candidates |applicants )?(?:must |are required to )', '', text)
-        elif re.fullmatch(r'(?:no (?:visa )?sponsorship|(?:we |the employer )?(?:cannot|can not|will not|does not) (?:provide (?:visa )?sponsorship|sponsor))', text):
-            yield line, text
+    """Use the same required/preferred boundaries as the live assessment."""
+    from .requirements import extract_requirements
+    for item in extract_requirements(description):
+        if not item.preferred:
+            text = normalize(item.text)
+            yield item.text, re.sub(r'^(?:candidates |applicants )?(?:must |are required to )', '', text)
 
 
 def evaluate(candidate, snapshot, *, max_days=30, include_international=False,
@@ -74,6 +59,9 @@ def evaluate(candidate, snapshot, *, max_days=30, include_international=False,
     fresh = freshness_state(candidate.get('posted_at'), max_days, reference)
     if fresh == 'STALE':
         return decision('REJECT', 'stale_listing', candidate.get('posted_at'))
+    rejected = phd_rejection(candidate.get('title'), candidate.get('description') or '')
+    if rejected:
+        return decision('REJECT', rejected, candidate.get('title'), candidate.get('description') or '')
     location = candidate.get('location') or ''
     # A city name alone, remote without a country, or mixed options is not foreign-only proof.
     foreign_country = r'\b(canada|united kingdom|uk|india|singapore|germany|france|australia|china|japan|ireland|mexico|switzerland|poland|netherlands|israel|brazil)\b'

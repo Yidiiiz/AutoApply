@@ -89,6 +89,8 @@ def describe(q, app, profile=None):
     employer = normalize(app.get('company', '')) if scoped else ''
     requisition = str(app.get('canonical_url') or app.get('id', '')) if scoped else ''
     policy = (q.policy or field_policy({}, mapped, q.kind)) if profile is None else field_policy(profile, mapped, q.kind)
+    if mapped == 'eligibility_confirmation':
+        policy = 'REQUIRE_USER'
     return _descriptor(q.label, mapped, q.kind, tuple(q.options), q.required, q.max_length, q.min_selections, q.max_selections, scope,
                        employer, requisition, policy, POLICY_VERSION)
 

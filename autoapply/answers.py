@@ -18,12 +18,18 @@ def scope_for(label, app):
 def fit_options(value, options):
     if not options:
         return str(value)
-    expected = normalize(value)
+    from .concepts import equivalent_answer
+    expected = normalize(equivalent_answer(value))
     exact = [option for option in options if normalize(option) == expected]
     if len(exact) == 1:
         return exact[0]
+    veteran = re.sub(r'^i am (?:a )?', '', expected)
+    if veteran in {'protected veteran', 'not a protected veteran'}:
+        matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]
+        return matches[0] if len(matches) == 1 else None
     if expected == "decline":
-        matches = [option for option in options if re.search(r"decline|prefer not|do not wish|don t wish", option, re.I)]
+        matches = [option for option in options if equivalent_answer(option) == 'decline'
+                   or re.search(r"decline|prefer not|do not wish|don t wish", option, re.I)]
         return matches[0] if len(matches) == 1 else None
     return None
 
@@ -161,6 +167,8 @@ class AnswerResolver:
             return None
         row = self._memory.get((normalize(q.label), q.scope))
         from .concepts import REGISTRY
+        from .concepts import ALIASES, DEMOGRAPHIC_PATHS, demographic_value
+        mapped_key = ALIASES.get(mapped_key, mapped_key)
         spec = REGISTRY.get(mapped_key)
         memory_path = spec.profile_path if spec and spec.profile_path else 'sponsorship_combined' if mapped_key == 'sponsorship_combined' else None
         stored = self._settings.get('verified_fact:' + memory_path) if memory_path else None
@@ -178,8 +186,38 @@ class AnswerResolver:
             else:
                 return Answer(value, 'verified_memory', provenance={'memory_id': row['id'],
                     'reference': json.loads(row.get('provenance') or '{}')})
+        # Common factual questions (residence, ZIP, graduation date, prior employer)
+        # come straight from the canonical profile, never a Discord prompt.
+        if mapped_key in {'', 'UNKNOWN_FIELD', 'contact.country', 'contact.state', 'contact.postal_code',
+                          'contact.city', 'locations.willing_to_relocate', 'demographics.veteran_status',
+                          'demographics.hispanic_latino', 'application_preferences.discovery_source'} \
+                and q.kind not in {'file', 'attestation'} \
+                and __import__('autoapply.affirmative', fromlist=['ENABLED']).ENABLED:
+            from .profile_rules import resolve as profile_rule, SOURCE as PROFILE_RULE
+            value = profile_rule(q.label, q.kind, q.options, profile)
+            if value is not None and q.kind == 'multiselect' and isinstance(value, str):
+                value = [value]  # "Select all that apply" takes a list of exact options.
+            if value is not None:
+                try:
+                    validate_answer(q, value)
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    return Answer(value, PROFILE_RULE, provenance={'rule': 'profile-rules-v1'})
+        # Operator policy: skill/willingness/requirement confirmations are Yes.
+        # Mapped profile concepts (authorization, sponsorship, demographics...) never qualify.
+        from .affirmative import affirmative, SOURCE as AFFIRMATIVE
+        if (mapped_key in {'', 'UNKNOWN_FIELD', 'eligibility_confirmation'}
+                and q.kind in {'radio', 'select', 'combobox'} and affirmative(q.label)):
+            value = fit_options('Yes', q.options)
+            if value is not None:
+                return Answer(value, AFFIRMATIVE, provenance={'rule': 'affirmative-keywords-v1'})
         if policy == 'REQUIRE_USER':
             return None
+        from .question_rules import resolve as resolve_keyword_memory
+        reusable = resolve_keyword_memory(self._settings, q, descriptor, self.snapshot.revision)
+        if reusable:
+            return reusable
         from .standing import resolve_standing, SOURCE
         match = resolve_standing(descriptor, profile)
         # A boolean assertion never supplies an essay, numeric GPA, or dates.
@@ -259,7 +297,7 @@ class AnswerResolver:
             values = [fact(profile, "work_authorization." + key) for key in ["sponsorship_now", "sponsorship_future"]]
             value = None if any(v is None for v in values) else any(values)
         else:
-            value = fact(profile, path) if path else None
+            value = demographic_value(profile, path) if path in DEMOGRAPHIC_PATHS else fact(profile, path) if path else None
         if path == "identity.full_name" and not value:
             first, last = fact(profile, "identity.first_name"), fact(profile, "identity.last_name")
             value = f"{first} {last}" if first and last else None
@@ -271,7 +309,7 @@ class AnswerResolver:
                 selected = selected or next((o for o in q.options if normalize(o) == "other"), None)
             # Never turn a generic job-board answer into a university or named-board claim.
             value = selected
-        if value is None and text in {"race", "race ethnicity", "gender", "disability status", "veteran status"}:
+        if value is None and path not in DEMOGRAPHIC_PATHS and text in {"race", "race ethnicity", "gender", "disability status", "veteran status"}:
             preference = {"race ethnicity": "race", "disability status": "disability", "veteran status": "veteran"}.get(text, text)
             value = fact(profile, "application_preferences." + preference)
             path = "application_preferences." + preference
@@ -302,10 +340,14 @@ class AnswerResolver:
                 value, path = item.get("answer"), "common_answers"
         if value is None:
             return None
+        if spec and spec.answer_type == 'boolean' and type(value) is not bool:
+            return None
         if isinstance(value, bool):
             value = "Yes" if value else "No"
         if isinstance(value, tuple):
             value = list(value)
+        if path == 'skills' and isinstance(value, list) and q.kind in {'text', 'textarea'}:
+            value = ', '.join(str(v) for v in value)
         if not isinstance(value, list):
             value = fit_options(str(value), q.options)
         if value is None:

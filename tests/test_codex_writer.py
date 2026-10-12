@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -8,7 +8,9 @@ from autoapply.ai import ProviderUnavailable
 from autoapply.codex_writer import CodexWritingProvider
 
 
-async def test_subscription_writer_refuses_api_login(monkeypatch):
+async def test_subscription_writer_refuses_api_login(monkeypatch, tmp_path):
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path))
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
     provider=CodexWritingProvider(dict(name='test',billing='included',executable='codex'),None,None)
     provider.run=AsyncMock(return_value='Logged in using API key')
     with pytest.raises(ProviderUnavailable,match='ChatGPT subscription'):
@@ -16,7 +18,9 @@ async def test_subscription_writer_refuses_api_login(monkeypatch):
     assert provider.run.await_count==1
 
 
-async def test_subscription_writer_is_ephemeral_readonly_and_text_only():
+async def test_subscription_writer_is_ephemeral_readonly_and_text_only(monkeypatch, tmp_path):
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path))
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
     provider=CodexWritingProvider(dict(name='test',billing='included',executable='codex'),None,None)
     calls=[]
     async def run(args,cwd,prompt=None):
@@ -33,3 +37,19 @@ async def test_subscription_writer_is_ephemeral_readonly_and_text_only():
     assert 'shell_tool' in args and 'multi_agent' in args and 'web_search="disabled"' in args
     assert 'Use no tools' in prompt
     assert not Path(cwd).exists()
+
+
+def test_missing_configured_executable_falls_back_to_path(monkeypatch, tmp_path):
+    which = Mock(return_value='path-codex')
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', which)
+    settings = dict(name='test', billing='included', executable=str(tmp_path / 'deleted-version' / 'codex.exe'))
+    assert CodexWritingProvider(settings, None, None).executable == 'path-codex'
+    which.assert_called_once_with('codex')
+    executable = tmp_path / 'codex.exe'
+    executable.write_bytes(b'fixture')
+    which.reset_mock()
+    assert CodexWritingProvider(dict(settings, executable=str(executable)), None, None).executable == str(executable)
+    which.assert_not_called()
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: None)
+    with pytest.raises(ValueError, match='installed CLI'):
+        CodexWritingProvider(settings, None, None)

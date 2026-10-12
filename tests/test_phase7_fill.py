@@ -68,7 +68,7 @@ async def test_held_local_form_is_checkpoint_not_ready(config, db, listing, body
         await engine.browser.context.route('**/*', lambda route: route.fulfill(content_type='text/html', body=body))
         await engine.process_one(1)
         saved = json.loads((config.private/'fill-only-checkpoints/1.json').read_text())
-        assert saved['readiness']=='FILLED_CHECKPOINT'
+        assert saved['readiness']=='SAVED_PROGRESS_CHECKPOINT'
         assert not saved['reconstruction_verified']
         assert db.application(1)['manual_action_required']
         assert not engine.browser.context.pages

@@ -45,13 +45,19 @@ async def test_cache_retries_restart_and_pure_consideration(config, db, writing)
     assert json.loads(db.one('SELECT answer_provenance FROM questions')['answer_provenance'])['verified'] is False
 
 
-@pytest.mark.parametrize('change', ['profile', 'graduation', 'project', 'skills', 'employer', 'requisition',
+@pytest.mark.parametrize('change', ['resume', 'profile', 'graduation', 'project', 'skills', 'employer', 'requisition',
     'role', 'description', 'wording', 'characters', 'words', 'policy_version', 'writing_policy',
     'model', 'provider', 'credential_revision', 'sample', 'verified_fact', 'writing_bank'])
 async def test_invalidation(config, db, writing, monkeypatch, change):
     manager, q, app, calls = writing
     first = await manager.draft(q, app)
-    if change in {'profile', 'graduation', 'project', 'skills'}:
+    if change == 'resume':
+        from autoapply.operations import FileSnapshot
+        from autoapply.resume_migration import refresh_profile
+        config.resume.write_bytes(b'%PDF-1.4\nnew resume evidence\n%%EOF')
+        profile, _ = refresh_profile(config.profile, {}, {}, FileSnapshot.read(config.resume).sha256)
+        (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    elif change in {'profile', 'graduation', 'project', 'skills'}:
         profile = config.profile
         if change == 'profile':
             profile['identity']['first_name'] = 'Changed'

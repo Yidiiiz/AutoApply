@@ -87,15 +87,32 @@ class Lifecycle:
             self.db.execute('UPDATE applications SET ' + ','.join(f'{k}=?' for k in fields) + ',updated_at=? WHERE id=?', (*fields.values(), now(), app_id))
 
     def begin_attempt(self, app_id, max_retries):
-        """Count at the browser-work boundary, before opening/navigating a page."""
+        """Count at the employer-work boundary, after acquiring a healthy page."""
         with self.atomic():
             app = self.db.application(app_id)
             if app['attempt_started']:
                 return
-            if app['attempts'] >= max_retries + 1:
+            from .continuation import budget_authorized
+            authorized = budget_authorized(self, app_id)
+            if app['attempts'] >= max_retries + 1 and not authorized:
                 raise ValueError('Application attempt budget exhausted')
+            if authorized:
+                max_retries = app['max_retries']  # The exception never raises ordinary retry policy.
             self.db.execute('UPDATE applications SET attempts=attempts+1,attempt_started=1,max_retries=?,delivery_state=? WHERE id=?',
                             (max_retries, Delivery.NOT_STARTED, app_id))
+            self.db.event(app_id, 'APPLICATION_ATTEMPT_STARTED', json.dumps({
+                'application_attempt_count': app['attempts'] + 1}))
+
+    def browser_start_failed(self, app_id, reason):
+        """Release an unused reservation without spending/refunding application attempts."""
+        with self.atomic():
+            app = self.db.application(app_id)
+            if (app['attempt_started'] or app['submit_intent_at'] or app['submission_confirmation_seen']
+                    or app['delivery_state'] != Delivery.NOT_STARTED):
+                self.record_failure(app_id, Failure(ErrorCategory.PROCESS_INTERRUPTED, reason), app['max_retries'])
+                return
+            self.record_hold(app_id, reason, ErrorCategory.BROWSER_START_FAILED,
+                             stage='browser startup', session_preserved=0, manual_resume_allowed=0)
 
     def delivery(self, app_id, value):
         with self.atomic():

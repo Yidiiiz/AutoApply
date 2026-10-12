@@ -12,6 +12,20 @@ from autoapply.models import Listing
 
 
 @pytest.fixture(autouse=True)
+def legacy_answer_policy(request, monkeypatch):
+    """Existing policy tests assume explicit confirmation; opt in with @pytest.mark.affirmative."""
+    if not request.node.get_closest_marker("affirmative"):
+        monkeypatch.setattr("autoapply.affirmative.ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def offline_liveness(request, monkeypatch):
+    """Tests never probe employer listings over the network."""
+    if not request.node.get_closest_marker("liveness"):
+        monkeypatch.setattr("autoapply.liveness.listing_state", lambda url, timeout=15: "OPEN")
+
+
+@pytest.fixture(autouse=True)
 def local_test_browser(monkeypatch):
     """Use the existing repo installation for temporary test profiles only."""
     installed = Path(__file__).resolve().parents[1] / "data/private/playwright"
@@ -22,7 +36,9 @@ def local_test_browser(monkeypatch):
 @pytest.fixture
 def config(tmp_path):
     config = Config(tmp_path, {"discord": {"enabled": False}, "gmail": {"enabled": False}, "ai": {"enabled": False},
-                              "browser": {"headless": True, "timeout_ms": 3000}, "application": {"delay_seconds": 0}})
+                              # Legacy submission-flow tests explicitly opt in;
+                              # production configuration defaults auto-submit off.
+                              "browser": {"headless": True, "timeout_ms": 3000}, "application": {"delay_seconds": 0, "auto_submit": True}})
     profile = {"identity": {"first_name": "Test", "last_name": "Student"},
                "contact": {"email": "student@example.test", "phone": "2025550100"},
                "education": {"degree": "Bachelor's", "major": "Computer Science", "school": "Example University",

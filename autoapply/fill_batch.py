@@ -1,14 +1,17 @@
 """Data-only queue selection and durable fill-only checkpoints."""
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from .archive import atomic_json
 from .freshness import freshness_state
 from .models import now
+from .security import PROVIDERS, safe_url
 
 MAX_ACTIVE_APPLICATION_TABS = 1
 EXCLUDED = frozenset({4571, 4535, 6401, 5310, 6415, 6416})
+PROTECTED = frozenset({3556, 4522, 6397, 4611})
 
 
 @dataclass(frozen=True)
@@ -70,14 +73,14 @@ class FillOnlyInvariant:
         self.final_submit_clicks += 1
 
     def observed_request(self, request):
-        from .batch_approval import is_final_submission
-        if is_final_submission(request.url, request.method, request.post_data):
+        from .batch_approval import is_final_submission, request_body
+        if is_final_submission(request.url, request.method, request_body(request)):
             self.employer_submission_requests += 1
 
     async def route(self, route):
-        from .batch_approval import is_final_submission
+        from .batch_approval import is_final_submission, request_body
         request = route.request
-        if is_final_submission(request.url, request.method, request.post_data):
+        if is_final_submission(request.url, request.method, request_body(request)):
             self.submission_requests_blocked += 1
             await route.abort('blockedbyclient')
         else:
@@ -124,9 +127,11 @@ def verify_safety(db):
         raise RuntimeError('Pending manual command; batch startup refused')
 
 
-def discover(db, config, seen=()):
+def discover(db, config, seen=(), *, details=False):
     """Ranking reads SQLite only; never constructs or calls a browser."""
-    rows = db.rows('''SELECT a.id,j.posted_at FROM applications a JOIN jobs j ON j.id=a.job_id
+    rows = db.rows('''SELECT a.*,j.company,j.title,j.location,j.canonical_url,j.description,j.ats,j.posted_at,
+        j.eligibility_json,j.listing_status,j.listing_active,j.freshness_state,j.posted_at_source,j.posted_at_confidence
+        FROM applications a JOIN jobs j ON j.id=a.job_id
         WHERE j.listing_active=1 AND j.listing_status='ACTIVE' AND a.status IN ('QUEUED','RETRY')
         AND a.retry_allowed=1 AND a.manual_action_required=0
         AND a.security_state IN ('NONE','PASSIVE_PROTECTION_DETECTED')
@@ -134,41 +139,66 @@ def discover(db, config, seen=()):
         AND (a.retry_at IS NULL OR a.retry_at<=?)
         AND NOT EXISTS (SELECT 1 FROM settings s WHERE s.key='duplicate_submission_guard:' || a.id
                         AND s.value NOT IN ('false','null','0'))
+        AND NOT EXISTS (SELECT 1 FROM settings s WHERE s.key='user_not_eligible:' || a.id
+                        AND s.value NOT IN ('false','null','0'))
         ORDER BY j.priority DESC,j.discovered_at,a.id''', (now(),))
     from .candidate_policy import preflight
     from .answers import AnswerResolver
+    from .conflicts import ConflictIndex
     snapshot = AnswerResolver(config, db).refresh()
-    return [r['id'] for r in rows if r['id'] not in EXCLUDED and r['id'] not in seen
-            and freshness_state(r['posted_at'], config['jobs']['max_listing_age_days']) == 'FRESH'
-            and preflight(db, config, db.application(r['id']), snapshot=snapshot,
-                          mode='fill_only', historical_exclusions=EXCLUDED).proceed]
+    # One protected-history scan per selection pass, not one per candidate.
+    db._conflict_index = ConflictIndex(db)
+    db._discovery_applications = {r['id']: r for r in rows}
+    try:
+        return [r if details else r['id'] for r in rows if r['id'] not in EXCLUDED | PROTECTED and r['id'] not in seen
+                and freshness_state(r['posted_at'], config['jobs']['max_listing_age_days']) == 'FRESH'
+                and preflight(db, config, r, snapshot=snapshot,
+                              mode='fill_only', historical_exclusions=EXCLUDED | PROTECTED).proceed]
+    finally:
+        db._conflict_index = None
+        db._discovery_applications = None
 
 
 async def checkpoint(engine, app_id, page):
     app = engine.db.application(app_id)
+    # Use this attempt's immutable event boundary, not all historical answers.
+    boundary = engine.db.one("SELECT coalesce(max(id),0) n FROM events WHERE application_id=? AND kind IN ('CHECKING','APPLICATION_ATTEMPT_STARTED')", (app_id,))['n']
+    committed_count = engine.db.one("SELECT count(DISTINCT json_extract(detail,'$.field_id')) n FROM events WHERE application_id=? AND id>? AND kind='LIVE_CONTROL_COMMITTED' AND json_valid(detail)", (app_id, boundary))['n']
+    ready = app['application_state'] == 'READY_FOR_MANUAL_SUBMIT'
     frames = []
+    protected = app['security_state'] not in {'NONE', 'PASSIVE_PROTECTION_DETECTED'} or app['error_category'] == 'AUTH_REQUIRED'
     for frame in page.frames:
+        security_frame = protected or any(re.search(pattern, frame.url, re.I) for _, pattern, _ in PROVIDERS)
+        if security_frame:
+            frames.append({'url':safe_url(frame.url), 'fields':[], 'protected':True})
+            continue
         fields = await frame.locator('input:not([type=hidden]):not([type=password]),textarea,select,[role=combobox]').evaluate_all('''els => els.map(e => ({
             id:e.id,name:e.name,role:e.getAttribute('role'),type:e.type,
-            label:e.getAttribute('aria-label'),value:e.type==='file'?null:e.value,
+            label:e.getAttribute('aria-label'),value:e.type==='file'||/captcha|verification|one.?time|otp|password|security.?code/i.test(e.id+' '+e.name+' '+e.getAttribute('autocomplete')+' '+e.getAttribute('aria-label'))?null:e.value,
             checked:e.checked, files:e.files?Array.from(e.files).map(f=>({name:f.name,size:f.size})):[],
             selected:e.selectedOptions?Array.from(e.selectedOptions).map(o=>o.text):[]
         }))''')
-        frames.append({'url':frame.url,'fields':fields})
+        frames.append({'url':safe_url(frame.url),'fields':fields})
     record = {'application_id':app_id,'company':app['company'],'role':app['title'],'ats':app['ats'],
-              'url':page.url,'timestamp':now(),'state':app['application_state'],
+              'url':safe_url(page.url),'timestamp':now(),'state':app['application_state'],
               'blocker':app['failure_reason'],'frames':frames,
               'questions':engine.db.rows('SELECT * FROM questions WHERE application_id=?',(app_id,)),
               'resume_sha256':app['resume_sha256'],
               'upload':engine.db.setting(f'upload_result:{app_id}'),
               'live_session_required':app['application_state']=='READY_FOR_MANUAL_SUBMIT',
               'reconstruction_verified':False,
-              'readiness':'RECONSTRUCTABLE_CHECKPOINT' if app['application_state']=='READY_FOR_MANUAL_SUBMIT' else 'FILLED_CHECKPOINT',
+              'schema_version':2,
+              'committed_field_count':committed_count,
+              'progress_kind':'READY' if ready else 'PARTIAL' if committed_count else 'UNFILLED',
+              'form_filled':app['application_state']=='READY_FOR_MANUAL_SUBMIT',
+              'upload_ready':app['application_state']=='READY_FOR_MANUAL_SUBMIT' and bool(
+                  (engine.db.setting(f'upload_result:{app_id}') or {}).get('ready')),
+              'readiness':'RECONSTRUCTABLE_CHECKPOINT' if ready else 'SAVED_PROGRESS_CHECKPOINT',
               'validated_at':now() if app['application_state']=='READY_FOR_MANUAL_SUBMIT' else None}
     path = engine.config.private / 'fill-only-checkpoints' / f'{app_id}.json'
     atomic_json(path, record)
     with engine.db.lifecycle.atomic():
-        engine.db.set_setting(f'fill_checkpoint:{app_id}', {k:record[k] for k in ('readiness','reconstruction_verified','validated_at')})
+        engine.db.set_setting(f'fill_checkpoint:{app_id}', {k:record[k] for k in ('schema_version','progress_kind','committed_field_count','readiness','reconstruction_verified','validated_at','resume_sha256','form_filled','upload_ready')})
         engine.db.event(app_id,'FILL_ONLY_CHECKPOINT',json.dumps({'path':str(path),'state':record['state'],'readiness':record['readiness']}))
     return record
 
@@ -176,8 +206,13 @@ async def checkpoint(engine, app_id, page):
 async def verify_reconstruction(engine, app_id):
     """Explicit stronger verification: replay once in the sole owned tab."""
     verify_safety(engine.db)
-    engine.db.lifecycle.begin_reconstruction(app_id)
+    from .operations import FileSnapshot
+    if engine.db.application(app_id)['resume_sha256'] != FileSnapshot.read(engine.config.resume, force=True).sha256:
+        raise RuntimeError('RECONSTRUCTION_FAILED: resume changed; checkpoint requires fresh upload and revalidation')
     page = engine.retained_pages[app_id]
+    if page.is_closed():
+        raise RuntimeError('RECONSTRUCTION_FAILED: live application page is unavailable')
+    engine.db.lifecycle.begin_reconstruction(app_id)
     engine.handoff.pages.pop(app_id, None)
     app = engine.db.application(app_id)
     original_resume = app['resume_sha256']
@@ -189,6 +224,7 @@ async def verify_reconstruction(engine, app_id):
     # A fresh document has no carried file attachment. Keep observer callbacks bound
     # to the same tracker object while clearing evidence from the previous document.
     page._autoapply_attached_documents = {}
+    page._autoapply_document_snapshots = {}
     page._autoapply_uploads.__init__()
     engine.browser.reset_observation(page)
     await engine._process_one(app_id, preserved_page=page)
@@ -203,7 +239,7 @@ async def verify_reconstruction(engine, app_id):
                   validation_status='PASS', upload_ready=True)
     atomic_json(engine.config.private / 'fill-only-checkpoints' / f'{app_id}.json', record)
     with engine.db.lifecycle.atomic():
-        engine.db.set_setting(f'fill_checkpoint:{app_id}', {k:record[k] for k in ('readiness','reconstruction_verified','validated_at')})
+        engine.db.set_setting(f'fill_checkpoint:{app_id}', {k:record[k] for k in ('readiness','reconstruction_verified','validated_at','resume_sha256')})
         engine.db.event(app_id, 'FILL_ONLY_RECONSTRUCTION_VERIFIED', json.dumps({'url':page.url,'upload_ready':True}))
     await release_checkpoint(engine, app_id)
     return record

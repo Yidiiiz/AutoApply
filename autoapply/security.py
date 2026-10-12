@@ -151,7 +151,10 @@ class SecurityDetector:
         if not result.blocking:
             # Strong rejection phrases also appear in unstructured banners.
             strong = re.search(r"[^\n]*(?:possible spam|flagged as spam|spam detected|automated activity|automation detected|bot detected|too many requests|verify (?:that )?you are human|submission blocked|access denied|verify (?:your )?(?:email|phone|identity)|verification code|one[ -]time (?:code|password)|checking your browser)[^\n]*", text, re.I)
-            result = classify_message(strong[0] if strong else "", status)
+            # A removed-listing page served as 403 is a closure, not a security control.
+            from .freshness import removed_page
+            removed = status in {401, 403} and not strong and removed_page(text)
+            result = classify_message(strong[0] if strong else "", None if removed else status)
         found = []
         for provider, pattern, kind in PROVIDERS:
             markers = [m for m in snapshot["markers"] if re.search(pattern, m["marker"], re.I)]

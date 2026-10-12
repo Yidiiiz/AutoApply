@@ -93,7 +93,24 @@ CREATE TABLE IF NOT EXISTS manual_commands (
 
 
 class Database(ListingStore):
-    def __init__(self, path, max_listing_age_days=None, *, startup_maintenance=True):
+    @classmethod
+    @contextmanager
+    def discovery_reader(cls, path, history_root):
+        """Thread-owned, read-only policy view; no migrations or archive exports."""
+        from .archive import ApplicationHistory
+        reader = cls.__new__(cls)
+        reader._history_ready = False
+        reader.conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True,
+                                      timeout=30, isolation_level=None)
+        reader.conn.row_factory = sqlite3.Row
+        reader.conn.execute('PRAGMA query_only=ON')
+        reader.history = ApplicationHistory(history_root)
+        try:
+            yield reader
+        finally:
+            reader.conn.close()
+
+    def __init__(self, path, max_listing_age_days=None, *, startup_maintenance=True, history_maintenance=True):
         self._history_ready = False
         self._flushing_history = False
         self._closed = False
@@ -180,10 +197,10 @@ class Database(ListingStore):
         if max_listing_age_days is not None:
             window(max_listing_age_days)
             self.set_setting('listing_max_age_days', max_listing_age_days)
-        self._initialize_history(Path(path).parent / 'application_history')
+        self._initialize_history(Path(path).parent / 'application_history', maintenance=history_maintenance)
         self.listing_startup_report = self.maintain_listings(migration=first_listings) if startup_maintenance else {}
 
-    def _initialize_history(self, root):
+    def _initialize_history(self, root, *, maintenance=True):
         from .archive import ApplicationHistory
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS history_dirty (application_id INTEGER PRIMARY KEY);
@@ -227,6 +244,10 @@ class Database(ListingStore):
                     ON CONFLICT(application_id) DO NOTHING;
                 END;''')
         self.history = ApplicationHistory(root)
+        self.history_startup_report = {}
+        if not maintenance:
+            # Dashboard reads leave validation and pending exports to their owner.
+            return
         first = not (root / '.layout.json').exists()
         self.history_startup_report = self.history.validate()
         for row in self.rows('SELECT id FROM applications'):
@@ -256,6 +277,14 @@ class Database(ListingStore):
                     self.history.sync(self, pending)
                     self.conn.execute('DELETE FROM history_dirty')
                 self.conn.execute('COMMIT')
+            except RuntimeError as exc:
+                self.conn.execute('ROLLBACK')
+                if 'history is busy' not in str(exc):
+                    raise
+                # The archive is derived from SQLite; history_dirty rows persist and
+                # the next flush/startup exports them. Never fail a live form for it.
+                import logging
+                logging.getLogger('autoapply').warning('[HISTORY] Archive busy; export deferred for %d application(s)', len(pending))
             except BaseException:
                 self.conn.execute('ROLLBACK')
                 raise
@@ -449,6 +478,11 @@ class Database(ListingStore):
                 self.refresh_listing_statistics()
 
     def application(self, app_id):
+        # Discovery already fetched these rows in its read snapshot. Conflict
+        # checks use the same details without another join per candidate.
+        cached = getattr(self, '_discovery_applications', None)
+        if cached is not None and app_id in cached:
+            return cached[app_id]
         row = self.one("""SELECT a.*,j.company,j.title,j.location,j.canonical_url,j.description,j.ats,j.posted_at,
                       j.eligibility_json,j.listing_status,j.listing_active,j.freshness_state,j.posted_at_source,j.posted_at_confidence FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?""", (app_id,))
         if not row:

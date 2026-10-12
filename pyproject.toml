@@ -18,4 +18,4 @@ include = ["autoapply*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["browser: local Chromium integration tests"]
+markers = ["browser: local Chromium integration tests", "affirmative: enable the operator affirmative-answer rule", "liveness: allow the real listing liveness probe"]

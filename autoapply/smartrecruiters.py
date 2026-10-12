@@ -92,14 +92,9 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
             self.page._autoapply_listing = result
         return result
 
-    async def begin(self):
-        await super().begin()
-        # The entry link may replace the whole application root asynchronously.
-        await self.page.locator('input[type=email]:visible').first.wait_for(timeout=20000)
-
     async def upload_documents(self, q, path):
         if q.key in self.uploads:
-            return
+            return await super().upload_documents(q, path)
         tracker = getattr(self.page, '_autoapply_uploads', None)
         if tracker:
             tracker.smartrecruiters = True
@@ -229,12 +224,7 @@ class SmartRecruitersAdapter(GenericApplicationAdapter):
         return None, None
 
     async def step_signature(self):
-        data = [self.page.url]
-        for frame in self.page.frames:
-            if frame == self.page.main_frame or 'smartrecruiters.com' in frame.url:
-                data.append(await frame.locator('input:not([type=hidden]),textarea,select,h1,h2,h3,[aria-current=step]').evaluate_all(
-                    "es=>es.filter(e=>e.getClientRects().length).map(e=>[e.tagName,e.id,e.name,e.getAttribute('aria-label'),e.matches('h1,h2,h3,[aria-current=step]')?e.textContent:''])"))
-        return json.dumps(data, sort_keys=True)
+        return await super().step_signature()
 
     def transition_error(self, category, detail):
         return CapabilityFailure(category, detail)

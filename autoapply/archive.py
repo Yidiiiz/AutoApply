@@ -23,6 +23,7 @@ LEGACY = dict(QUEUED='DISCOVERED', RETRY='DISCOVERED', CHECKING='OPENED',
               AUTH_REQUIRED='MANUAL_REQUIRED', MANUAL_REVIEW='MANUAL_REQUIRED')
 _locks = {}
 _lock_owners = threading.local()
+_holders = {}  # in-process history-lock holders, for busy diagnostics
 
 
 def history_lock_held(root):
@@ -53,7 +54,17 @@ def atomic_text(path, payload):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        # Windows scanners/readers can briefly deny replacement after fsync.
+        # Retry this same completed local file, never regenerate or truncate the
+        # destination. Persistent denial still propagates with the old file intact.
+        for attempt in range(7):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 6:
+                    raise
+                time.sleep(min(.05 * 2 ** attempt, 1))
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -145,14 +156,23 @@ class ApplicationHistory:
                     break
                 except RuntimeError:
                     if time.monotonic() >= deadline:
+                        import logging
+                        holders = '; '.join(f"thread={t} since={round(time.monotonic()-at,1)}s at {where}"
+                                            for t, at, where in _holders.values()) or 'not this process'
+                        logging.getLogger('autoapply').warning('[HISTORY] Lock busy for 30s; holders: %s', holders)
                         raise RuntimeError('Application history is busy; pending changes will recover on startup') from None
                     time.sleep(.05)
+            import traceback
+            token = object()
+            _holders[id(token)] = (threading.current_thread().name, time.monotonic(),
+                                   ' <- '.join(f'{f.name}:{f.lineno}' for f in traceback.extract_stack(limit=8)[-7:-1]))
             try:
                 roots = getattr(_lock_owners, 'roots', set())
                 _lock_owners.roots = roots | {str(self.root)}
                 yield
             finally:
                 _lock_owners.roots = roots
+                _holders.pop(id(token), None)
                 lock.__exit__()
 
     def _candidates(self):
@@ -473,15 +493,3 @@ def archive_application(config, db, app_id):
     if folder is None or not (folder / 'application.json').exists():
         db.flush_history([app_id])
     return db.history.paths[str(app_id)]
-
-
-def migrate_application_history(root):
-    return ApplicationHistory(root).migrate()
-
-
-def validate_application_history(root):
-    return ApplicationHistory(root).validate()
-
-
-def rebuild_application_statistics(root):
-    return ApplicationHistory(root).rebuild_statistics()
