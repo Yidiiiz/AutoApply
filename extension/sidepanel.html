@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AutoApply</title><link rel="stylesheet" href="sidepanel.css"></head>
+<body><main>
+  <header><h1>AutoApply</h1><button id="settings" class="secondary" type="button">Pairing settings</button></header>
+  <p id="connection" role="status">Checking connection…</p>
+  <section aria-label="Matched application"><h2 id="company">Current application</h2><p id="job">Open an application form to begin.</p></section>
+  <button id="autofill" type="button">Autofill this page</button>
+  <p class="muted">Review every answer. Submit the application yourself.</p>
+  <p id="error" role="alert"></p>
+  <section id="results" hidden aria-live="polite">
+    <h2 id="filled"></h2><p id="skipped" class="muted"></p>
+    <h3>Needs your input</h3><ul id="needs-input"></ul>
+    <h3>Needs writing</h3><ul id="needs-writing"></ul>
+  </section>
+</main><script type="module" src="sidepanel.js"></script></body>
+</html>

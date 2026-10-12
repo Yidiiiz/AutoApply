@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Local Greenhouse-style fixture</title>
+<style>body{font:16px sans-serif}.select__control{border:1px solid #999;padding:5px;margin:5px}label{display:block}[role=option]{padding:5px;cursor:pointer}</style>
+</head><body><main><form>
+<section><h2>Education</h2>
+<div class="select" data-id="school" data-label="School" data-options='["University of Maryland - Baltimore","University of Maryland - Baltimore County","University of Maryland - College Park Extension","University of Maryland - College Park","University of Maryland - Eastern Shore","University of Maryland - University College"]' data-async="true"></div>
+<div class="select" data-id="degree" data-label="Degree" data-options='["Bachelor&apos;s Degree","Master&apos;s Degree"]'></div>
+<div class="select" data-id="discipline" data-label="Discipline" data-options='["Computer Science","Mechanical Engineering"]' data-portal="true"></div>
+<label for="start-month">Start date month</label><select id="start-month" required><option value="">Month</option><option value="08">August</option><option value="09">September</option></select>
+<label for="start-year">Start date year</label><input id="start-year" required>
+<label for="end-month">End date month</label><select id="end-month" required><option value="">Month</option><option value="05">5</option><option value="06">6</option></select>
+<label for="end-year">End date year</label><input id="end-year" required>
+</section>
+<section><h2>Application questions</h2>
+<div class="select" data-id="interest" data-label="Are you interested in a Spring Co-Op, Summer Internship, or Both?" data-options='["Spring Co-Op","Summer Internship","Both"]'></div>
+<div class="select" data-id="invalid" data-label="Nonmatching choice *" data-options='["Spring Co-Op","Summer Internship","Both"]'></div>
+<div class="select" data-id="uncommitted" data-label="Uncommitted choice *" data-options='["Computer Science"]' data-no-commit="true"></div>
+<div class="select" data-id="existing" data-label="Existing selection" data-options='["User supplied","Other"]' data-selected="User supplied"></div>
+<div class="upload"><label id="upload-label-resume">Resume/CV *</label><div><label for="resume"><button type="button">Attach</button></label><input id="resume" type="file" accept=".pdf,.doc,.docx" style="display:none" required><span class="filename"></span></div></div>
+<label id="upload-label-cover_letter">Cover Letter</label><div class="upload"><div><label for="cover_letter"><button type="button">Attach</button></label><input id="cover_letter" type="file" aria-describedby="upload-label-cover_letter" hidden><span class="filename"></span></div></div>
+</section>
+<button id="submit" type="submit">Submit application</button></form></main>
+<script>
+window.submissions = 0; window.submitClicks = 0; window.uploadEvents = []; window.schoolSearches = [];
+document.querySelector('form').onsubmit = event => {event.preventDefault(); submissions++;};
+document.querySelector('#submit').onclick = () => submitClicks++;
+for (const root of document.querySelectorAll('.select')) {
+  const {id, label, options, selected} = root.dataset;
+  root.innerHTML = `<label for="${id}">${label}</label><div class="select__control"><div class="select__value-container"><span class="select__single-value"></span><div><input id="${id}" role="combobox" aria-expanded="false" aria-controls="${id}-list" aria-required="true" autocomplete="off"></div></div></div><input type="hidden" name="${id}">`;
+  const input = root.querySelector('[role=combobox]');
+  const single = root.querySelector('.select__single-value');
+  const hidden = root.querySelector('[type=hidden]');
+  single.textContent = hidden.value = selected || '';
+  let timer;
+  function close() {
+    clearTimeout(timer);
+    document.getElementById(`${id}-list`)?.remove();
+    input.setAttribute('aria-expanded', 'false');
+  }
+  function open() {
+    close();
+    input.setAttribute('aria-expanded', 'true');
+    const list = document.createElement('div');
+    list.id = `${id}-list`; list.setAttribute('role', 'listbox');
+    (root.dataset.portal ? document.body : root).append(list);
+    if (root.dataset.async) {
+      schoolSearches.push(input.value);
+      list.innerHTML = '<div role="option">Loading...</div>';
+    }
+    timer = setTimeout(() => {
+      list.replaceChildren();
+      const noResults = root.dataset.async && (!input.value || root.dataset.prefixOnly && input.value.split(/\s+/).length > 3);
+      const term = root.dataset.async ? input.value.split(/\s+/).slice(0, 3).join(' ') : input.value;
+      const values = noResults ? [] : JSON.parse(options).filter(value => value.toLowerCase().includes(term.toLowerCase()));
+      if (!values.length) list.innerHTML = '<div role="option">No options</div>';
+      for (const value of values) {
+        const option = document.createElement('div');
+        option.setAttribute('role', 'option'); option.textContent = value;
+        option.onmousedown = event => event.preventDefault();
+        option.onclick = () => {
+          if (!root.dataset.noCommit) single.textContent = hidden.value = value;
+          input.value = ''; close();
+        };
+        list.append(option);
+      }
+    }, root.dataset.async ? 1500 : 60);
+  }
+  input.onkeydown = event => {if (event.key === 'ArrowDown') open(); if (event.key === 'Escape') close();};
+  input.oninput = open;
+  root.querySelector('.select__control').onmousedown = () => {input.focus(); open();};
+}
+for (const input of document.querySelectorAll('[type=file]')) {
+  for (const type of ['input', 'change']) input.addEventListener(type, () => {
+    uploadEvents.push([input.id, type]);
+    setTimeout(() => input.parentElement.querySelector('.filename').textContent = input.files[0]?.name || '', 70);
+  });
+}
+</script></body></html>

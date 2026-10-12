@@ -1,5 +1,18 @@
 # Local AutoApply dashboard
 
+## Chrome extension
+
+Load the repository's `extension/` directory as an unpacked extension at
+`chrome://extensions` with Developer mode enabled. Open **Pairing settings**,
+enter the dashboard URL and the Chrome extension pairing key from
+**Settings → Dashboard**, then save and test the connection. The extension's
+toolbar action opens a side panel; **Autofill this page** or **Alt+Shift+F** fills
+the current application and its accessible embedded frames. It preserves existing
+values, attaches the resume, and lists unresolved questions. Orange outlines mark
+required fields needing review. Submission remains manual. AI writing, chat,
+cover-letter generation and batch controls are reserved for later tasks.
+See [the extension README](../extension/README.md) for setup and fixture checks.
+
 ## Extension API
 
 Settings → Dashboard shows the Chrome extension pairing key with Copy and

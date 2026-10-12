@@ -1,6 +1,7 @@
 """Paired, offline extension operations. Final submission remains manual."""
 
 import base64
+import calendar
 from dataclasses import replace
 import json
 import re
@@ -10,7 +11,7 @@ from . import answers, cv, descriptions, question_rules
 from .dashboard_settings import SettingsRejected
 from .field_mapping import answer_signature
 from .jobs import ats_identity, canonical_url, normalize
-from .models import Question, now
+from .models import Answer, Question, now
 
 KINDS = {'text', 'textarea', 'select', 'radio', 'checkbox', 'combobox', 'file',
          'date', 'number', 'email', 'tel', 'url'}
@@ -79,10 +80,28 @@ def _question(field):
     if (not isinstance(kind, str) or kind not in KINDS or not isinstance(options, list) or not all(isinstance(v, str) for v in options)
             or type(field.get('required', False)) is not bool
             or maximum is not None and (type(maximum) is not int or maximum < 0)
-            or not isinstance(field.get('key', field['label']), str)):
+            or not isinstance(field.get('key', field['label']), str)
+            or not isinstance(field.get('section', ''), str)):
         raise SettingsRejected('Invalid field kind, options, required, key or max_length')
     return Question(field.get('key', field['label']), field['label'], kind,
                     field.get('required', False), options, maximum)
+
+
+def _education_date_part(q, field, profile):
+    label = normalize(q.label)
+    part = re.fullmatch(r'(?:education )?(start|end) date (month|year)', label)
+    if not part or not re.search(r'\beducation\b', normalize(field.get('section', '') + ' ' + q.label)):
+        return False, None
+    path = 'start_date' if part[1] == 'start' else 'graduation_date'
+    value = profile.get('education', {}).get(path)
+    match = re.fullmatch(r'(\d{4})-(\d{2})(?:-\d{2})?', str(value or ''))
+    if not match or not 1 <= int(match[2]) <= 12:
+        return True, None
+    year, month = match[1], int(match[2])
+    candidates = [year] if part[2] == 'year' else [calendar.month_name[month], str(month), f'{month:02}', calendar.month_abbr[month]]
+    selected = next((fitted for candidate in candidates
+                     if (fitted := answers.fit_options(candidate, q.options)) is not None), None)
+    return True, Answer(selected, 'profile:education.' + path) if selected is not None else None
 
 
 def ping(dashboard, payload):
@@ -114,14 +133,18 @@ def resolve_answers(dashboard, payload):
             descriptions.store(db, app['job_id'], description)
             app['description'] = description
         resolver = answers.AnswerResolver(dashboard.config, db)
+        profile = dashboard.config.profile
         result = []
-        for q in questions:
+        for q, field in zip(questions, fields):
             if q.kind == 'file':
                 result.append(dict(key=q.key, value='cover_letter' if 'cover' in q.label.lower() else 'resume',
                                    source='file', status='FILE'))
                 continue
             resolution = resolver.resolve_result(q, app)
             answer = resolution.answer
+            education_part, education_answer = _education_date_part(q, field, profile)
+            if education_part:
+                answer = education_answer
             # Remember requests omit required/length. Only verified memory may
             # reuse that descriptor, and the actual field is validated below.
             remembered = resolver.resolve_result(replace(q, required=False, max_length=None), app).answer

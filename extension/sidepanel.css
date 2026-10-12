@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; --surface: #f5f7fa; --border: #d6dae2; --accent: #276346; --muted: #586373; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); }
+main { padding: 20px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 22px; margin: 0 0 12px; } h2 { font-size: 16px; } h3 { font-size: 14px; margin-bottom: 6px; }
+section { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 16px 0; }
+section h2 { margin-top: 0; } p, li { overflow-wrap: anywhere; }
+button { font: inherit; border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; cursor: pointer; background: var(--accent); color: white; }
+button:disabled { opacity: .6; cursor: wait; } .secondary { background: transparent; color: inherit; font-size: 12px; }
+#autofill { width: 100%; } .muted { color: var(--muted); font-size: 12px; } #error { color: #b34f1b; }
+label { display: block; margin: 16px 0 6px; } input { width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+.actions { display: flex; gap: 10px; margin-top: 16px; } .options main { max-width: 550px; margin: 30px auto; }
+ul { margin-top: 0; padding-left: 20px; }
+@media (prefers-color-scheme: dark) { :root { --surface: #171c22; --border: #39424e; --accent: #326c50; --muted: #b1bbc9; } #error { color: #efb377; } }

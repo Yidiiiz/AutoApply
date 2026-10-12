@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "AutoApply",
+  "version": "0.1.0",
+  "description": "Fill application forms from your paired local AutoApply dashboard. Submission stays manual.",
+  "permissions": ["storage", "tabs", "scripting", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle"}],
+  "side_panel": {"default_path": "sidepanel.html"},
+  "options_page": "options.html",
+  "action": {"default_title": "Open AutoApply"},
+  "commands": {"autofill": {"suggested_key": {"default": "Alt+Shift+F"}, "description": "Autofill the current page"}}
+}

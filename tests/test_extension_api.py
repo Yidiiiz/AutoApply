@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 from autoapply.dashboard import Dashboard
 from test_dashboard import (dashboard, http_dashboard, queue, request, protected_queue,
@@ -153,6 +154,39 @@ def test_answers_description_limits(http_dashboard, config, db, listing):
     assert after['description'] == description
     assert {k: v for k, v in after.items() if k != 'description'} == {k: v for k, v in before.items() if k != 'description'}
     assert db.rows('SELECT * FROM questions') == []
+
+
+@pytest.mark.parametrize('month_options,expected', [
+    (['August', 'September'], 'August'), (['8', '9'], '8'),
+    (['08', '09'], '08'), (['Aug', 'Sep'], 'Aug'),
+])
+def test_education_date_parts(http_dashboard, config, month_options, expected):
+    profile = dict(config.profile)
+    profile['education'] = dict(profile['education'], start_date='2024-08-20')
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    fields = [dict(key='start-month', label='Start date month', kind='combobox', options=month_options),
+              dict(key='start-year', label='Start date year', kind='number'),
+              dict(key='end-month', label='End date month', kind='select', options=['May', 'June']),
+              dict(key='end-year', label='End date year', kind='combobox', options=['2027', '2028'])]
+    for field in fields:
+        field.update(section='Education', required=True)
+    payload = dict(url='https://unmatched.test/job', fields=fields)
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', payload)
+    assert status == 200
+    assert [row['value'] for row in result['answers']] == [expected, '2024', 'May', '2028']
+    assert all(row['status'] == 'RESOLVED' for row in result['answers'])
+    assert all(row['source'].startswith('profile:education.') for row in result['answers'])
+
+
+def test_education_date_parts_abstain_on_missing_fact_or_option(http_dashboard):
+    fields = [dict(key='start', label='Start date month', section='Education', required=True),
+              dict(key='end', label='End date month', section='Education', kind='combobox', options=['January'], required=True),
+              dict(key='unrelated', label='Start date year', section='Employment', required=True)]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://unmatched.test/job', fields=fields))
+    assert status == 200
+    assert all(row['status'] == 'NEEDS_INPUT' and row['value'] is None for row in result['answers'])
+    fields[0]['section'] = []
+    assert ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://unmatched.test/job', fields=fields))[0] == 400
 
 
 @pytest.mark.parametrize('matched', [False, True])
