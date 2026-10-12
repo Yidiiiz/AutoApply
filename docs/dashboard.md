@@ -299,13 +299,17 @@ review-unlock, hold-clearing or attempt-reset endpoints.
 
 A background sweep starts immediately and repeats after each configured interval.
 It probes at most 100 eligible queued/retry listings per sweep with at most four
-concurrent `liveness.listing_state` calls. The probe uses its existing bounded
-HTTP timeout (15 seconds per request). Least recently checked candidates go first
-so a large queue rotates through the cap. Probe failures count as `UNKNOWN`.
+concurrent probe threads. Each also fetches and stores public descriptions shorter
+than 200 characters, using the same cap and pool. HTTP calls run without database
+write locks and use bounded timeouts (15 seconds per request). Candidates missing
+descriptions go first, then least recently checked candidates, so the queue rotates
+through the cap. Probe failures count as `UNKNOWN`; `described` counts enrichment.
+The next queue rebuild re-evaluates eligibility using the stored text: PhD
+rejections leave the queue without retiring or changing application state.
 The page shows sweep start/end times, counts, errors and results; this monitoring
 state stays in memory and resets when the dashboard restarts.
 
-`OPEN` and `UNKNOWN` do not change database state. Definitive `CLOSED` or
+`OPEN` and `UNKNOWN` do not change application state. Definitive `CLOSED` or
 `REMOVED` results use `db.mark_listing_closed` and a `CLOSED` lifecycle transition
 with a recorded event. Each retirement rechecks the current application inside a
 short transaction; applications claimed or held by a worker during the probe
@@ -355,12 +359,22 @@ to `codex` on PATH.
 returns `{file, warnings}` or `{questions}`. Missing facts open a question dialog;
 Generate is always enabled: answers are optional, and a blank answer skips the
 question. Skipped questions persist and the provider is told to write without that
-information and not ask again. Cancel closes the preview tab. Answers persist
+information and not ask again. No tab opens until the letter is generated. If the
+browser blocks the new tab, a persistent notification offers an **Open cover letter**
+link until clicked or dismissed. Answers persist
 per application in `documents/cv/<id>-<company>.answers.json` and are reused on
 later requests. The request timeout is 240 seconds. The existing token, origin,
 ID validation and protected-ID rejection remain in place. Provider writing and
 PDF rendering run without a dashboard or database lock; simultaneous generation
 for one application returns 409.
+
+Descriptions shorter than 200 characters are fetched from the canonical listing
+URL and stored before writing, without holding a database lock during HTTP.
+If fetching fails, the writer uses the title and company anyway. Questions are
+only for personal facts the applicant alone knows; the writer never requests the
+job description, posting text, company name or role. Posting questions are also
+filtered server-side. If only such questions return without paragraphs, generation
+shows an error asking the user to retry.
 
 Letters have a name/contact header, date, recipient, salutation, 3-5 AI-written
 body paragraphs and signature in Times New Roman 12pt, black, left-aligned, with

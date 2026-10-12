@@ -116,6 +116,14 @@ def test_valid_provider_output():
     assert validate_letter_result({'questions': [' Why? ']}) == ('questions', ['Why?'])
 
 
+@pytest.mark.parametrize('question', ['Can you send the job description?', 'Share the POSTING', 'Please paste it'])
+def test_posting_questions_are_filtered(question):
+    assert validate_letter_result({'questions': [question, 'When can you start?']}) == ('questions', ['When can you start?'])
+    assert validate_letter_result({'questions': [question], 'paragraphs': ['Body']}) == ('paragraphs', ['Body'])
+    with pytest.raises(ValueError, match='retry'):
+        validate_letter_result({'questions': [question]})
+
+
 @pytest.mark.parametrize('task,expected', [('cover_letter', '300-450 words'),
                                          ('verify_grounding', 'independent factual auditor'),
                                          ('answer', 'fact_ids')])
@@ -134,6 +142,8 @@ async def test_codex_prompt_branches_without_cli(monkeypatch, task, expected):
     assert await provider.generate_response({'task': task}) == {'paragraphs': ['Fixture']}
     assert expected in prompts[0]
     if task == 'cover_letter':
+        assert 'Never ask the user for the job description, posting text, company name or role' in prompts[0]
+        assert 'personal facts the applicant alone knows' in prompts[0]
         assert '1-4 short questions' in prompts[0] and 'style only' in prompts[0]
         assert 'applicant speaking naturally' in prompts[0]
         assert 'never mention the profile, supplied/provided facts, data, samples or these instructions' in prompts[0]

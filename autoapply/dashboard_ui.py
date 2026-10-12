@@ -164,10 +164,13 @@ function coverLetterQuestions(questions,id){return new Promise(resolve=>{
  dialog.addEventListener('close',()=>{dialog.remove();resolve(answers);});document.querySelector('main').append(dialog);dialog.showModal();inputs[0].focus();
  });}
 async function generateCV(a){const id=a.application_id;if(generatingCVs.has(id))return;
- const preview=window.open('about:blank','_blank');generatingCVs.add(id);drawAll();
- try{let answers=[],result=await post('cv',{application_id:id});while(result.questions){const supplied=await coverLetterQuestions(result.questions,id);if(!supplied){if(preview)preview.close();return;}answers=answers.filter(item=>!supplied.some(next=>next.question===item.question)).concat(supplied);result=await post('cv',{application_id:id,answers});}
- const url=new URL(result.file,location.href);url.searchParams.set('token',token);if(preview&&!preview.closed){preview.location.href=url.href;preview.opener=null;}else window.open(url.href,'_blank','noopener,noreferrer');toast(result.warnings.length?result.warnings.join('. '):'Cover letter generated');}
- catch(e){if(preview)preview.close();toast(requestMessage(e));notify(requestMessage(e),true);}finally{generatingCVs.delete(id);drawAll();}}
+ generatingCVs.add(id);drawAll();
+ try{let answers=[],result=await post('cv',{application_id:id});while(result.questions){const supplied=await coverLetterQuestions(result.questions,id);if(!supplied)return;answers=answers.filter(item=>!supplied.some(next=>next.question===item.question)).concat(supplied);result=await post('cv',{application_id:id,answers});}
+ const url=new URL(result.file,location.href);url.searchParams.set('token',token);const message=result.warnings.length?result.warnings.join('. '):'Cover letter generated';
+ if(window.open(url.href,'_blank','noopener,noreferrer'))toast(message);else coverLetterLink(url.href,message);}
+ catch(e){toast(requestMessage(e));notify(requestMessage(e),true);}finally{generatingCVs.delete(id);drawAll();}}
+function coverLetterLink(url,message){hideToast();const notice=node('div',undefined,'toast'),text=node('span',message),link=node('a','Open cover letter'),dismiss=node('button','Dismiss');
+ text.setAttribute('role','status');link.href=url;link.target='_blank';link.rel='noopener noreferrer';link.addEventListener('click',()=>notice.remove());dismiss.setAttribute('aria-label','Dismiss cover letter notification');dismiss.addEventListener('click',()=>notice.remove());notice.append(text,link,dismiss);document.body.append(notice);}
 function appliedCheckbox(id,a){const label=node('label',undefined,'applied-check'),input=node('input');input.type='checkbox';input.checked=id==='applied';
  input.setAttribute('aria-label',(id==='applied'?'Put back #':'Mark #')+a.application_id+(id==='applied'?'':' as applied'));
  input.disabled=pendingMarks.has(a.application_id)||pendingBack.has(a.application_id)||(id==='applied'&&!a.reversible);
@@ -226,7 +229,7 @@ function draw(id){const body=document.getElementById(bodyIds[id]),all=visibleIte
 }
 function drawAll(){tabIds.forEach(draw);}
 function render(data){models.priority=data.rows;draw('priority');const s=data.sweep||{},c=s.counts||{};
- document.getElementById('sweep').replaceChildren(node('span',s.running?'Sweep running. Last completed: ':'Last sweep: '),timestamp(s.finished_at,'Not yet completed'),node('span',' | Checked: '+(c.checked??0)+' | Open: '+(c.OPEN??0)+' | Unknown: '+(c.UNKNOWN??0)+' | Closed: '+(c.CLOSED??0)+' | Removed: '+(c.REMOVED??0)+' | Retired: '+(c.retired??0)+' | Skipped: '+(c.skipped??0)+(s.error?' | '+s.error:'')));}
+ document.getElementById('sweep').replaceChildren(node('span',s.running?'Sweep running. Last completed: ':'Last sweep: '),timestamp(s.finished_at,'Not yet completed'),node('span',' | Checked: '+(c.checked??0)+' | Described: '+(c.described??0)+' | Open: '+(c.OPEN??0)+' | Unknown: '+(c.UNKNOWN??0)+' | Closed: '+(c.CLOSED??0)+' | Removed: '+(c.REMOVED??0)+' | Retired: '+(c.retired??0)+' | Skipped: '+(c.skipped??0)+(s.error?' | '+s.error:'')));}
 function renderManual(data){models['needs-you']=data.applications;draw('needs-you');}
 function renderFailed(data){models.failed=data.applications;draw('failed');}
 function renderApplied(data){notEligibleItems=data.not_eligible||[];notEligibleIds.clear();for(const a of notEligibleItems)notEligibleIds.add(a.application_id);models.applied=data.applications;markedIds.clear();for(const a of data.applications)markedIds.add(a.application_id);drawAll();}

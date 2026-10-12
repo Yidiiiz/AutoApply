@@ -25,7 +25,7 @@ from .database import Database
 from .dashboard_ui import PAGE
 from .dashboard_settings import DashboardSettings, SettingsRejected, MAX_RESUME_BYTES
 from .dashboard_answers import DashboardAnswers
-from . import cv
+from . import cv, descriptions
 from .fill_batch import discover
 from . import liveness
 from .models import State, now
@@ -319,7 +319,7 @@ class Dashboard:
         if application_id in PROTECTED_APPLICATIONS:
             raise AppliedRejected(403, 'protected application cannot be changed')
         with self.connection() as db:
-            job = db.one('''SELECT j.company,j.title,j.description,j.location
+            job = db.one('''SELECT j.id AS job_id,j.canonical_url,j.company,j.title,j.description,j.location
                 FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?''', (application_id,))
         if not job:
             raise AppliedRejected(404, 'application not found')
@@ -340,6 +340,12 @@ class Dashboard:
         if not lock.acquire(blocking=False):
             raise AppliedRejected(409, 'Cover letter generation already running for this application')
         try:
+            if len(job['description'] or '') < 200:
+                description = descriptions.fetch_description(job['canonical_url'])
+                if description:
+                    with self.connection(writable=True) as db:
+                        descriptions.store(db, job['job_id'], description)
+                    job['description'] = description
             with self.answers.mutex:
                 profile = self.config.profile
             folder = self.config.private / 'documents/cv'
@@ -627,7 +633,7 @@ class Dashboard:
         """Probe a fair capped slice of the eligible queue, with no worker lock."""
         if not self._sweep_mutex.acquire(blocking=False):
             return
-        counts = dict(checked=0, OPEN=0, UNKNOWN=0, CLOSED=0, REMOVED=0, retired=0, skipped=0)
+        counts = dict(checked=0, OPEN=0, UNKNOWN=0, CLOSED=0, REMOVED=0, retired=0, skipped=0, described=0)
         error = None
         with self._mutex:
             self._sweep.update(running=True, started_at=now(), error=None)
@@ -636,27 +642,39 @@ class Dashboard:
                 candidates = [db.application(i) for i in discover(db, self.config)
                               if i not in PROTECTED_APPLICATIONS]
             with self._mutex:
-                candidates.sort(key=lambda a: self._observations.get(a['id'], {}).get('checked_at', ''))
+                candidates.sort(key=lambda a: (len(a['description'] or '') >= 200,
+                                               self._observations.get(a['id'], {}).get('checked_at', '')))
             candidates = candidates[:SWEEP_CAP]
+            def probe(app):
+                try:
+                    result = liveness.listing_state(app['canonical_url'])
+                except Exception:
+                    result = 'UNKNOWN'
+                text = descriptions.fetch_description(app['canonical_url']) if len(app['description'] or '') < 200 else ''
+                return result, text
             with ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix='listing-probe') as pool:
-                futures = {pool.submit(liveness.listing_state, app['canonical_url']): app for app in candidates
+                futures = {pool.submit(probe, app): app for app in candidates
                            if not self._stop.is_set()}
-                with self.connection(writable=True) as db:
-                    for future in as_completed(futures):
-                        app = futures[future]
-                        try:
-                            result = future.result()
-                        except Exception:
-                            result = 'UNKNOWN'
-                        if result not in {'OPEN', 'UNKNOWN', 'CLOSED', 'REMOVED'}:
-                            result = 'UNKNOWN'
-                        counts['checked'] += 1
-                        counts[result] += 1
-                        with self._mutex:
-                            self._observations[app['id']] = dict(result=result, checked_at=now())
-                        if result in {'CLOSED', 'REMOVED'} and not self._stop.is_set():
-                            retired = self._retire(db, app, result)
-                            counts['retired' if retired else 'skipped'] += 1
+                for future in as_completed(futures):
+                    app = futures[future]
+                    try:
+                        result, text = future.result()
+                    except Exception:
+                        result, text = 'UNKNOWN', ''
+                    if result not in {'OPEN', 'UNKNOWN', 'CLOSED', 'REMOVED'}:
+                        result = 'UNKNOWN'
+                    counts['checked'] += 1
+                    counts[result] += 1
+                    with self._mutex:
+                        self._observations[app['id']] = dict(result=result, checked_at=now())
+                    if text or result in {'CLOSED', 'REMOVED'}:
+                        with self.connection(writable=True) as db:
+                            if text:
+                                descriptions.store(db, app['job_id'], text)
+                                counts['described'] += 1
+                            if result in {'CLOSED', 'REMOVED'} and not self._stop.is_set():
+                                retired = self._retire(db, app, result)
+                                counts['retired' if retired else 'skipped'] += 1
         except Exception as exc:
             error = type(exc).__name__
         finally:

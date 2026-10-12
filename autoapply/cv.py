@@ -61,13 +61,26 @@ def cover_letter_request(profile, job, samples_folder, answers=None):
 
 
 def validate_letter_result(value):
+    if isinstance(value, dict) and isinstance(value.get('questions'), list):
+        questions = value['questions']
+        if questions and all(isinstance(item, str) for item in questions):
+            filtered = [item for item in questions if not any(
+                keyword in item.lower() for keyword in ('job description', 'posting', 'paste'))]
+            if len(filtered) != len(questions):
+                value = dict(value)
+                if filtered:
+                    value['questions'] = filtered
+                elif 'paragraphs' in value:
+                    del value['questions']
+                else:
+                    raise ValueError('Cover letter provider returned invalid output; please retry generation')
     if isinstance(value, dict) and set(value) in ({'paragraphs'}, {'salutation', 'paragraphs'}, {'questions'}):
         key = 'paragraphs' if 'paragraphs' in value else 'questions'
         items = value[key]
         if (isinstance(items, list) and items and (key != 'questions' or len(items) <= 4)
                 and all(isinstance(item, str) and item.strip() for item in items)):
             return key, [item.strip() for item in items]
-    raise ValueError('Cover letter provider returned invalid output; expected paragraphs or 1-4 short questions')
+    raise ValueError('Cover letter provider returned invalid output; expected paragraphs or 1-4 short questions; please retry generation')
 
 
 def build_cover_letter(profile, job, paragraphs, today=None, salutation=None):

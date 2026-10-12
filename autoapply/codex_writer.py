@@ -132,7 +132,10 @@ class CodexWritingProvider:
                     'Close briefly with a desire to contribute to company work actually described in the posting. '
                     'If genuinely needed facts cannot be found in the supplied material, return instead ONLY JSON '
                     '{"questions": [strings]} with 1-4 short questions (such as motivation, requested start date or '
-                    'specific relevant experience). Use earlier answers and do not ask already answered questions. '
+                    'specific relevant experience). Questions are only for personal facts the applicant alone knows. '
+                    'Never ask the user for the job description, posting text, company name or role. '
+                    'If job context is missing, write from the supplied title and company anyway. '
+                    'Use earlier answers and do not ask already answered questions. '
                     'An empty answer string means the question was skipped: do not ask skipped questions again '
                     '(also listed in skipped_questions), and write the letter without that information.\n')
             await self.run(args+['-'], folder, prompt+json.dumps(request))

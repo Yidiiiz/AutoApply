@@ -24,7 +24,12 @@ from autoapply.dashboard import (AUTOMATION_FAILURE_CATEGORIES, Dashboard, Dashb
 from autoapply.fill_batch import discover, EXCLUDED
 from autoapply.models import now
 from autoapply.runtime import ProcessLock
-from autoapply import cv
+from autoapply import cv, descriptions
+
+
+@pytest.fixture(autouse=True)
+def offline_descriptions(monkeypatch):
+    monkeypatch.setattr(descriptions, 'fetch_description', lambda url, timeout=15: '')
 
 
 def queue(db, config, listing, count):
@@ -113,6 +118,52 @@ def writing_provider(config, monkeypatch):
     provider = FakeProvider()
     monkeypatch.setattr('autoapply.codex_writer.CodexWritingProvider', lambda *args: provider)
     return provider
+
+
+@pytest.mark.parametrize('fetched', ['', 'Bachelor students build Python services. ' * 12])
+def test_cover_letter_fetches_missing_description(dashboard, config, db, listing, monkeypatch,
+                                                 writing_provider, fetched):
+    app_id = queue(db, config, replace(listing, description=''), 1)[0]
+    before = db.application(app_id)
+    def fetch(url):
+        assert url == before['canonical_url']
+        # A concurrent writer can acquire a lock while the HTTP call is in flight.
+        with dashboard.connection(writable=True) as other:
+            with other.transaction():
+                pass
+        return fetched
+    fetcher = Mock(side_effect=fetch)
+    monkeypatch.setattr(descriptions, 'fetch_description', fetcher)
+    monkeypatch.setattr(cv, 'render_pdf', lambda html, path: path.write_bytes(b'%PDF-1.4 fixture'))
+    assert dashboard.generate_cv(app_id)['file'] == '/api/cv/' + str(app_id)
+    fetcher.assert_called_once_with(before['canonical_url'])
+    assert writing_provider.requests[-1]['job']['description'] == fetched.strip()
+    assert db.application(app_id) == dict(before, description=fetched)
+    if fetched:
+        dashboard.generate_cv(app_id)
+        fetcher.assert_called_once()
+
+
+@pytest.mark.parametrize('output,expected', [
+    ({'questions': ['Paste the JOB DESCRIPTION', 'When can you start?']}, {'questions': ['When can you start?']}),
+    ({'questions': ['Can you share the posting?']}, None),
+    ({'questions': ['Paste the posting'], 'paragraphs': ['I study CS.']}, 'letter'),
+])
+def test_cover_letter_filters_posting_questions(http_dashboard, config, db, listing, monkeypatch,
+                                              writing_provider, output, expected):
+    server, dashboard = http_dashboard
+    app_id = queue(db, config, listing, 1)[0]
+    writing_provider.result = output
+    monkeypatch.setattr(cv, 'render_pdf', lambda html, path: path.write_bytes(b'%PDF-1.4 fixture'))
+    status, result, _ = request(server, 'POST', '/api/cv', run_headers(server, dashboard),
+                                json.dumps({'application_id': app_id}))
+    if expected is None:
+        assert status == 400 and 'retry' in result['error']
+    elif expected == 'letter':
+        assert status == 200 and 'file' in result and 'questions' not in result
+    else:
+        assert status == 200 and result == expected
+    assert len(writing_provider.requests) == 1
 
 
 def test_cover_letter_questions_answers_persist_and_reuse(http_dashboard, config, db, listing, monkeypatch, writing_provider):
@@ -332,36 +383,35 @@ def test_cv_click_navigates_popup_offline(http_dashboard, config, db, listing, m
             page.goto('http://127.0.0.1:8765/')
             page.locator('#tab-priority').click()
             writing_provider.result = {'questions': ['Why this role?', 'When can you start?']}
-            with page.expect_popup() as opened:
-                page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
-            preview = opened.value
+            page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
             dialog = page.get_by_role('dialog', name='Cover letter questions')
             dialog.wait_for()
+            assert len(context.pages) == 1 and navigations == []
             assert dialog.get_by_role('button', name='Generate', exact=True).is_enabled()
             assert page.get_by_label('When can you start?').get_attribute('required') is None
             page.get_by_label('Why this role?').fill('The Python work described in the posting.')
             writing_provider.result = {'paragraphs': ['I study CS.', 'I want to contribute.', 'Thank you.']}
-            dialog.get_by_role('button', name='Generate', exact=True).click()
+            with page.expect_popup() as opened:
+                dialog.get_by_role('button', name='Generate', exact=True).click()
+            preview = opened.value
             preview.wait_for_url(f'http://127.0.0.1:8765/api/cv/{app_id}?token=*')
             assert navigations == [(True, 200, pdf)]
-            assert 'Cover letter generated' in page.locator('#toast-message').inner_text()
+            assert page.get_by_text('Cover letter generated', exact=True).is_visible()
             assert writing_provider.requests[-1]['answers'] == [
                 {'question': 'Why this role?', 'answer': 'The Python work described in the posting.'},
                 {'question': 'When can you start?', 'answer': ''}]
             assert writing_provider.requests[-1]['skipped_questions'] == ['When can you start?']
             writing_provider.result = {'questions': ['Anything else?']}
-            with page.expect_popup() as cancelled:
-                page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
+            page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
             dialog.wait_for()
-            with cancelled.value.expect_event('close'):
-                dialog.get_by_role('button', name='Cancel', exact=True).click()
+            assert len(context.pages) == 2
+            dialog.get_by_role('button', name='Cancel', exact=True).click()
             dialog.wait_for(state='detached')
-            assert cancelled.value.is_closed()
+            assert len(context.pages) == 2
             monkeypatch.setattr(dashboard, 'generate_cv', Mock(side_effect=RuntimeError('fixture failure')))
-            with page.expect_popup() as failed:
-                page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
+            page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
             page.locator('#toast-message').filter(has_text='RuntimeError').wait_for()
-            assert failed.value.is_closed()
+            assert len(context.pages) == 2
         finally:
             browser.close()
 
@@ -586,7 +636,51 @@ def test_liveness_retirement_and_noops(dashboard, config, db, listing, monkeypat
     assert [r['last_liveness_result'] for r in data['rows']] == ['OPEN', 'UNKNOWN']
     assert all(r['last_liveness_at'] for r in data['rows'])
     assert data['sweep']['finished_at']
-    assert data['sweep']['counts'] == dict(checked=4, CLOSED=1, REMOVED=1, OPEN=1, UNKNOWN=1, retired=2, skipped=0)
+    assert data['sweep']['counts'] == dict(checked=4, CLOSED=1, REMOVED=1, OPEN=1, UNKNOWN=1, retired=2, skipped=0, described=0)
+
+
+def test_sweep_enriches_missing_descriptions_without_retiring_rejected_jobs(dashboard, config, db,
+                                                                         listing, monkeypatch):
+    first, second, full_id = queue(db, config, replace(listing, description=''), 3)
+    ids = [first, second]
+    db.execute('UPDATE jobs SET description=? WHERE id=(SELECT job_id FROM applications WHERE id=?)',
+               ('Bachelor students build software. ' * 12, full_id))
+    before = {i: db.application(i) for i in ids + [full_id]}
+    assert len(dashboard.priority()['rows']) == 3  # Populate the cache before enrichment.
+    texts = {before[ids[0]]['canonical_url']: 'phd students build research systems. ' * 12,
+             before[ids[1]]['canonical_url']: 'Bachelor students build Python services. ' * 12}
+    fetched = []
+    def fetch(url):
+        fetched.append(url)
+        with dashboard.connection(writable=True) as other:
+            with other.transaction():
+                pass
+        return texts[url]
+    monkeypatch.setattr(descriptions, 'fetch_description', fetch)
+    monkeypatch.setattr('autoapply.liveness.listing_state', lambda url: 'OPEN')
+    retire = Mock(side_effect=AssertionError('Eligibility rejection must not retire a listing'))
+    monkeypatch.setattr(dashboard, '_retire', retire)
+    dashboard.sweep()
+    assert set(fetched) == set(texts)
+    for app_id in ids:
+        assert db.application(app_id) == dict(before[app_id], description=texts[before[app_id]['canonical_url']])
+    assert db.application(full_id) == before[full_id]
+    data = dashboard.priority()
+    assert data['sweep']['counts']['described'] == 2 and data['sweep']['error'] is None
+    assert {row['application_id'] for row in data['rows']} == {ids[1], full_id}
+    retire.assert_not_called()
+
+
+def test_sweep_prefers_missing_descriptions(dashboard, config, db, listing, monkeypatch):
+    full_id, missing_id = queue(db, config, replace(listing, description=''), 2)
+    db.execute('UPDATE jobs SET description=? WHERE id=(SELECT job_id FROM applications WHERE id=?)',
+               ('Bachelor students build software. ' * 12, full_id))
+    monkeypatch.setattr('autoapply.dashboard.SWEEP_CAP', 1)
+    fetcher = Mock(return_value='Bachelor students build Python services. ' * 12)
+    monkeypatch.setattr(descriptions, 'fetch_description', fetcher)
+    dashboard.sweep()
+    fetcher.assert_called_once_with(db.application(missing_id)['canonical_url'])
+    assert full_id not in dashboard._observations
 
 
 def test_liveness_does_not_overwrite_worker_claim_or_protected(dashboard, config, db, listing, monkeypatch):
@@ -1546,6 +1640,7 @@ const elements=new Map(),document={createElement:tag=>new Node(tag),createElemen
  querySelectorAll:selector=>selector==='[role="tab"]'?testTabs:selector==='[data-tools]'?testTools:[],activeElement:null,
  getElementById(id){if(!elements.has(id))elements.set(id,new Node('div'));return elements.get(id);}};
 const testTabs=['run','priority','applications','answers','settings'].map(id=>{const tab=document.getElementById('tab-'+id);tab.id='tab-'+id;tab.setAttribute('aria-controls','panel-'+id);return tab;});
+document.body=new Node('body');
 const testTools=['run','needs-you','failed','priority','applied'].map(id=>{const el=new Node('div');el.dataset.tools=id;return el;});
 const window={listeners:{},addEventListener(k,fn){this.listeners[k]=fn;}},location={hash:'#run',href:'http://127.0.0.1:8765/'},history={replaceState:()=>{}};
 const storage=new Map(),localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
@@ -1650,13 +1745,13 @@ const originalReload=reload;reload=async()=>[];
   assert.ok(descendants(makeRow(id,app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
   assert.ok(descendants(makeCard(id,app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
  }
- const cvCalls=[],cvPreview={location:{set href(url){cvCalls.push(url);}},close:()=>cvCalls.push('closed')};
+ const cvCalls=[],cvPreview={};
  window.open=(...args)=>{cvCalls.push(args);return cvPreview;};
  let finishCV;post=(action,body)=>{cvCalls.push([action,body]);return new Promise(resolve=>{finishCV=resolve;});};
- const generating=generateCV(app);assert.deepEqual(cvCalls[0],['about:blank','_blank']);assert.ok(generatingCVs.has(4503));
+ const generating=generateCV(app);assert.deepEqual(cvCalls,[['cv',{application_id:4503}]]);assert.ok(generatingCVs.has(4503));
  const busyCV=cvButton(app);assert.equal(busyCV.disabled,true);assert.equal(busyCV.attributes['aria-busy'],'true');assert.equal(busyCV.children[0].attributes.class,'icon spinning');
  finishCV({file:'/api/cv/4503',warnings:['Add profile projects']});await generating;
- assert.deepEqual(cvCalls[1],['cv',{application_id:4503}]);assert.equal(cvCalls[2],'http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token));assert.equal(cvPreview.opener,null);
+ assert.deepEqual(cvCalls[1],['http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token),'_blank','noopener,noreferrer']);
  assert.equal(document.getElementById('toast-message').textContent,'Add profile projects');assert.equal(generatingCVs.has(4503),false);assert.equal(cvButton(app).disabled,false);
  let questionCalls=[];post=async(action,body)=>{questionCalls.push(body);return body.answers?{file:'/api/cv/4503',warnings:[]}:{questions:['Why this role?', 'Start date?']};};
  const questionRun=generateCV(app);await Promise.resolve();
@@ -1665,8 +1760,13 @@ const originalReload=reload;reload=async()=>[];
  assert.equal(fields.length,2);assert.ok(!buttons[1].disabled);assert.ok(fields.every(field=>!field.required));
  fields[0].value='Python work';fields[1].value='   ';assert.ok(!buttons[1].disabled);buttons[1].click();await questionRun;
  assert.deepEqual(questionCalls[1],{application_id:4503,answers:[{question:'Why this role?',answer:'Python work'},{question:'Start date?',answer:''}]});assert.equal(dialog.open,false);assert.ok(!main.children.includes(dialog));
- const cancelled=generateCV(app);await Promise.resolve();const cancelDialog=main.children.find(el=>el.tag==='dialog');cancelDialog.children.at(-1).children[0].click();await cancelled;assert.equal(cvCalls.at(-1),'closed');assert.equal(generatingCVs.has(4503),false);
- post=async()=>{throw Error('CV failed');};await generateCV(app);assert.equal(cvCalls.at(-1),'closed');assert.equal(document.getElementById('message').textContent,'CV failed');assert.equal(document.getElementById('toast-message').textContent,'CV failed');
+ const openCount=cvCalls.length;const cancelled=generateCV(app);await Promise.resolve();const cancelDialog=main.children.find(el=>el.tag==='dialog');cancelDialog.children.at(-1).children[0].click();await cancelled;assert.equal(cvCalls.length,openCount);assert.equal(generatingCVs.has(4503),false);
+ post=async()=>{throw Error('CV failed');};await generateCV(app);assert.equal(cvCalls.length,openCount);assert.equal(document.getElementById('message').textContent,'CV failed');assert.equal(document.getElementById('toast-message').textContent,'CV failed');
+ window.open=()=>null;post=async()=>({file:'/api/cv/4503',warnings:[]});await generateCV(app);
+ const fallback=document.body.children.at(-1),link=fallback.children.find(el=>el.tag==='a');
+ assert.equal(link.textContent,'Open cover letter');assert.equal(link.href,'http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token));assert.equal(link.target,'_blank');assert.equal(link.rel,'noopener noreferrer');
+ assert.ok(!fallback.hidden);link.click();assert.ok(!document.body.children.includes(fallback));
+ await generateCV(app);const dismissed=document.body.children.at(-1);dismissed.children.find(el=>el.tag==='button').click();assert.ok(!document.body.children.includes(dismissed));
  // Grid cards use the same compact structure on every tab.
  renderApplied({applications:[]});
  for(const id of ['run','needs-you','failed','priority']){
