@@ -1,5 +1,36 @@
 # Local AutoApply dashboard
 
+## Extension API
+
+Settings → Dashboard shows the Chrome extension pairing key with Copy and
+Regenerate controls. Regeneration revokes the previous key. Every `/ext/*`
+operation requires `X-AutoApply-Key`; CORS and OPTIONS preflight allow only
+`chrome-extension://` origins, GET/POST and Content-Type/X-AutoApply-Key headers.
+Preflight does not carry the key. The existing loopback Host check still applies.
+Existing pairing keys are read without a write transaction; only initial creation
+and regeneration require one. Unexpected `/ext/*` and `/api/*` failures return
+JSON HTTP 503 with `{"error": "Dashboard is busy, retry shortly"}`.
+
+The local API provides GET `/ext/ping`, POST `/ext/match` (`url`), POST
+`/ext/answers` (`url`, optional `application_id`, `page`, `fields`), POST
+`/ext/remember` (`url`, optional `application_id`, `label`, `kind`, `options`,
+`value`), and GET `/ext/resume` (PDF filename, MIME type and base64 bytes).
+Answers use the existing deterministic profile and verified memory resolver;
+unresolved fields report NEEDS_INPUT, OPTIONAL_SKIP or NEEDS_WRITING. File fields
+report FILE with resume/cover_letter. Overlength answers require input. Longer
+extracted descriptions are stored locally. Remembered answers preserve field
+kind, options and application scope and appear in the existing saved answer store.
+These endpoints never call AI or submit applications.
+
+POST `/api/ext-run` accepts ordered `application_ids` from the current priority
+or manual lists. GET `/api/ext-run` returns items and the current opened id;
+POST `/api/ext-run/cancel` skips remaining items. Dashboard writes retain the
+existing same-origin dashboard token requirement. GET `/ext/run/next` claims
+the next pending item; POST `/ext/run/result` accepts `application_id`,
+`state` (filled, needs_input, failed, skipped) and optional `detail`.
+Runs live only in dashboard memory and never change application submission state.
+Final submission stays manual. The extension UI and AI endpoints are separate tasks.
+
 Start from the repository directory:
 
 ```powershell
@@ -304,6 +335,9 @@ than 200 characters, using the same cap and pool. HTTP calls run without databas
 write locks and use bounded timeouts (15 seconds per request). Candidates missing
 descriptions go first, then least recently checked candidates, so the queue rotates
 through the cap. Probe failures count as `UNKNOWN`; `described` counts enrichment.
+After all probes finish, descriptions and retirement results are written in one
+short batch with one history flush. Dashboard connections share a history cache;
+the existing archive revision token avoids rescanning unchanged records.
 The next queue rebuild re-evaluates eligibility using the stored text: PhD
 rejections leave the queue without retiring or changing application state.
 The page shows sweep start/end times, counts, errors and results; this monitoring

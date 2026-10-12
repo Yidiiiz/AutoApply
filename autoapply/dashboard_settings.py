@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import math
 import os
+import secrets
 import shutil
 import threading
 import time
@@ -95,7 +96,23 @@ class DashboardSettings:
                         f['value'] = False
                     result.append(f)
                 sections.append(dict(key=key, label=label, fields=result))
-            return dict(sections=sections, restart_required_note=RESTART_NOTE)
+            return dict(sections=sections, restart_required_note=RESTART_NOTE, extension_key=self.extension_key())
+
+    def extension_key(self, *, regenerate=False):
+        with self.mutex:
+            if not regenerate:
+                with self.connection() as db:
+                    key = db.setting('extension_key')
+                if key:
+                    return key
+            with self.connection(writable=True) as db:
+                with db.transaction():
+                    # Recheck after taking the lock in case another dashboard paired.
+                    key = db.setting('extension_key')
+                    if regenerate or not key:
+                        key = secrets.token_hex(32)
+                        db.set_setting('extension_key', key)
+                return key
 
     def _backup(self, path, timestamp):
         folder = self.config.private / 'backups'

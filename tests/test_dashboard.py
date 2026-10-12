@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import http.client
 from html.parser import HTMLParser
@@ -10,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -578,6 +580,30 @@ def test_dashboard_database_skips_history_maintenance(config, db, listing, monke
     assert db.rows('SELECT * FROM history_dirty') == pending
 
 
+def test_dashboard_connections_share_history_cache(dashboard, config, db, listing, monkeypatch):
+    first, second = queue(db, config, listing, 2)
+    scan = Mock(wraps=dashboard.history._scan)
+    write = Mock(wraps=dashboard.history._write)
+    monkeypatch.setattr(dashboard.history, '_scan', scan)
+    monkeypatch.setattr(dashboard.history, '_write', write)
+    for app_id, text in ((first, 'First description'), (second, 'Second description')):
+        with dashboard.connection(writable=True) as connection:
+            assert connection.history is dashboard.history
+            descriptions.store(connection, db.application(app_id)['job_id'], text * 20)
+        folder = dashboard.history.paths[str(app_id)]
+        assert json.loads((folder / 'application.json').read_text(encoding='utf-8'))['description'] == text * 20
+        assert (folder / 'job_description.txt').read_text(encoding='utf-8') == text * 20
+    assert scan.call_count == 1
+    assert [call.args[0]['application_id'] for call in write.call_args_list] == [str(first), str(second)]
+    assert db.rows('SELECT * FROM history_dirty') == []
+    # Another exporter still invalidates the shared cache through the revision token.
+    descriptions.store(db, db.application(first)['job_id'], 'External description' * 30)
+    with dashboard.connection(writable=True) as connection:
+        descriptions.store(connection, db.application(second)['job_id'], 'Latest description' * 30)
+    assert scan.call_count == 2
+    assert dashboard.history.records[str(first)]['description'] == 'External description' * 30
+
+
 def test_dashboard_cli_disables_history_maintenance(config, monkeypatch):
     from autoapply.__main__ import main
     factory = Mock(return_value=Mock())
@@ -681,6 +707,79 @@ def test_sweep_prefers_missing_descriptions(dashboard, config, db, listing, monk
     dashboard.sweep()
     fetcher.assert_called_once_with(db.application(missing_id)['canonical_url'])
     assert full_id not in dashboard._observations
+
+
+def test_sweep_batches_writes_after_all_probes(dashboard, config, db, listing, monkeypatch):
+    ids = queue(db, config, replace(listing, description=''), 3)
+    states = {db.application(i)['canonical_url']: state for i, state in zip(ids, ('CLOSED', 'REMOVED', 'OPEN'))}
+    fetched = set()
+    probe_writer_lock = threading.Lock()
+    writable_connections = []
+    connection = dashboard.connection
+    @contextmanager
+    def tracked_connection(*, writable=False):
+        if writable:
+            assert fetched == set(states)
+        with connection(writable=writable) as value:
+            if writable:
+                writes = []
+                value.conn.set_trace_callback(writes.append)
+                writable_connections.append(writes)
+            yield value
+    def fetch(url):
+        assert not writable_connections
+        # HTTP probes permit an independent writer; no sweep transaction is held.
+        with probe_writer_lock:
+            with sqlite3.connect(dashboard.path, timeout=0) as other:
+                other.execute('BEGIN IMMEDIATE')
+                other.rollback()
+        fetched.add(url)
+        return 'Public description for undergraduate students. ' * 10
+    sync = Mock(wraps=dashboard.history.sync)
+    monkeypatch.setattr(dashboard, 'connection', tracked_connection)
+    monkeypatch.setattr(dashboard.history, 'sync', sync)
+    monkeypatch.setattr(descriptions, 'fetch_description', fetch)
+    monkeypatch.setattr('autoapply.liveness.listing_state', states.__getitem__)
+    dashboard.sweep()
+    assert dashboard._sweep['error'] is None
+    assert len(writable_connections) == 1
+    # One batch transaction and one archive flush, regardless of result count.
+    assert sum(sql == 'BEGIN IMMEDIATE' for sql in writable_connections[0]) == 2
+    sync.assert_called_once()
+    assert set(sync.call_args.args[1]) == set(ids)
+    assert dashboard._sweep['counts']['described'] == 3
+    assert dashboard._sweep['counts']['retired'] == 2
+    for app_id, state in zip(ids, ('CLOSED', 'CLOSED', 'QUEUED')):
+        assert db.application(app_id)['status'] == state
+        folder = dashboard.history.paths[str(app_id)]
+        record = json.loads((folder / 'application.json').read_text(encoding='utf-8'))
+        assert record['status'] == state and record['description'].startswith('Public description')
+
+
+@pytest.mark.parametrize('error,message', [
+    (sqlite3.OperationalError('database is locked'), 'Dashboard is busy, retry shortly'),
+    (sqlite3.OperationalError('database is BUSY'), 'Dashboard is busy, retry shortly'),
+    (sqlite3.OperationalError('no such table'), 'Dashboard request failed: OperationalError'),
+    (RuntimeError('unexpected'), 'Dashboard request failed: RuntimeError'),
+    (RuntimeError('locked'), 'Dashboard request failed: RuntimeError'),
+])
+@pytest.mark.parametrize('method,path,target', [
+    ('GET', '/api/priority', 'priority'),
+    ('POST', '/api/settings', 'settings.save'),
+    ('PUT', '/api/answers', 'answers.save'),
+    ('DELETE', '/api/answers/saved/fixture', 'answers.edit_saved'),
+])
+def test_api_unexpected_errors_return_json(http_dashboard, monkeypatch, error, message, method, path, target):
+    server, dashboard = http_dashboard
+    owner = dashboard
+    parts = target.split('.')
+    for part in parts[:-1]:
+        owner = getattr(owner, part)
+    monkeypatch.setattr(owner, parts[-1], Mock(side_effect=error))
+    headers = {'Origin': 'http://127.0.0.1:8765', 'X-Dashboard-Token': dashboard.token}
+    status, result, headers = request(server, method, path, headers, '{}')
+    assert status == 503 and result == dict(error=message)
+    assert headers['Content-Type'] == 'application/json; charset=utf-8'
 
 
 def test_liveness_does_not_overwrite_worker_claim_or_protected(dashboard, config, db, listing, monkeypatch):

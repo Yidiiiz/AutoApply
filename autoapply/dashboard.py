@@ -25,7 +25,7 @@ from .database import Database
 from .dashboard_ui import PAGE
 from .dashboard_settings import DashboardSettings, SettingsRejected, MAX_RESUME_BYTES
 from .dashboard_answers import DashboardAnswers
-from . import cv, descriptions
+from . import cv, descriptions, extension_api
 from .fill_batch import discover
 from . import liveness
 from .models import State, now
@@ -74,7 +74,7 @@ class _Connection(Database):
     TEMP guards affect this connection only, including discovery's bulk writes.
     """
 
-    def __init__(self, path, history_root, *, writable=False, check_same_thread=True):
+    def __init__(self, path, history, *, writable=False, check_same_thread=True):
         mode = 'rw' if writable else 'ro'
         self.conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=' + mode,
                                     uri=True, timeout=5, isolation_level=None, check_same_thread=check_same_thread)
@@ -83,7 +83,7 @@ class _Connection(Database):
         self._history_ready = writable
         self._flushing_history = False
         self._closed = False
-        self.history = ApplicationHistory(history_root)
+        self.history = history
         if not writable:
             self.conn.execute('PRAGMA query_only=ON')
             return
@@ -174,10 +174,14 @@ class Dashboard:
         self.config = config
         self.path = db.one('PRAGMA database_list')['file']
         self.history_root = db.history.root
+        # sync holds the DB write transaction and history lock, serializing this cache.
+        self.history = ApplicationHistory(self.history_root)
         self.interval = liveness_minutes * 60
         self.token = secrets.token_hex(32)
         self._mutex = threading.Lock()
         self._cv_locks = {}
+        self._ext_mutex = threading.Lock()
+        self._ext_run = []
         self._priority_mutex = threading.Lock()
         self._priority_db = None
         self._priority_key = None
@@ -198,7 +202,7 @@ class Dashboard:
 
     @contextmanager
     def connection(self, *, writable=False):
-        db = _Connection(self.path, self.history_root, writable=writable)
+        db = _Connection(self.path, self.history, writable=writable)
         try:
             yield db
         finally:
@@ -209,7 +213,7 @@ class Dashboard:
         # reads and retain it between requests; other dashboard/worker writes invalidate it.
         with self._priority_mutex:
             if self._priority_db is None:
-                self._priority_db = _Connection(self.path, self.history_root, check_same_thread=False)
+                self._priority_db = _Connection(self.path, self.history, check_same_thread=False)
             db = self._priority_db
             db.conn.execute('BEGIN')
             try:
@@ -652,6 +656,7 @@ class Dashboard:
                     result = 'UNKNOWN'
                 text = descriptions.fetch_description(app['canonical_url']) if len(app['description'] or '') < 200 else ''
                 return result, text
+            updates = []
             with ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix='listing-probe') as pool:
                 futures = {pool.submit(probe, app): app for app in candidates
                            if not self._stop.is_set()}
@@ -668,7 +673,11 @@ class Dashboard:
                     with self._mutex:
                         self._observations[app['id']] = dict(result=result, checked_at=now())
                     if text or result in {'CLOSED', 'REMOVED'}:
-                        with self.connection(writable=True) as db:
+                        updates.append((app, result, text))
+            if updates:
+                with self.connection(writable=True) as db:
+                    with db.transaction():
+                        for app, result, text in updates:
                             if text:
                                 descriptions.store(db, app['job_id'], text)
                                 counts['described'] += 1
@@ -774,6 +783,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Never log page tokens or application data.
 
+    def _unexpected_error(self, exc):
+        busy = isinstance(exc, sqlite3.OperationalError) and any(
+            marker in str(exc).lower() for marker in ('locked', 'busy'))
+        message = 'Dashboard is busy, retry shortly' if busy else f'Dashboard request failed: {type(exc).__name__}'
+        self._reply(503, dict(error=message))
+
     def _reply(self, status, data, *, html=False):
         body = data.encode('utf-8') if html else json.dumps(data).encode('utf-8')
         self.send_response(status)
@@ -782,6 +797,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
+        if getattr(self, '_extension_origin', None):
+            self.send_header('Access-Control-Allow-Origin', self._extension_origin)
+            self.send_header('Vary', 'Origin')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-AutoApply-Key')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST')
         token = self.server.dashboard.token
         self.send_header('Content-Security-Policy', "default-src 'none'; connect-src 'self'; "
                          f"script-src 'nonce-{token}'; style-src 'nonce-{token}'; "
@@ -803,6 +823,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._local():
             return
+        if self.path.startswith('/ext/'):
+            self._extension_request()
+            return
         dashboard = self.server.dashboard
         try:
             if self.path == '/':
@@ -816,6 +839,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._reply(200, page, html=True)
             elif self.path == '/api/settings':
                 self._reply(200, dashboard.settings.get())
+            elif self.path == '/api/ext-run':
+                self._reply(200, extension_api.run_status(dashboard, {}))
             elif self.path == '/api/answers':
                 self._reply(200, dashboard.answers.get())
             elif self.path == '/api/answers/saved':
@@ -876,7 +901,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except SettingsRejected as exc:
             self._reply(exc.status, dict(error=str(exc), errors=exc.errors))
         except Exception as exc:
-            self._reply(500, dict(error='Dashboard read failed: ' + type(exc).__name__))
+            self._unexpected_error(exc)
 
     def do_PUT(self):
         self._answer_write()
@@ -925,10 +950,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError) as exc:
             self._reply(400, dict(error=str(exc)))
         except Exception as exc:
-            self._reply(500, dict(error='Answer update failed: ' + type(exc).__name__))
+            self._unexpected_error(exc)
+
+    def do_OPTIONS(self):
+        if not self._local():
+            return
+        if not self.path.startswith('/ext/') or not self._extension_cors():
+            self._reply(403, dict(error='extension origin required'))
+            return
+        if self.headers.get('Access-Control-Request-Method') not in {'GET', 'POST'}:
+            self._reply(403, dict(error='extension method rejected'))
+            return
+        self._reply(200, dict(ok=True))
+
+    def _extension_cors(self):
+        origins = self.headers.get_all('Origin', [])
+        if len(origins) == 1 and origins[0].startswith('chrome-extension://'):
+            self._extension_origin = origins[0]
+            return True
+        return False
+
+    def _extension_request(self):
+        dashboard = self.server.dashboard
+        if self.headers.get_all('Origin', []) and not self._extension_cors():
+            self._reply(403, dict(error='extension origin required'))
+            return
+        try:
+            keys = self.headers.get_all('X-AutoApply-Key', [])
+            if (len(keys) != 1 or not hmac.compare_digest(keys[0].encode('utf-8'),
+                                                         dashboard.settings.extension_key().encode('ascii'))):
+                self._reply(403, dict(error='extension key required'))
+                return
+            payload = {}
+            if self.command == 'POST':
+                lengths = self.headers.get_all('Content-Length', [])
+                if (len(lengths) != 1 or self.headers.get('Transfer-Encoding') or not lengths[0].isdigit()
+                        or not 0 < int(lengths[0]) <= 1024 * 1024):
+                    raise SettingsRejected('A JSON body of at most 1 MB is required')
+                payload = json.loads(self.rfile.read(int(lengths[0])))
+                if not isinstance(payload, dict):
+                    raise SettingsRejected('A JSON object is required')
+            self._reply(200, extension_api.dispatch(dashboard, payload, method=self.command, path=self.path))
+        except SettingsRejected as exc:
+            self._reply(exc.status, dict(error=str(exc)))
+        except (ValueError, UnicodeError):
+            self._reply(400, dict(error='Invalid JSON request'))
+        except Exception as exc:
+            self._unexpected_error(exc)
 
     def do_POST(self):
         if not self._local():
+            return
+        if self.path.startswith('/ext/'):
+            self._extension_request()
             return
         dashboard = self.server.dashboard
         origins = self.headers.get_all('Origin', [])
@@ -939,11 +1013,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._reply(403, dict(error='same-origin dashboard token required'))
             return
         if self.path not in {'/api/refresh', '/api/run', '/api/pause', '/api/resume', '/api/stop',
-                             '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv'}:
+                             '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv',
+                             '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
             self._reply(404, dict(error='endpoint not found'))
             return
         try:
-            if self.path == '/api/resume' and (self.headers.get('Content-Type', '').split(';')[0].strip().lower() == 'application/pdf'
+            if self.path == '/api/extension-key/regenerate':
+                self._reply(200, dict(extension_key=dashboard.settings.extension_key(regenerate=True)))
+            elif self.path == '/api/ext-run/cancel':
+                self._reply(200, extension_api.run_cancel(dashboard, {}))
+            elif self.path == '/api/resume' and (self.headers.get('Content-Type', '').split(';')[0].strip().lower() == 'application/pdf'
                                              or (self.headers.get('Content-Length', '0') != '0'
                                                  and self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json')):
                 if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/pdf':
@@ -963,14 +1042,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._reply(200, dashboard.settings.replace_resume(body))
             elif self.path == '/api/refresh':
                 self._reply(202, dict(id=dashboard.start_refresh()))
-            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv'} or (
+            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv', '/api/ext-run'} or (
                     self.path == '/api/resume' and self.headers.get('Content-Length', '0') != '0'):
                 try:
                     lengths = self.headers.get_all('Content-Length', [])
                     if len(lengths) != 1 or self.headers.get('Transfer-Encoding'):
                         raise ValueError('a JSON object is required')
                     length = int(lengths[0])
-                    limit = 16384 if self.path in {'/api/settings', '/api/cv'} else 8192 if self.path == '/api/not-eligible' else 1024
+                    limit = 16384 if self.path in {'/api/settings', '/api/cv', '/api/ext-run'} else 8192 if self.path == '/api/not-eligible' else 1024
                     if not 0 < length <= limit:
                         raise ValueError(f'a JSON object is required (maximum body size {limit} bytes)')
                     body = json.loads(self.rfile.read(length))
@@ -978,6 +1057,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         raise ValueError('a JSON object is required')
                     if self.path == '/api/run':
                         result = dashboard.run_worker(body.get('count'))
+                    elif self.path == '/api/ext-run':
+                        result = extension_api.run_start(dashboard, body)
                     elif self.path == '/api/settings':
                         result = dashboard.settings.save(body.get('changes'))
                     elif self.path == '/api/cv':
@@ -1006,7 +1087,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (RefreshRejected, RunRejected) as exc:
             self._reply(409, dict(error=str(exc)))
         except Exception as exc:
-            self._reply(500, dict(error='Dashboard action failed: ' + type(exc).__name__))
+            self._unexpected_error(exc)
 
 
 def serve(config, db, *, port=8765, liveness_minutes=30, no_browser=False):
