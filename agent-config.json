@@ -141,6 +141,21 @@
         ".tmp/check-answers"
       ],
       "timeout_seconds": 600
+    },
+    "extension": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_extension.py",
+        "tests/test_extension_api.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-extension"
+      ],
+      "timeout_seconds": 900
     }
   }
 }
