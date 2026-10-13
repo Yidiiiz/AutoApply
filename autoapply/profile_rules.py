@@ -148,8 +148,6 @@ def resolve(label, kind, options, profile):
         # Work authorization phrasings not covered by exact concepts.
         (r'\bsponsorship\b|\bsponsor\b.{0,40}\b(?:visa|immigration|work authori[sz]ation|employment)\b', lambda: None if work('sponsorship_now') is None or work('sponsorship_future') is None
          else ('Yes' if work('sponsorship_now') or work('sponsorship_future') else 'No')),
-        (r'\btemporary work authori[sz]ation\b|\b(?:f 1|cpt|h 1b)\b|\bopt\b(?! in\b)', lambda: None if work('us_authorized') is None
-         else ('Yes' if (work('sponsorship_now') or work('sponsorship_future')) else 'No')),
         (r'\b(?:government|united nations) employee\b|\bgovernment official\b', lambda: 'No'),
         (r'\b(?:text messages?|sms|whatsapp)\b', lambda: None if _get(profile, 'application_preferences.recruiting_sms_whatsapp') is None
          else ('Yes' if _get(profile, 'application_preferences.recruiting_sms_whatsapp') else 'No')),
@@ -205,8 +203,9 @@ def resolve(label, kind, options, profile):
 def confirm_requirement(requirement, profile):
     """Answer a job-requirement confirmation from profile facts: True/False/None."""
     text = _norm(requirement)
-    if re.search(r'\b(?:eligib\w*|authori[sz]\w*|legally able) (?:to )?work in the (?:united states|u s|us)\b|work authori[sz]ation', text):
-        return bool(_get(profile, 'work_authorization.us_authorized')) if _get(profile, 'work_authorization.us_authorized') is not None else None
+    from .question_keywords import match
+    if match(requirement) == 'work_authorization.us_authorized':
+        return _get(profile, 'work_authorization.us_authorized')
     if re.search(r'\bsponsor', text):
         now, future = _get(profile, 'work_authorization.sponsorship_now'), _get(profile, 'work_authorization.sponsorship_future')
         if now is None or future is None:

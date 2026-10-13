@@ -35,6 +35,18 @@ extracted descriptions are stored locally. Remembered answers preserve field
 kind, options and application scope and appear in the existing saved answer store.
 These endpoints never call AI or submit applications.
 
+Question labels also use normalized whole-word keyword concepts when the existing
+rules do not classify them. Verified saved answers can match reworded labels with
+at least 60% content-word overlap, within the same concept and scope, compatible
+field kind and options, and current policy/profile constraints. Their existing
+source field reports `verified_fuzzy_memory`.
+
+When `work_authorization.us_authorized` is true, free-text authorization answers
+are exactly “I am legally authorized to work for any employer in the United States.”
+Choice fields select an affirmative authorization option, or Yes. Sponsorship,
+citizenship, temporary authorization, visa status and clearance remain separate;
+authorization never supplies those facts.
+
 POST `/api/ext-run` accepts ordered `application_ids` from the current priority
 or manual lists. GET `/api/ext-run` returns items and the current opened id;
 POST `/api/ext-run/cancel` skips remaining items. Dashboard writes retain the

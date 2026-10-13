@@ -152,7 +152,7 @@ for path in set(LABELS.values()) | {
     'application_preferences.willing_to_work_any_location', 'locations.willing_to_relocate',
     'demographics.gender', 'demographics.gender_identity', 'demographics.race',
     'demographics.racial_ethnic_background', 'demographics.disability',
-    'demographics.veteran_status', 'demographics.armed_forces',
+    'demographics.veteran_status', 'demographics.armed_forces', 'demographics.pronouns',
     'demographics.sexual_orientation', 'demographics.transgender', 'demographics.hispanic_latino',
 }:
     key = ALIASES.get(path, path)
@@ -187,7 +187,8 @@ def canonical_key(label, employer=''):
     intent = disclosure_intent(label, employer)
     if intent:
         return intent
+    from .question_keywords import match
     return {'privacy acknowledgement': 'privacy_ack', 'sms recruiting preference': 'sms_recruiting',
             'technical interests': 'technical_interests', 'technical interest preference': 'technical_interests',
-            'start date': 'start_date'}.get(question_text(label))
+            'start date': 'start_date'}.get(question_text(label)) or match(label)
 

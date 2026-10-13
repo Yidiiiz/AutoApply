@@ -90,6 +90,11 @@ class AnswerResolver:
                 "SELECT key,value FROM settings WHERE key LIKE 'verified_fact:%' OR key LIKE 'known_answer_signature:%'")}
             self._memory = {(r['normalized_question'], r['scope']): r for r in self.db.rows(
                 'SELECT * FROM known_answers WHERE verified=1')}
+            self._memory_fields = {r['memory_id']: dict(label=r['raw_question'], kind=r['field_type'], options=json.loads(r['options']))
+                for r in self.db.rows('''SELECT k.id AS memory_id,q.raw_question,q.field_type,q.options
+                    FROM known_answers k JOIN questions q ON q.id=(
+                        SELECT MAX(id) FROM questions WHERE normalized_question=k.normalized_question
+                        AND scope=k.scope AND question_signature=k.question_signature) WHERE k.verified=1''')}
             self.snapshot = snapshot.with_overrides(self._settings)
             self._revision = revision
         return self.snapshot
@@ -108,7 +113,9 @@ class AnswerResolver:
                 answer.semantic_key, answer.scope = descriptor.semantic_key, descriptor.scope
                 answer.signature, answer.profile_revision = descriptor.signature, self.snapshot.revision
                 answer.verified = True
-                answer.reason = 'Exact compatible verified answer or explicit deterministic policy'
+                answer.reason = ('Compatible verified saved answer matched by keyword overlap'
+                                 if answer.source == 'verified_fuzzy_memory' else
+                                 'Exact compatible verified answer or explicit deterministic policy')
                 answer.provenance.update(profile_revision=self.snapshot.revision, fact_revision=self._revision[1],
                                          policy_version=descriptor.policy_version, evidence=answer.evidence)
             status = ('RESOLVED' if answer else 'REJECTED' if descriptor.semantic_key == REJECTED_FIELD
@@ -160,10 +167,83 @@ class AnswerResolver:
             return None
         return answer
 
+    def _fuzzy_answer(self, q, app, descriptor, stored):
+        from .concepts import canonical_key
+        from .field_mapping import describe, answer_signature
+        from .question_keywords import match, similarity
+        from .question_rules import experience_key
+        candidates = []
+        target_concept = match(q.label)
+        for row in self._memory.values():
+            label = row['normalized_question']
+            if row['scope'] != q.scope or normalize(q.label) == label:
+                continue
+            if row.get('concept') and row['concept'] != descriptor.semantic_key:
+                continue
+            if match(label) != target_concept or canonical_key(label) != canonical_key(q.label):
+                continue
+            # Preserve the existing narrow experience grammars for compound claims.
+            if experience_key(label) != experience_key(q.label):
+                continue
+            score = similarity(q.label, label)
+            if score < .6:
+                continue
+            data = json.loads(row.get('provenance') or '{}')
+            revision = data.get('provenance', {}).get('canonical_profile_revision')
+            if revision and revision != self._revision[0]:
+                continue
+            # Receipts supply field metadata; extension memory carries the same data.
+            field = data.get('field') or self._memory_fields.get(row['id'])
+            if not field or field['kind'] != q.kind:
+                continue
+            old_label = field.get('label', label)
+            old = replace(q, label=old_label, options=field['options'])
+            if row.get('question_signature') != describe(old, app, self.snapshot.facts).signature:
+                continue
+            if self._settings.get('known_answer_signature:' + str(row['id'])) != answer_signature(old_label, q.kind, field['options']):
+                continue
+            value = json.loads(row['answer'])
+            if stored and stored.get('source') == 'USER_PROVIDED' and normalize(stored.get('value')) != normalize(value):
+                continue
+            if isinstance(value, list):
+                value = [fit_options(v, q.options) for v in value] if q.options else None
+            else:
+                value = fit_options(value, q.options)
+            try:
+                validate_answer(q, value)
+            except (ValueError, TypeError):
+                continue
+            candidates.append((score, row['id'], value))
+        if not candidates:
+            return None
+        best = max(score for score, _, _ in candidates)
+        winners = [(ident, value) for score, ident, value in candidates if score == best]
+        if len({json.dumps(value, sort_keys=True) for _, value in winners}) != 1:
+            return None
+        ident, value = winners[0]
+        return Answer(value, 'verified_fuzzy_memory', provenance={'memory_id': ident, 'similarity': best})
+
     def _resolve(self, q, app, descriptor, profile):
         from .field_mapping import REJECTED_FIELD
         mapped_key, policy = descriptor.semantic_key, descriptor.policy
         if policy == 'DO_NOT_ANSWER':
+            return None
+        # A verified current-authorization fact has one fixed representation.
+        # Its label must independently match, even if supplied metadata is stale.
+        from .question_keywords import match, authorization_answer
+        if (mapped_key == 'work_authorization.us_authorized'
+                and match(q.label) == mapped_key and policy != 'REQUIRE_USER'
+                and fact(profile, mapped_key) is True
+                and q.kind in {'text', 'textarea', 'select', 'radio', 'checkbox', 'combobox', 'multiselect'}):
+            value = authorization_answer(q.kind, q.options)
+            if value is None:
+                return None
+            try:
+                validate_answer(q, value)
+            except (ValueError, TypeError):
+                return None
+            return Answer(value, 'profile:' + mapped_key, evidence=[mapped_key])
+        if mapped_key == 'work_authorization.us_authorized' and match(q.label) != mapped_key:
             return None
         row = self._memory.get((normalize(q.label), q.scope))
         from .concepts import REGISTRY
@@ -214,6 +294,10 @@ class AnswerResolver:
                 return Answer(value, AFFIRMATIVE, provenance={'rule': 'affirmative-keywords-v1'})
         if policy == 'REQUIRE_USER':
             return None
+        if row is None and mapped_key != REJECTED_FIELD:
+            fuzzy = self._fuzzy_answer(q, app, descriptor, stored)
+            if fuzzy:
+                return fuzzy
         from .question_rules import resolve as resolve_keyword_memory
         reusable = resolve_keyword_memory(self._settings, q, descriptor, self.snapshot.revision)
         if reusable:

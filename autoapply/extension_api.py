@@ -225,6 +225,7 @@ def remember(dashboard, payload):
         descriptor = resolution.descriptor
         q.scope, q.semantic_key, q.policy = descriptor.scope, descriptor.semantic_key, descriptor.policy
         provenance = dict(signature=descriptor.signature, profile_revision=resolution.profile_revision,
+                          field=dict(label=q.label, kind=q.kind, options=q.options),
                           provenance=dict(canonical_profile_revision=dashboard.config.profile_snapshot().revision))
         # Same verified store and signatures as Database.save_answer; no receipts,
         # lifecycle transitions or history exports are needed for extension input.

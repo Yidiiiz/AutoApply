@@ -471,3 +471,26 @@ def test_first_work_experience_facts(http_dashboard, config):
     assert status == 200
     assert [answer['value'] for answer in result['answers']] == ['Engineer', 'Fixture Employer', '8', '2024', True]
     assert all(answer['status'] == 'RESOLVED' for answer in result['answers'])
+
+
+@pytest.mark.parametrize('kind', ['checkbox', 'textarea'])
+def test_zipline_authorization_answers(http_dashboard, kind):
+    from test_question_keywords import ZIPLINE_LABEL, ZIPLINE_OPTIONS
+    from autoapply.question_keywords import AUTHORIZATION_STATEMENT
+    field = dict(key='auth', label=ZIPLINE_LABEL, kind=kind, required=True,
+                 options=ZIPLINE_OPTIONS if kind == 'checkbox' else [])
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers',
+                           dict(url='https://fixture.test/job', fields=[field]))
+    assert status == 200
+    answer = result['answers'][0]
+    assert answer['status'] == 'RESOLVED'
+    assert answer['value'] == (ZIPLINE_OPTIONS[0] if kind == 'checkbox' else AUTHORIZATION_STATEMENT)
+
+
+def test_extension_fuzzy_saved_answer(http_dashboard):
+    payload = dict(url='https://fixture.test/job', label='What is your favorite local animal?', kind='text', value='Fox')
+    assert ext(http_dashboard, 'POST', '/ext/remember', payload)[0] == 200
+    field = dict(key='animal', label='Please provide your favorite local animal', kind='text')
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url=payload['url'], fields=[field]))
+    assert status == 200 and result['answers'][0]['value'] == 'Fox'
+    assert result['answers'][0]['source'] == 'verified_fuzzy_memory'
