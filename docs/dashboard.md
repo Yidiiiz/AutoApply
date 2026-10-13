@@ -609,3 +609,28 @@ Short token subsets alone can over-merge, while
 embeddings add dependencies; this follows the deterministic cascade in
 [the matching research](question-matching-research-2026-10-06.md). Similarity and
 category overrides are never consulted to answer application questions.
+
+
+Queue and Needs you rows have Select for Chrome checkboxes. Select top N adds
+applications in the current filtered order. Run in Chrome (N) starts the selected
+queue; the status panel shows each result and Cancel run skips unfinished items.
+Pair the extension in Settings. If it has not polled for 15 seconds, the panel
+shows an Open Chrome hint. Discovery uses an MV3 alarm (at most 30 seconds while
+asleep); an awake runner polls every three seconds.
+
+The extension opens and fills one tab at a time, including exact Apply navigation
+links outside forms. Tabs remain open. It never presses submission buttons.
+The side panel shows Run: current/total and Pause/Resume; pause takes effect after
+the current fill. Revisit a filled tab to see its saved prompts in the panel.
+Unresolved answers or cover-letter questions report needs_input.
+Combobox scanning opens only unanswered, unresolved menus; profile answers go
+directly to search. Autofill results include scan_ms and options_ms timings.
+
+Chrome selection uses a compact checkbox at the left of Queue and Needs you lists,
+and a corner checkbox on grid cards. The header checkbox selects or clears the
+currently visible page, respecting its filter. Run in Chrome posts the selected IDs.
+
+When no editable fields are present, Autofill follows a clearly labeled Apply
+entry and chooses Apply Manually in the Workday dialog. Sign-in pages stop with
+**Sign in to Workday in this tab, then press Autofill** and report needs_input.
+Credentials, Next, Save and Continue, and final submission remain manual.

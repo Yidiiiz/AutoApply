@@ -19,6 +19,7 @@ RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 @pytest.fixture
 def extension_server():
     requests = []
+    run = {"items": [], "index": 0}
     canned = {
         "Full name *": "Fixture Student", "Email": "student@example.test",
         "Phone": "2025550100", "About you": "I build local tools.",
@@ -62,7 +63,8 @@ def extension_server():
                 self.ext(None)
                 return
             file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
-                    "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html"}.get(self.path)
+                    "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
+                    "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html"}.get(self.path)
             if not file:
                 self.send_error(404)
                 return
@@ -84,7 +86,21 @@ def extension_server():
             if self.headers.get("Origin") and not self.headers["Origin"].startswith("chrome-extension://"):
                 self.response(403, {"error": "Wrong fixture origin"})
                 return
-            if self.path == "/ext/ping":
+            if self.path == "/ext/fixture-start":
+                base = f"http://127.0.0.1:{self.server.server_port}"
+                run.update(items=[dict(application_id=1, url=base + ("/workday-job.html" if payload.get("workday") else "/job.html"), company="Fixture", title="One", index=1, total=2),
+                                  dict(application_id=2, url=base + "/batch-two.html", company="Fixture", title="Two", index=2, total=2)], index=0)
+                self.response(200, {"ok": True})
+            elif self.path == "/ext/run/next":
+                if run["index"] < len(run["items"]):
+                    item = run["items"][run["index"]]
+                    run["index"] += 1
+                    self.response(200, item)
+                else:
+                    self.response(200, {"done": True})
+            elif self.path in {"/ext/run/result", "/ext/run/status"}:
+                self.response(200, {"ok": True})
+            elif self.path == "/ext/ping":
                 self.response(200, {"ok": True, "profile_name": "Fixture Student"})
             elif self.path == "/ext/match":
                 self.response(200, {"application_id": 42, "company": "Fixture Company", "title": "Fixture Intern"})
@@ -294,11 +310,13 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     assert page.evaluate('uploadEvents') == [['resume', 'input'], ['resume', 'change']]
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
     fields = {field['label']: field for field in result['fields']}
-    # Search-only menus may start empty; other editable menus retain visible choices.
+    # Resolved choices go directly to the filler without scan-time menu collection.
+    assert result["timings"]["scan_ms"] < 1000
+    assert result["timings"].get("options_ms", 0) == 0
     assert fields['School']['options'] == []
-    assert fields['Degree']['options'] == ["Bachelor's Degree", "Master's Degree"]
-    assert fields['Discipline']['options'] == ['Computer Science', 'Mechanical Engineering']
-    assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == ['Spring Co-Op', 'Summer Internship', 'Both']
+    assert fields['Degree']['options'] == []
+    assert fields['Discipline']['options'] == []
+    assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == []
     assert all(field['options'] == [] for field in payload['fields'] if field['kind'] == 'combobox')
     assert all(fields[label]['section'] == 'Education' for label in ('Start date month', 'Start date year', 'End date month', 'End date year'))
     assert fields['Resume/CV *']['kind'] == fields['Cover Letter']['kind'] == 'file'
@@ -361,7 +379,7 @@ def test_async_school_searches_beyond_first_page(loaded_extension, extension_ser
     if mode == 'failure':
         assert searches[-1]['term'] == ''
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
-    assert result['fields'][0]['options'] == [f'Unrelated School {i + 1}' for i in range(10)]
+    assert result['fields'][0]['options'] == []  # Resolved search avoids opening the menu during scanning.
     assert payload['fields'][0]['options'] == []
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
@@ -557,3 +575,87 @@ def test_preselected_country_and_replaced_upload(loaded_extension, extension_ser
     page.wait_for_function("document.querySelector('#cover_letter').files.length === 1")
     expect(page.locator('.filename')).to_have_text('fixture-cover.pdf')
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
+def test_chrome_run_opens_fills_and_keeps_two_tabs(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused: true, chromeRun: {paused: true, index: 0, total: 0}})")
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    worker.evaluate("""async server => {
+        await fetch(server + '/ext/fixture-start', {method:'POST', headers:{'X-AutoApply-Key':'fixture-pairing-key', 'Content-Type':'application/json'}, body:'{}'});
+    }""", server)
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    expect(panel.locator('#run-pause')).to_have_text('Resume run')
+    panel.locator('#run-pause').click()
+    expect(panel.locator('#chrome-run-status')).to_contain_text('Run: 2/2', timeout=30000)
+    expect(panel.locator('#chrome-run-status')).to_contain_text('(idle)', timeout=30000)
+    results = [payload for path, _, payload in requests if path == '/ext/run/result']
+    assert [(item['application_id'], item['state']) for item in results] == [(1, 'filled'), (2, 'filled')]
+    pages = [page for page in context.pages if page.url in {server + '/batch-one.html', server + '/batch-two.html'}]
+    assert len(pages) == 2
+    for page in pages:
+        expect(page.locator('#name')).to_have_value('Fixture Student')
+        expect(page.locator('#email')).to_have_value('student@example.test')
+        expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
+        assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+    answers = [payload for path, _, payload in requests if path == '/ext/answers']
+    assert [payload['application_id'] for payload in answers] == [1, 2]
+    assert all(next(field for field in payload['fields'] if field['label'] == 'Phone country *')['answered'] for payload in answers)
+    panel.locator('#run-pause').click()
+    expect(panel.locator('#chrome-run-status')).to_contain_text('(paused)')
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_workday_entry_stops_at_sign_in(loaded_extension, extension_server, batch):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused: true})")
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    detail = "Sign in to Workday in this tab, then press Autofill"
+    if batch:
+        worker.evaluate("""async server => {
+            await fetch(server + '/ext/fixture-start', {method:'POST', headers:{'X-AutoApply-Key':'fixture-pairing-key', 'Content-Type':'application/json'}, body:JSON.stringify({workday:true})});
+            await chrome.storage.session.set({chromeRunPaused:false});
+            await globalThis.autoApplyRunTick();
+        }""", server)
+        results = [payload for endpoint, _, payload in requests if endpoint == '/ext/run/result']
+        assert results[0]['state'] == 'needs_input'
+        assert results[0]['detail'] == detail
+        page = next(page for page in context.pages if page.url == server + '/workday-signin.html')
+    else:
+        page = context.new_page()
+        page.goto(server + '/workday-job.html')
+        result = worker.evaluate("""async url => {
+            const [tab] = await chrome.tabs.query({url});
+            return globalThis.autoApplyAutofill(tab.id);
+        }""", page.url)
+        assert result['state'] == 'needs_input'
+        assert result['detail'] == detail
+        assert not result.get('error')
+    expect(panel.locator('#progress')).to_have_text(detail)
+    expect(page.locator('#email')).to_have_value('')
+    expect(page.locator('#password')).to_have_value('')
+    assert page.evaluate('credentialInputs') == 0
+    assert page.evaluate('[sessionStorage.applyClicks,sessionStorage.manualClicks,sessionStorage.wrongEntry,sessionStorage.submissions]') == ['1', '1', None, None]
+    assert not any(payload and payload.get('url') == server + '/workday-signin.html' for endpoint, _, payload in requests if endpoint == '/ext/answers')
+
+
+def test_generic_sign_in_stops_before_profile_answers(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + '/workday-signin.html')
+    page.evaluate("document.querySelectorAll('[data-automation-id]').forEach(el=>el.removeAttribute('data-automation-id'))")
+    result = worker.evaluate("""async url => {
+        const [tab] = await chrome.tabs.query({url});
+        return globalThis.autoApplyAutofill(tab.id);
+    }""", page.url)
+    assert result['state'] == 'needs_input'
+    assert not result.get('error')
+    assert page.evaluate('credentialInputs') == 0
+    assert not any(endpoint == '/ext/answers' for endpoint, _, _ in requests)

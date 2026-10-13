@@ -3,7 +3,7 @@
   "name": "AutoApply",
   "version": "0.1.0",
   "description": "Fill application forms from your paired local AutoApply dashboard. Submission stays manual.",
-  "permissions": ["storage", "tabs", "scripting", "sidePanel"],
+  "permissions": ["storage", "tabs", "scripting", "sidePanel", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": {"service_worker": "background.js", "type": "module"},
   "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle"}],

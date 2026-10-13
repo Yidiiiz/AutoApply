@@ -232,9 +232,14 @@ def test_run_queue(http_dashboard, config, db, listing):
     status, run, _ = web(http_dashboard, '/api/ext-run', dict(application_ids=ordered))
     assert status == 200 and [i['application_id'] for i in run['items']] == ordered
     assert run['current'] is None
+    assert web(http_dashboard, '/api/ext-run', dict(application_ids=ids))[0] == 409
     for index, state in enumerate(('needs_input', 'filled')):
         assert ext(http_dashboard, 'GET', '/ext/run/next')[1]['application_id'] == ordered[index]
+        assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(wait=True)
+        status_run = ext(http_dashboard, 'GET', '/ext/run/status')[1]
+        assert status_run['poll_age_seconds'] < 2
         assert request(http_dashboard[0], 'GET', '/api/ext-run')[1]['current'] == ordered[index]
+        assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='filled', run_id='stale'))[0] == 409
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='submitted'))[0] == 400
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state=state, detail='Test'))[0] == 200
     assert web(http_dashboard, '/api/ext-run/cancel')[0] == 200

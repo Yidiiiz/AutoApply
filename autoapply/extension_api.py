@@ -5,6 +5,8 @@ import calendar
 from dataclasses import replace
 import json
 import re
+import time
+import uuid
 from urllib.parse import urlsplit
 
 from . import answers, cv, descriptions, question_rules
@@ -296,10 +298,18 @@ def cover_letter(dashboard, payload):
                                            application_id=application_id, extension=True)
 
 
+def extension_run_status(dashboard, payload):
+    with dashboard._ext_mutex:
+        dashboard._ext_last_poll = time.monotonic()
+    return run_status(dashboard, payload)
+
+
 def run_status(dashboard, payload):
     with dashboard._ext_mutex:
         items = [dict(item) for item in dashboard._ext_run]
-    return dict(items=items, current=next((i['application_id'] for i in items if i['state'] == 'opened'), None))
+        last_poll = getattr(dashboard, '_ext_last_poll', None)
+    return dict(items=items, current=next((i['application_id'] for i in items if i['state'] == 'opened'), None),
+                poll_age_seconds=time.monotonic() - last_poll if last_poll is not None else None)
 
 
 def run_start(dashboard, payload):
@@ -317,7 +327,10 @@ def run_start(dashboard, payload):
     if any(value not in available or not available[value]['url'] for value in ids):
         raise SettingsRejected('Applications must be in the current priority or manual lists')
     with dashboard._ext_mutex:
-        dashboard._ext_run = [dict(application_id=value, **{k: available[value][k] for k in ('company', 'title', 'url')},
+        if any(item['state'] in {'pending', 'opened'} for item in dashboard._ext_run):
+            raise SettingsRejected('Cancel the active Chrome run first', status=409)
+        run_id = uuid.uuid4().hex
+        dashboard._ext_run = [dict(application_id=value, run_id=run_id, **{k: available[value][k] for k in ('company', 'title', 'url')},
                                    state='pending', detail='') for value in ids]
     return run_status(dashboard, {})
 
@@ -332,10 +345,14 @@ def run_cancel(dashboard, payload):
 
 def run_next(dashboard, payload):
     with dashboard._ext_mutex:
+        dashboard._ext_last_poll = time.monotonic()
+        if any(item['state'] == 'opened' for item in dashboard._ext_run):
+            return dict(wait=True)
         for item in dashboard._ext_run:
             if item['state'] == 'pending':
                 item['state'] = 'opened'
-                return {k: item[k] for k in ('application_id', 'url', 'company', 'title')}
+                return dict(**{k: item[k] for k in ('application_id', 'url', 'company', 'title', 'run_id')},
+                            index=dashboard._ext_run.index(item) + 1, total=len(dashboard._ext_run))
     return dict(done=True)
 
 
@@ -346,7 +363,7 @@ def run_result(dashboard, payload):
         raise SettingsRejected('Invalid result state or detail')
     with dashboard._ext_mutex:
         item = next((i for i in dashboard._ext_run if i['application_id'] == application_id), None)
-        if not item or item['state'] != 'opened':
+        if not item or item['state'] != 'opened' or payload.get('run_id', item['run_id']) != item['run_id']:
             raise SettingsRejected('Application is not open in this run', status=409)
         item.update(state=state, detail=detail)
     return dict(ok=True)
@@ -357,7 +374,7 @@ ROUTES = {('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
           ('POST', '/ext/cover-letter'): cover_letter,
           ('GET', '/ext/resume'): resume, ('GET', '/ext/run/next'): run_next,
-          ('POST', '/ext/run/result'): run_result}
+          ('POST', '/ext/run/result'): run_result, ('GET', '/ext/run/status'): extension_run_status}
 
 
 def dispatch(dashboard, payload, *, method, path):

@@ -203,11 +203,37 @@
     };
   }
 
+  function signInPage() {
+    return Boolean(document.querySelector('[data-automation-id="signInContent"],[data-automation-id="createAccountLink"]') ||
+      (document.querySelector('input[type="password"]') &&
+        /sign[\s-]*in|log[\s-]*in|create\s+(?:an?\s+)?account/i.test(document.body.innerText)));
+  }
+
+  function manualEntry() {
+    return Array.from(document.querySelectorAll('[data-automation-id="applyManually"]')).find(visible);
+  }
+
+  function enterApplication() {
+    if (signInPage()) return false;
+    const manual = manualEntry();
+    const entry = manual || Array.from(document.querySelectorAll('button,a[href],[role="button"]')).find(element =>
+      visible(element) && /^(apply|apply for this job)$/i.test((element.getAttribute('aria-label') || element.textContent).trim()));
+    if (!entry) return false;
+    // Exact entry labels only: never Next, Save and Continue, or Submit.
+    if (entry.tagName === 'A') {
+      const url = new URL(entry.href);
+      if (!/^https?:$/.test(url.protocol)) return false;
+      location.assign(url.href);
+    } else entry.click();
+    return true;
+  }
+
   async function scan() {
+    const started = performance.now();
     records = new Map();
     const fields = [];
     const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"]'))
-      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : visible(element)) && !["hidden", "submit", "button", "reset", "image", "password"].includes(element.type) &&
+      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : visible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox")) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
@@ -235,28 +261,43 @@
       keys.add(key);
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
-      if (kind === "combobox") {
-        if (!comboSelection(element) && !clean(comboInput(element)?.value)) {
-          try {
-            openCombo(element);
-            // Retain the available choices even for editable or paginated menus.
-            options = (await settledComboOptions(element, 2000)).map(text);
-          } finally { closeCombo(element); }
-        }
-      }
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
         options, ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
         section: sectionHint(element), max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
     }
-    return {page: pageInfo(), fields};
+    return {page: pageInfo(), fields, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+  }
+
+  async function collectOptions(keys) {
+    const started = performance.now(), fields = [];
+    for (const key of keys) {
+      const record = records.get(key);
+      if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
+      try {
+        openCombo(record.element);
+        record.field.options = (await settledComboOptions(record.element, 700)).map(text);
+        fields.push({...record.field});
+      } finally { closeCombo(record.element); }
+    }
+    return {fields, options_ms: Math.round(performance.now() - started)};
+  }
+
+  function phoneCountrySelection(element) {
+    const container = comboContainer(element);
+    const identity = [label(element), element.id, element.name, container.className].join(" ");
+    const shown = text(container);
+    // Country controls next to a phone input often render only a flag and dial code.
+    const phone = /phone|dial|calling|country.code/i.test(identity) ||
+      container.parentElement?.querySelector('input[type="tel"]');
+    return phone && /\+\d{1,4}\b/.test(shown) ? shown : "";
   }
 
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return element.files.length > 0;
-    if (field.kind === "combobox") return Boolean(comboSelection(element) || clean(comboInput(element)?.value));
+    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || clean(comboInput(element)?.value));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
       !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
     return Boolean(clean(element.isContentEditable || !("value" in element) ? element.textContent : element.value));
@@ -295,11 +336,11 @@
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
       const searches = [...new Set([clean(value), prefix])];
-      let option = best(await settledComboOptions(element, 1000), value, text);
+      let option = best(await settledComboOptions(element, 350), value, text);
       for (const search of option ? [] : searches) {
         if (!searchCombo(element, search)) break;
         // Keep waiting for a match even when an unrelated first page stays rendered.
-        option = await waitFor(() => best(comboOptions(element), value, text), 6000);
+        option = await waitFor(() => best(comboOptions(element), value, text), 2500);
         if (option) break;
       }
       if (!option) return false;
@@ -327,6 +368,7 @@
   }
 
   async function fill(answers, files = {}) {
+    const started = performance.now();
     const summary = {filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
     for (const answer of answers) {
       const record = records.get(answer.key);
@@ -391,7 +433,8 @@
         summary.filled++;
       } catch { unresolved(false); }
     }
+    summary.fill_ms = Math.round(performance.now() - started);
     return summary;
   }
-  globalThis.autoApplyContent = {scan, fill};
+  globalThis.autoApplyContent = {scan, collectOptions, fill, enterApplication};
 })();

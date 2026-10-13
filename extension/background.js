@@ -4,7 +4,9 @@ chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true}).catch(console.
 let running = false;
 
 async function report(result) {
-  await chrome.storage.session.set({lastResult: result});
+  const {tabResults = {}} = await chrome.storage.session.get("tabResults");
+  if (result.tabId) tabResults[result.tabId] = result;
+  await chrome.storage.session.set({lastResult: result, tabResults});
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
   return result;
 }
@@ -18,7 +20,7 @@ async function scan(tabId) {
   const page = {...(frames.find(frame => frame.frameId === 0) || frames[0]).result.page, url: tab.url};
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
-  return {tabId: tab.id, url: tab.url, page, fields};
+  return {tabId: tab.id, url: tab.url, page, fields, sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
 const context = result => ({page: result.page, application_id: result.matched?.application_id});
@@ -31,6 +33,7 @@ async function fill(result, values, files = {}) {
     const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId, frameIds: [frameId]}, world: "ISOLATED",
       func: (answers, attachments) => globalThis.autoApplyContent.fill(answers, attachments), args: [local, files]});
     const summary = frame.result;
+    result.timings.fill_ms = (result.timings.fill_ms || 0) + summary.fill_ms;
     result.summary.filled += summary.filled;
     result.summary.skipped += summary.skipped;
     for (const name of ["pending", "writing"]) {
@@ -61,20 +64,46 @@ async function coverLetter(result, answers) {
   }
 }
 
-export async function autofill(tabId) {
+export async function autofill(tabId, applicationId) {
   if (running) return {error: "Autofill is already running."};
   running = true;
   let result = {busy: true, progress: "Scanning application..."};
   try {
     await report(result);
-    result = {...await scan(tabId), busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
+    let scanned = await scan(tabId);
+    if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
+    result = {...scanned, busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
+    if (result.sign_in) {
+      result.state = "needs_input";
+      result.detail = result.progress = "Sign in to Workday in this tab, then press Autofill";
+      return await report({...result, busy: false});
+    }
     if (!result.fields.length) throw new Error("No visible editable fields found on this page.");
     await progress(result, "Matching profile answers...");
-    result.matched = await api("/ext/match", {url: result.url});
+    result.matched = applicationId ? {application_id: applicationId} : await api("/ext/match", {url: result.url});
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
     const fields = result.fields.map(field => field.options_partial ? {...field, options: []} : field);
-    const {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
+    let {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
+    // Resolve searchable profile answers first; open menus only for unresolved prompts.
+    const unresolved = result.fields.filter(field => field.kind === "combobox" && !field.answered &&
+      !answers.some(answer => answer.key === field.key && answer.status === "RESOLVED"));
+    const collected = [];
+    for (const frameId of new Set(unresolved.map(field => Number(field.key.split(":")[0])))) {
+      const prefix = frameId + ":", keys = unresolved.filter(field => field.key.startsWith(prefix)).map(field => field.key.slice(prefix.length));
+      const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId, frameIds: [frameId]},
+        func: keys => globalThis.autoApplyContent.collectOptions(keys), args: [keys]});
+      result.timings.options_ms = (result.timings.options_ms || 0) + frame.result.options_ms;
+      for (const field of frame.result.fields) {
+        const updated = {...field, key: prefix + field.key};
+        Object.assign(result.fields.find(item => item.key === updated.key), updated);
+        collected.push(updated);
+      }
+    }
+    if (collected.length) {
+      const resolved = await api("/ext/answers", {...context(result), url: result.url, fields: collected});
+      answers = answers.map(answer => resolved.answers.find(item => item.key === answer.key) || answer);
+    }
     const files = {};
     if (answers.some(answer => answer.status === "FILE" && answer.value === "resume" && !result.fields.find(field => field.key === answer.key)?.answered)) files.resume = await api("/ext/resume");
     await fill(result, answers, files);
@@ -131,3 +160,113 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.commands.onCommand.addListener(command => { if (command === "autofill") autofill(); });
+
+// Alarms wake a suspended MV3 worker; the short timer advances an active run promptly.
+let batchBusy = false;
+async function saveRun(run, changePause = false) {
+  if (changePause) await chrome.storage.session.set({chromeRunPaused: Boolean(run.paused)});
+  const {chromeRunPaused = false} = await chrome.storage.session.get("chromeRunPaused");
+  run.paused = chromeRunPaused;
+  await chrome.storage.session.set({chromeRun: run});
+  await chrome.runtime.sendMessage({type: "run-status", run}).catch(() => {});
+}
+async function waitForTab(tabId) {
+  const end = Date.now() + 30000;
+  while (Date.now() < end) {
+    if ((await chrome.tabs.get(tabId)).status === "complete") {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if ((await chrome.tabs.get(tabId)).status === "complete") return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("Application page did not finish loading.");
+}
+async function openApplication(result) {
+  // A job landing page can lead through Workday's entry dialog before sign-in.
+  for (let step = 0; step < 2; step++) {
+    const clicked = await chrome.scripting.executeScript({target: {tabId: result.tabId, allFrames: true},
+      func: () => globalThis.autoApplyContent?.enterApplication()});
+    if (!clicked.some(frame => frame.result)) break;
+    const end = Date.now() + 10000;
+    do {
+      await waitForTab(result.tabId);
+      result = await scan(result.tabId);
+      if (result.sign_in || result.fields.length || result.manual_entry) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < end);
+    if (result.sign_in || result.fields.length) break;
+  }
+  return result;
+}
+export async function runTick() {
+  if (batchBusy || running) return;
+  batchBusy = true;
+  let {chromeRun: run = {paused: false, index: 0, total: 0}} = await chrome.storage.session.get("chromeRun");
+  try {
+    const {chromeRunPaused = false} = await chrome.storage.session.get("chromeRunPaused");
+    if (chromeRunPaused) return;
+    if (!run.current) {
+      const item = await api("/ext/run/next");
+      if (item.wait) return;
+      if (item.done) { run.active = false; await saveRun(run); return; }
+      run = {...run, active: true, current: item, index: item.index || run.index + 1, total: item.total || run.total, error: ""};
+      await saveRun(run);
+    }
+    if (!run.result) {
+      try {
+        if (!run.tabId) {
+          const tab = await chrome.tabs.create({url: run.current.url, active: true});
+          run.tabId = tab.id;
+          await saveRun(run);
+        }
+        await waitForTab(run.tabId);
+        const result = await autofill(run.tabId, run.current.application_id);
+        const prompts = result.pending?.length || result.writing?.length || result.coverQuestions?.length;
+        run.result = {application_id: run.current.application_id,
+          state: result.state === "needs_input" ? "needs_input" : result.error ? "failed" : prompts ? "needs_input" : result.summary?.errors.length ? "failed" : "filled",
+          detail: (result.detail || result.error || result.summary?.errors.join("; ") || result.progress || "").slice(0, 2000)};
+      } catch (error) {
+        run.result = {application_id: run.current.application_id, state: "failed", detail: error.message.slice(0, 2000)};
+      }
+      run.result.run_id = run.current.run_id;
+      await saveRun(run);
+    }
+    try { await api("/ext/run/result", run.result); }
+    catch (error) {
+      // Cancellation (or a replaced completed run) makes this result stale.
+      if (!/not open in this run/i.test(error.message)) throw error;
+    }
+    delete run.current; delete run.tabId; delete run.result;
+    await saveRun(run);
+  } catch (error) { run.error = error.message; await saveRun(run); }
+  finally { batchBusy = false; }
+}
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "chrome-run") runTick(); });
+chrome.alarms.create("chrome-run", {periodInMinutes: 0.5});
+setInterval(() => {
+  if (batchBusy) api("/ext/run/status").catch(() => {});
+  else runTick();
+}, 3000);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.key || changes.server)) runTick();
+});
+chrome.tabs.onActivated.addListener(async ({tabId}) => {
+  const {tabResults = {}} = await chrome.storage.session.get("tabResults");
+  if (tabResults[tabId]) await chrome.storage.session.set({lastResult: tabResults[tabId]});
+});
+chrome.tabs.onRemoved.addListener(async tabId => {
+  const {tabResults = {}} = await chrome.storage.session.get("tabResults");
+  delete tabResults[tabId]; await chrome.storage.session.set({tabResults});
+});
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")) || message.type !== "run-pause") return;
+  (async () => {
+    const {chromeRun: run = {index: 0, total: 0}} = await chrome.storage.session.get("chromeRun");
+    run.paused = Boolean(message.paused); await saveRun(run, true);
+    if (!run.paused) runTick();
+    return run;
+  })().then(respond, error => respond({error: error.message}));
+  return true;
+});
+globalThis.autoApplyRunTick = runTick;
+runTick();

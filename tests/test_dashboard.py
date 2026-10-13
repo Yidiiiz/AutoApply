@@ -1850,7 +1850,7 @@ const originalReload=reload;reload=async()=>[];
  const generating=generateCV(app);assert.deepEqual(cvCalls,[['cv',{application_id:4503}]]);assert.ok(generatingCVs.has(4503));
  const busyCV=cvButton(app);assert.equal(busyCV.disabled,true);assert.equal(busyCV.attributes['aria-busy'],'true');assert.equal(busyCV.children[0].attributes.class,'icon spinning');
  finishCV({file:'/api/cv/4503',warnings:['Add profile projects']});await generating;
- assert.deepEqual(cvCalls[1],['http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token),'_blank','noopener,noreferrer']);
+ assert.deepEqual(cvCalls[1],['http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token),'_blank']);
  assert.equal(document.getElementById('toast-message').textContent,'Add profile projects');assert.equal(generatingCVs.has(4503),false);assert.equal(cvButton(app).disabled,false);
  let questionCalls=[];post=async(action,body)=>{questionCalls.push(body);return body.answers?{file:'/api/cv/4503',warnings:[]}:{questions:['Why this role?', 'Start date?']};};
  const questionRun=generateCV(app);await Promise.resolve();
@@ -2038,12 +2038,12 @@ pages.priority=22;models.priority=sample.slice(0,70);draw('priority');assert.equ
 views.priority='grid';draw('priority');assert.ok(body.classes.has('grid'));assert.equal(body.children.length,21);
 const filter=testTools.find(el=>el.dataset.tools==='priority').children[0];filter.value='company 1';filter.listeners.input();assert.equal(pages.priority,1);
 filter.value='';filter.listeners.input();models.priority=sample.slice(0,70);draw('priority');
-const rank=body._head.children[0],application=body._head.children[1];
+const rank=body._head.children[1],application=body._head.children[2];
 assert.equal(rank.attributes['aria-sort'],'ascending');rank.children[0].click();assert.equal(rank.attributes['aria-sort'],'descending');assert.equal(rank.children[0].children[1].textContent,'\u2193');assert.equal(body.children[1].dataset.applicationId,10069);
 rank.children[0].click();assert.equal(rank.attributes['aria-sort'],'ascending');assert.equal(body.children[1].dataset.applicationId,10000);
 for(let i=0;i<4;i++)application.children[0].click();assert.equal(application.attributes['aria-sort'],'descending');assert.equal(rank.attributes['aria-sort'],'none');
 assert.deepEqual(JSON.parse(storage.get('autoapply.sort.priority')),{key:'company',direction:'descending'});assert.equal(pages.priority,1);
-for(const id of tabIds){const head=document.getElementById(bodyIds[id])._head;for(const header of head.children){assert.equal(header.attributes.role,'columnheader');assert.equal(header.children[0].tag,'button');}}
+for(const id of tabIds){const head=document.getElementById(bodyIds[id])._head;for(const header of head.children.filter(el=>el!==head._chromeSelection)){assert.equal(header.attributes.role,'columnheader');assert.equal(header.children[0].tag,'button');}}
 const stable=[{company:'alpha',rank:10,posted_at:'2026-10-01'},{company:'Alpha',rank:2,posted_at:'2025-10-01'},{company:'Beta',rank:1,posted_at:'2024-10-01'}];
 sorts.priority={key:'company',direction:'ascending'};assert.deepEqual(sortedItems('priority',stable),stable);
 sorts.priority={key:'rank',direction:'ascending'};assert.deepEqual(sortedItems('priority',stable).map(a=>a.rank),[1,2,10]);
@@ -2114,3 +2114,46 @@ def test_content_scroll_and_pagination_layout_offline():
             assert all(button.is_visible() for button in page.locator('#rows .list-head button').all())
         finally:
             browser.close()
+
+
+def test_javascript_chrome_selection_status_cancel_and_cover_popup(tmp_path):
+    import ast
+    executable = shutil.which('node')
+    if not executable:
+        pytest.skip('Node is unavailable')
+    tree = ast.parse(Path(__file__).read_text(encoding='utf-8'))
+    fn = next(f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == 'test_javascript_display_formatting_and_renderers')
+    assignment = next(n for n in fn.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'harness' for t in n.targets))
+    harness = ast.literal_eval(assignment.value)
+    script = PAGE.split('<script nonce="__TOKEN__">', 1)[1].split('</script>', 1)[0]
+    script = script[:script.index('restoreSearch();loadSettings')]
+    checks = r"""
+(async()=>{
+const sample=[1,2,3].map(application_id=>({application_id,url:'https://fixture.test/'+application_id,company:'Fixture',title:'Intern'}));
+render({rows:sample,sweep:{}});renderManual({applications:[{...sample[0],application_id:4}]});
+const check=chromeCheckbox(sample[0]).children[0];check.checked=true;check.listeners.change();
+assert.deepEqual([...chromeSelected],[1]);assert.equal(document.getElementById('chrome-run-priority').textContent,'Run in Chrome (1)');
+const controls=document.getElementById('chrome-selection-priority');controls.children[0].children[0].value='2';controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
+const head=document.getElementById('rows')._head,all=head._chromeSelection.children[0];
+assert.equal(all.attributes['aria-label'],'Select all visible for Chrome in Queue');assert.equal(all.indeterminate,true);
+filters.priority='2';draw('priority');assert.equal(head._chromeItems.length,1);all.checked=true;all.listeners.change();assert.deepEqual([...chromeSelected],[1,2]);
+all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[1]);filters.priority='';draw('priority');all.checked=true;all.listeners.change();assert.deepEqual([...chromeSelected],[1,2,3]);
+all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[]);
+controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
+const compact=makeRow('priority',sample[0]);assert.equal(compact.children[0].className,'chrome-check');assert.equal(compact.children[0].textContent,'');assert.equal(compact.children[0].children[0].attributes['aria-label'],'Select #1 for Chrome');
+assert.equal(makeCard('priority',sample[0]).children[0].children[1].children[1].className,'chrome-check');
+let posted=[];post=async(action,body)=>{posted.push({action,body});return {items:[{...sample[0],state:action.endsWith('cancel')?'skipped':'pending'}],poll_age_seconds:null};};
+await startChromeRun();assert.deepEqual(posted[0],{action:'ext-run',body:{application_ids:[1,2]}});
+assert.equal(document.getElementById('chrome-run-panel').hidden,false);assert.match(document.getElementById('chrome-run-hint').textContent,/Open Chrome/);
+renderChromeRun({items:['pending','opened','filled','needs_input','failed','skipped'].map((state,i)=>({...sample[0],application_id:i+1,state})),poll_age_seconds:1});
+assert.deepEqual(document.getElementById('chrome-run-items').children.map(item=>item.dataset.state),['pending','opened','filled','needs_input','failed','skipped']);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
+await document.getElementById('chrome-run-cancel').listeners.click();assert.equal(posted[1].action,'ext-run/cancel');assert.equal(document.getElementById('chrome-run-cancel').disabled,true);
+post=async()=>({file:'/fixture.pdf',warnings:[]});let opened={opener:'original'},openArgs;window.open=(...args)=>{openArgs=args;return opened;};let fallback=0;coverLetterLink=()=>fallback++;
+await generateCV(sample[0]);assert.deepEqual(openArgs,['http://127.0.0.1:8765/fixture.pdf?token=__TOKEN__','_blank']);assert.equal(opened.opener,null);assert.equal(fallback,0);
+window.open=()=>null;await generateCV(sample[1]);assert.equal(fallback,1);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    path = tmp_path / 'chrome-run.js'
+    path.write_text(harness + script + checks, encoding='utf-8')
+    result = subprocess.run([executable, str(path)], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr

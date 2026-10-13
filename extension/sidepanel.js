@@ -173,3 +173,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local") connection();
 });
 render((await chrome.storage.session.get("lastResult")).lastResult); renderAnswer(); connection();
+
+let runPaused = false;
+function renderRun(run = {}) {
+  runPaused = Boolean(run.paused);
+  element("chrome-run-status").textContent = `Run: ${run.index || 0}/${run.total || 0}${runPaused ? " (paused)" : run.active ? "" : " (idle)"}${run.error ? " · " + run.error : ""}`;
+  element("run-pause").textContent = runPaused ? "Resume run" : "Pause run";
+}
+element("run-pause").onclick = async () => {
+  try { renderRun(await send({type: "run-pause", paused: !runPaused})); } catch (error) { showError(error); }
+};
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "session" && changes.chromeRun) renderRun(changes.chromeRun.newValue);
+});
+renderRun((await chrome.storage.session.get("chromeRun")).chromeRun);
