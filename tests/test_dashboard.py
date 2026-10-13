@@ -2125,6 +2125,8 @@ def test_javascript_chrome_selection_status_cancel_and_cover_popup(tmp_path):
     fn = next(f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == 'test_javascript_display_formatting_and_renderers')
     assignment = next(n for n in fn.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'harness' for t in n.targets))
     harness = ast.literal_eval(assignment.value)
+    harness = harness.replace('const setInterval=()=>{},setTimeout=()=>{},clearTimeout=()=>{};',
+                              'const scheduled=[];const setInterval=()=>{},setTimeout=fn=>{scheduled.push(fn);return scheduled.length},clearTimeout=()=>{};')
     script = PAGE.split('<script nonce="__TOKEN__">', 1)[1].split('</script>', 1)[0]
     script = script[:script.index('restoreSearch();loadSettings')]
     checks = r"""
@@ -2148,6 +2150,9 @@ assert.equal(document.getElementById('chrome-run-panel').hidden,false);assert.ma
 renderChromeRun({items:['pending','opened','filled','needs_input','failed','skipped'].map((state,i)=>({...sample[0],application_id:i+1,state})),poll_age_seconds:1});
 assert.deepEqual(document.getElementById('chrome-run-items').children.map(item=>item.dataset.state),['pending','opened','filled','needs_input','failed','skipped']);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
 await document.getElementById('chrome-run-cancel').listeners.click();assert.equal(posted[1].action,'ext-run/cancel');assert.equal(document.getElementById('chrome-run-cancel').disabled,true);
+scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/Chrome run finished: 1 skipped/);
+assert.equal(document.getElementById('chrome-last-run').hidden,false);document.getElementById('chrome-last-run').onclick();assert.equal(document.getElementById('chrome-run-panel').hidden,false);
+renderChromeRun({items:[{...sample[0],state:'filled'},{...sample[1],state:'needs_input'}]});scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/1 filled, 1 needs input/);
 post=async()=>({file:'/fixture.pdf',warnings:[]});let opened={opener:'original'},openArgs;window.open=(...args)=>{openArgs=args;return opened;};let fallback=0;coverLetterLink=()=>fallback++;
 await generateCV(sample[0]);assert.deepEqual(openArgs,['http://127.0.0.1:8765/fixture.pdf?token=__TOKEN__','_blank']);assert.equal(opened.opener,null);assert.equal(fallback,0);
 window.open=()=>null;await generateCV(sample[1]);assert.equal(fallback,1);

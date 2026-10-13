@@ -1,14 +1,27 @@
-﻿import {api} from "./api.js";
+import {api} from "./api.js";
 
-chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true}).catch(console.error);
+async function showSidebar(tabId, mode='open') {
+  const tab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
+  if(!tab?.id||!/^https?:/.test(tab.url||''))return;
+  const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
+  const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=frame?.result||mode;
+  await chrome.storage.session.set({sidebarTabs});
+}
+chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'toggle').catch(console.error));
+globalThis.autoApplySidebar=showSidebar;
 let running = false;
+const activeResults = new Map(), writingTasks = new Map();
+let reporting = Promise.resolve();
 
-async function report(result) {
+function report(result) {
+  reporting = reporting.catch(() => {}).then(async () => {
   const {tabResults = {}} = await chrome.storage.session.get("tabResults");
   if (result.tabId) tabResults[result.tabId] = result;
   await chrome.storage.session.set({lastResult: result, tabResults});
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
   return result;
+  });
+  return reporting;
 }
 
 async function scan(tabId) {
@@ -35,6 +48,8 @@ async function fill(result, values, files = {}) {
     const summary = frame.result;
     result.timings.fill_ms = (result.timings.fill_ms || 0) + summary.fill_ms;
     result.summary.filled += summary.filled;
+    result.completed ||= [];
+    for(const answer of summary.completed || []) {const item={...answer,key:prefix+answer.key};result.completed=result.completed.filter(old=>old.key!==item.key);result.completed.push(item); }
     result.summary.skipped += summary.skipped;
     for (const name of ["pending", "writing"]) {
       result[name] = result[name].filter(field => !field.key.startsWith(prefix) || !local.some(value => prefix + value.key === field.key));
@@ -49,18 +64,21 @@ async function fill(result, values, files = {}) {
 async function progress(result, text) { result.progress = text; await report(result); }
 
 async function coverLetter(result, answers) {
-  await progress(result, "Generating cover letter... This can take up to 3 minutes.");
+  result.coverBusy = true;
+  result.coverProgress = "Writing cover letter...";
+  await report(result);
   const file = await api("/ext/cover-letter", {...context(result), ...(answers ? {answers} : {})});
+  if (activeResults.get(result.tabId) !== result) return;
   if (file.questions) {
     result.coverQuestions = file.questions;
     result.coverAnswers = answers || [];
-    result.progress = "Cover letter needs your input. Blank answers are allowed.";
+    result.coverProgress = "Cover letter needs your input. Blank answers are allowed.";
   } else {
     result.coverQuestions = [];
     result.coverFile = file;
     const fields = result.fields.filter(field => field.kind === "file" && /cover/i.test(field.label) && !field.answered);
     if (fields.length) await fill(result, fields.map(field => ({key: field.key, status: "FILE", value: "cover_letter"})), {cover_letter: file});
-    result.progress = fields.length ? "Cover letter generated. Check the attachment on the page." : "Cover letter ready to download.";
+    result.coverProgress = fields.length && !result.pending.some(field => fields.some(upload => upload.key === field.key)) ? "Cover letter attached" : fields.length ? "Cover letter attachment needs review" : "Cover letter ready to download.";
   }
 }
 
@@ -69,15 +87,19 @@ export async function autofill(tabId, application) {
   running = true;
   let result = {busy: true, progress: "Scanning application..."};
   try {
+    await showSidebar(tabId);
     await report(result);
     let scanned = await scan(tabId);
     if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
-    result = {...scanned, busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
+    activeResults.delete(scanned.tabId);
+    await showSidebar(scanned.tabId);
+    result = {...scanned, completed: [], busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
+    activeResults.set(result.tabId, result);
     const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
     const saved = autofillTabs[result.tabId] || {};
     result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.matched;
     result.matched ||= await api("/ext/match", {url: result.url});
-    autofillTabs[result.tabId] = {matched: result.matched};
+    autofillTabs[result.tabId] = {...saved, matched: result.matched};
     await chrome.storage.session.set({autofillTabs});
     if (result.matched.company) result.page.company = result.matched.company;
     if (result.matched.title) result.page.title = result.matched.title;
@@ -114,47 +136,76 @@ export async function autofill(tabId, application) {
     const files = {};
     if (answers.some(answer => answer.status === "FILE" && answer.value === "resume" && !result.fields.find(field => field.key === answer.key)?.answered)) files.resume = await api("/ext/resume");
     await fill(result, answers, files);
-    await report(result);
-    for (const field of [...result.writing].filter(field => field.kind !== "file")) {
-      await progress(result, `Writing: ${field.label} ... This can take up to 3 minutes.`);
-      try {
-        const written = await api("/ext/write", {...context(result), question: field.label, max_length: field.max_length,
-          instruction: field.max_length === null ? "" : `Use at most ${field.max_length} characters.`});
-        await fill(result, [{key: field.key, status: "RESOLVED", value: written.answer}]);
-        if (written.warning) result.summary.errors.push(`${field.label}: ${written.warning}`);
-      } catch (error) { result.summary.errors.push(`${field.label}: ${error.message}`); }
-      await report(result);
-    }
-    if (result.writing.some(field => field.kind === "file" && /cover/i.test(field.label))) {
-      try { await coverLetter(result); } catch (error) { result.summary.errors.push(error.message); }
-    }
     result.progress = result.workday_step ?
       `Workday step: ${result.workday_step} - filled ${result.summary.filled}, needs input ${result.pending.length}` : result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
   } catch (error) { result.error = error.message; }
   finally { running = false; result.busy = false; }
-  return report(result);
+  await report(result);
+  if (!result.error && result.writing?.length) {
+    const task = continueWriting(result).catch(error => {
+      result.summary.errors.push(error.message);
+      return report(result);
+    }).finally(() => { if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
+    writingTasks.set(result.tabId, task);
+  }
+  return result;
+}
+
+async function continueWriting(result) {
+  for (const field of [...result.writing].filter(field => field.kind !== "file")) {
+    if (!result.writing.some(item => item.key === field.key)) continue;
+    if (activeResults.get(result.tabId) !== result) return;
+    result.writingProgress = 'Writing: ' + field.label + '...';
+    await report(result);
+    try {
+      const written = await api("/ext/write", {...context(result), question: field.label, max_length: field.max_length,
+        instruction: field.max_length === null ? "" : 'Use at most ' + field.max_length + ' characters.'});
+      if (activeResults.get(result.tabId) !== result) return;
+      await fill(result, [{key: field.key, status: "RESOLVED", value: written.answer, source: "AI"}]);
+      result.writingProgress = 'Answer filled: ' + field.label;
+      if (written.warning) result.summary.errors.push(field.label + ': ' + written.warning);
+    } catch (error) { result.writingProgress = field.label + ': ' + error.message; result.summary.errors.push(result.writingProgress); }
+    if (activeResults.get(result.tabId) !== result) return;
+    await report(result);
+  }
+  if (activeResults.get(result.tabId) !== result) return;
+  if (result.writing.some(field => field.kind === "file" && /cover/i.test(field.label))) {
+    try { await coverLetter(result); }
+    catch (error) { result.coverProgress = 'Cover letter error: ' + error.message; result.summary.errors.push(result.coverProgress); }
+    finally { result.coverBusy = false; }
+    if (activeResults.get(result.tabId) === result) await report(result);
+  }
 }
 
 async function action(message) {
   if (message.type === "autofill") return autofill(message.tabId);
   if (message.type === "page-context") return scan(message.tabId);
   if (running) throw new Error("Wait for autofill to finish.");
-  const {lastResult: result} = await chrome.storage.session.get("lastResult");
+  const {lastResult, tabResults={}} = await chrome.storage.session.get(['lastResult','tabResults']);
+  const stored=message.tabId?tabResults[message.tabId]:lastResult;
+  const result=activeResults.get(stored?.tabId) || stored;
+  if (result?.tabId) activeResults.set(result.tabId, result);
   if (!result?.page) throw new Error("Run autofill on an application first.");
   if (message.type === "fill-answer") {
-    await fill(result, [{key: message.key, status: "RESOLVED", value: message.value}]);
-    if (message.remember) {
-      const field = result.fields.find(field => field.key === message.key);
+    await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, source: "you"}]);
+    const field = result.fields.find(field => field.key === message.key);
+    if (message.remember && field && !["textarea","file"].includes(field.kind)) {
       await api("/ext/remember", {...field, ...context(result), url: result.url, value: message.value});
+      result.saved = "Saved";
     }
+  } else if (message.type === 'undo-applied') {
+    await api('/ext/unapplied',{application_id:result.matched.application_id});result.applied=false;
+    const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+    if(autofillTabs[result.tabId]){delete autofillTabs[result.tabId].applied;delete autofillTabs[result.tabId].submitAt;autofillTabs[result.tabId].undone=true;await chrome.storage.session.set({autofillTabs});}
   } else if (message.type === "skip-answer") {
     result.pending = result.pending.filter(field => field.key !== message.key);
     result.summary.needs_input = result.pending.map(field => field.label);
   } else if (message.type === "cover-letter") {
+    if (result.coverBusy) return result;
     running = true; result.busy = true;
     try { await coverLetter(result, message.answers); }
-    catch (error) { result.error = error.message; }
-    finally { running = false; result.busy = false; }
+    catch (error) { result.error = error.message; result.coverProgress = "Cover letter error: " + error.message; }
+    finally { running = false; result.busy = false; result.coverBusy = false; }
   }
   return report(result);
 }
@@ -185,11 +236,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter"].includes(message.type)) return;
+  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied"].includes(message.type)) return;
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });
-chrome.commands.onCommand.addListener(command => { if (command === "autofill") autofill(); });
+chrome.commands.onCommand.addListener(command => {
+  if(command==='autofill')autofill();
+  if(command==='toggle-sidebar')showSidebar(undefined,'toggle').catch(console.error);
+});
 
 // Alarms wake a suspended MV3 worker; the short timer advances an active run promptly.
 let batchBusy = false;
@@ -259,7 +313,9 @@ export async function runTick() {
           await saveRun(run);
         }
         await waitForTab(run.tabId);
+        await showSidebar(run.tabId);
         const result = await autofill(run.tabId, run.current);
+        await writingTasks.get(result.tabId);
         const prompts = result.pending?.length || result.writing?.length || result.coverQuestions?.length;
         run.result = {application_id: run.current.application_id,
           state: result.state === "needs_input" ? "needs_input" : result.error ? "failed" : prompts ? "needs_input" : result.summary?.errors.length ? "failed" : "filled",
@@ -298,7 +354,9 @@ chrome.tabs.onActivated.addListener(async ({tabId}) => {
 chrome.tabs.onRemoved.addListener(async tabId => {
   const {tabResults = {}} = await chrome.storage.session.get("tabResults");
   const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
+  activeResults.delete(tabId);
   delete tabResults[tabId]; delete autofillTabs[tabId]; pendingSteps.delete(tabId);
+  const {sidebarTabs={}}=await chrome.storage.session.get("sidebarTabs");delete sidebarTabs[tabId];await chrome.storage.session.set({sidebarTabs});
   await chrome.storage.session.set({tabResults, autofillTabs});
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -313,3 +371,42 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 });
 globalThis.autoApplyRunTick = runTick;
 runTick();
+
+const confirmingTabs=new Set();
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
+  const tabId=sender.tab.id;
+  if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
+  if(!['sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
+  (async()=>{
+    const {autofillTabs={},tabResults={},sidebarTabs={}}=await chrome.storage.session.get(['autofillTabs','tabResults','sidebarTabs']);
+    if(message.type==='sidebar-ready'){if(sidebarTabs[tabId])await showSidebar(tabId,sidebarTabs[tabId]);return;}
+    if(message.type==='sidebar-state'){sidebarTabs[tabId]=message.state;await chrome.storage.session.set({sidebarTabs});return;}
+    const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];
+    if(message.type==='user-answer'){
+      if(!result||result.url!==sender.tab.url||running)return;
+      const key=sender.frameId+':'+message.key,field=result.fields.find(field=>field.key===key);
+      if(!field||['file','password','hidden'].includes(field.kind))return;
+      const answer={...field,value:message.value,source:'you'};
+      result.completed=(result.completed||[]).filter(item=>item.key!==key);result.completed.push(answer);
+      result.pending=result.pending.filter(item=>item.key!==key);
+      result.writing=result.writing.filter(item=>item.key!==key);
+      result.summary.needs_input=result.pending.map(item=>item.label);
+      result.summary.needs_writing=result.writing.map(item=>item.label);
+      if(field.kind!=='textarea'&&message.value!==''&&message.value!==null){await api('/ext/remember',{...field,...context(result),url:result.url,value:message.value});result.saved='Saved';}
+      await report(result);return;
+    }
+    if(!authorized?.matched?.application_id||sender.frameId!==0)return;
+    if(message.type==='submit-intent'){delete authorized.undone;authorized.submitAt=Date.now();await chrome.storage.session.set({autofillTabs});return;}
+    if(authorized.applied||authorized.undone||confirmingTabs.has(tabId))return;
+    const url=new URL(sender.tab.url),strong=(/^(?:.+\.)?(?:greenhouse\.io|lever\.co)$/.test(url.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(url.pathname))||/^(?:.+\.)?ashbyhq\.com$/.test(url.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(url.pathname);
+    if(!strong&&(!authorized.submitAt||Date.now()-authorized.submitAt>120000))return;
+    if(!message.evidence||message.url!==sender.tab.url)return;
+    confirmingTabs.add(tabId);
+    try{
+      await api('/ext/applied',{application_id:authorized.matched.application_id,url:message.url,evidence:message.evidence});
+      authorized.applied=true;await chrome.storage.session.set({autofillTabs});
+      if(result){result.applied=true;result.progress='Marked as applied';await report(result);}
+    }finally{confirmingTabs.delete(tabId);}
+  })().then(respond,error=>respond({error:error.message}));return true;
+});

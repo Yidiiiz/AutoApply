@@ -456,7 +456,7 @@ class Dashboard:
         filename = (name + ' - Cover Letter - ' + job['company']) + path.suffix
         return path.read_bytes(), filename, path.suffix
 
-    def mark_applied(self, application_id, *, undo=False):
+    def mark_applied(self, application_id, *, undo=False, evidence=None):
         if type(application_id) is not int or not 0 < application_id <= 2**63 - 1:
             raise AppliedRejected(400, 'application_id must be a positive integer')
         if application_id in PROTECTED_APPLICATIONS:
@@ -475,11 +475,15 @@ class Dashboard:
                     db.set_setting(key, False)
                     db.event(application_id, 'USER_UNMARKED_APPLIED', 'DASHBOARD_MANUAL')
                     return dict(application_id=application_id)
+                if guard and evidence is not None and self._reversible(guard):
+                    return dict(application_id=application_id, marked_at=guard.get('marked_at'))
                 if guard:
                     raise AppliedRejected(409, 'application already marked or guarded')
                 marked_at = now()
                 db.set_setting(key, dict(permanent=False, source='DASHBOARD_MANUAL', marked_at=marked_at))
                 db.event(application_id, 'USER_MARKED_APPLIED', 'DASHBOARD_MANUAL')
+                if evidence is not None:
+                    db.event(application_id, 'EXT_SUBMISSION_CONFIRMED', evidence)
         return dict(application_id=application_id, marked_at=marked_at)
 
     def failed(self, days=14):

@@ -3,12 +3,61 @@
   "name": "AutoApply",
   "version": "0.1.0",
   "description": "Fill application forms from your paired local AutoApply dashboard. Submission stays manual.",
-  "permissions": ["storage", "tabs", "scripting", "sidePanel", "alarms"],
-  "host_permissions": ["<all_urls>"],
-  "background": {"service_worker": "background.js", "type": "module"},
-  "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "all_frames": true, "run_at": "document_idle"}],
-  "side_panel": {"default_path": "sidepanel.html"},
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
   "options_page": "options.html",
-  "action": {"default_title": "Open AutoApply"},
-  "commands": {"autofill": {"suggested_key": {"default": "Alt+Shift+F"}, "description": "Autofill the current page"}}
+  "action": {
+    "default_title": "Open AutoApply"
+  },
+  "commands": {
+    "autofill": {
+      "suggested_key": {
+        "default": "Alt+Shift+F"
+      },
+      "description": "Autofill the current page"
+    },
+    "toggle-sidebar": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Toggle AutoApply sidebar"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "sidepanel.html",
+        "sidepanel.js",
+        "sidepanel.css",
+        "shared.css",
+        "api.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }

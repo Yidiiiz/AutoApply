@@ -494,3 +494,17 @@ def test_extension_fuzzy_saved_answer(http_dashboard):
     status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url=payload['url'], fields=[field]))
     assert status == 200 and result['answers'][0]['value'] == 'Fox'
     assert result['answers'][0]['source'] == 'verified_fuzzy_memory'
+
+
+def test_detected_applied_evidence_idempotence_and_undo(http_dashboard, config, db, listing):
+    app_id = queue(db, config, listing, 1)[0]
+    payload = dict(application_id=app_id, url='https://example.test/thanks', evidence='Thank you for applying')
+    first = ext(http_dashboard, 'POST', '/ext/applied', payload)
+    assert first[0] == 200
+    assert ext(http_dashboard, 'POST', '/ext/applied', payload)[:2] == first[:2]
+    assert db.setting('duplicate_submission_guard:' + str(app_id))['source'] == 'DASHBOARD_MANUAL'
+    assert ext(http_dashboard, 'POST', '/ext/unapplied', dict(application_id=app_id))[0] == 200
+    assert db.setting('duplicate_submission_guard:' + str(app_id)) is False
+    protected_queue(db, listing)
+    assert ext(http_dashboard, 'POST', '/ext/applied', dict(payload, application_id=3556))[0] == 403
+    assert ext(http_dashboard, 'POST', '/ext/applied', dict(payload, evidence=''))[0] == 400

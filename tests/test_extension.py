@@ -1,6 +1,7 @@
 """Load the actual unpacked MV3 extension; all HTTP traffic is fixture-only."""
 import base64
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,9 @@ RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 def extension_server():
     requests = []
     run = {"items": [], "index": 0}
+    gates = {name: threading.Event() for name in ("write", "cover", "chat")}
+    for gate in gates.values():
+        gate.set()
     canned = {
         "Full name *": "Fixture Student", "Email": "student@example.test",
         "Phone": "2025550100", "About you": "I build local tools.",
@@ -64,7 +68,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -88,7 +92,14 @@ def extension_server():
             if self.headers.get("Origin") and not self.headers["Origin"].startswith("chrome-extension://"):
                 self.response(403, {"error": "Wrong fixture origin"})
                 return
-            if self.path == "/ext/fixture-start":
+            if self.path == "/ext/fixture-delay":
+                for name in payload.get("hold", []):
+                    gates[name].clear()
+                for name in payload.get("release", []):
+                    gates[name].set()
+                run.update(auto_cover=payload.get("auto_cover", run.get("auto_cover", False)))
+                self.response(200, {"ok": True})
+            elif self.path == "/ext/fixture-start":
                 base = f"http://127.0.0.1:{self.server.server_port}"
                 run.update(items=[dict(application_id=1, url=base + ("/workday-job.html" if payload.get("workday") else "/job.html"), company="Fixture", title="One", index=1, total=2),
                                   dict(application_id=2, url=base + "/batch-two.html", company="Fixture", title="Two", index=2, total=2)], index=0)
@@ -109,14 +120,17 @@ def extension_server():
             elif self.path == "/ext/resume":
                 self.response(200, {"filename": "fixture-resume.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
             elif self.path == "/ext/write":
+                gates["write"].wait(15)
                 answer = "Refined fixture answer." if payload.get("previous") else "I enjoy building useful local tools."
                 self.response(200, {"answer": answer, "words": len(answer.split()), "chars": len(answer)})
-            elif self.path == "/ext/remember":
+            elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember"}:
                 self.response(200, {"ok": True})
             elif self.path == "/ext/chat":
+                gates["chat"].wait(15)
                 self.response(200, {"reply": "Fixture chat reply."})
             elif self.path == "/ext/cover-letter":
-                if "answers" not in payload:
+                gates["cover"].wait(15)
+                if "answers" not in payload and not run.get("auto_cover"):
                     self.response(200, {"questions": ["Which project should the letter highlight?", "Anything else?"]})
                 else:
                     self.response(200, {"filename": "fixture-cover.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
@@ -145,6 +159,8 @@ def extension_server():
     try:
         yield f"http://127.0.0.1:{server.server_port}", requests
     finally:
+        for gate in gates.values():
+            gate.set()
         server.shutdown()
         server.server_close()
         thread.join()
@@ -199,20 +215,21 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
     page = context.new_page()
     page.goto(server + "/form.html")
-    page.frame_locator("iframe").locator("#name").wait_for()
+    page.frame_locator("iframe:not([title='AutoApply application assistant'])").locator("#name").wait_for()
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
     result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
     assert "error" not in result, result
     assert result["matched"]["application_id"] == 42
     summary = result["summary"]
-    assert summary["filled"] == 14
+    assert summary["filled"] == 13
+    assert not result["busy"]
     assert set(summary["needs_input"]) == {"Unresolved required *", "Short answer *"}
-    assert set(summary["needs_writing"]) == {"Cover letter *"}
+    assert set(summary["needs_writing"]) == {"Cover letter *", "Why this role? *"}
     assert summary["skipped"] == 2
     for selector, value in {"#name": "Fixture Student", "#email": "student@example.test", "#phone": "2025550100", "#about": "I build local tools.", "#country": "us", "#city": "Boston", "#website": "https://example.test/", "#existing": "User supplied"}.items():
         assert page.locator(selector).input_value() == value
     assert page.locator("#editor").inner_text() == "Plain editable text"
-    assert page.frame_locator("iframe").locator("#name").input_value() == "Embedded Student"
+    assert page.frame_locator("iframe[title='Embedded form']").locator("#name").input_value() == "Embedded Student"
     for selector in ("#authorized", "#python", "#js", "#consent"):
         assert page.locator(selector).is_checked()
     assert not page.locator("#unauthorized").is_checked()
@@ -237,17 +254,17 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert next(field for field in fields if field["label"] == "About you")["max_length"] == 200
     assert sum(path == "/ext/resume" for path, _, _ in requests) == 1
     assert all(key == KEY for _, key, _ in requests)
-    assert all(path in {"/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
-    assert page.locator("#writing").input_value() == "I enjoy building useful local tools."
+    assert all(path in {"/ext/ping", "/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
+    expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
 
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
     panel.locator("#connection").filter(has_text="Connected — Fixture Student").wait_for()
     assert panel.locator("#company").inner_text() == "Fixture Company"
     assert panel.locator("#job").inner_text() == "Fixture Intern"
-    assert panel.locator("#filled").inner_text() == "Filled 14"
+    expect(panel.locator("#filled")).to_have_text("Filled 14")
     assert "Unresolved required *" in panel.locator("#needs-input").inner_text()
-    assert "Which project" in panel.locator("#cover-questions").inner_text()
+    expect(panel.locator("#cover-questions")).to_contain_text("Which project")
     # Refill through the actual runtime message path, with the fixture tab active.
     page.bring_to_front()
     second = panel.evaluate("() => chrome.runtime.sendMessage({type: 'autofill'})")
@@ -438,8 +455,8 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     page.goto(server + "/form.html")
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
     worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
-    panel = context.new_page()
-    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    page.locator("#autoapply-sidebar iframe").wait_for()
+    panel = next(frame for frame in page.frames if frame.url.startswith(f"chrome-extension://{extension_id}/sidepanel.html"))
     panel.get_by_label("Unresolved required *", exact=True).fill("User fixture answer")
     panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#missing")).to_have_value("User fixture answer")
@@ -455,6 +472,7 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     panel.locator("#cover-questions").get_by_role("button").wait_for(state="detached")
     cover = [payload for path, _, payload in requests if path == "/ext/cover-letter"][-1]
     assert cover["answers"] == [{"question": "Which project should the letter highlight?", "answer": "A fixture robotics project"}, {"question": "Anything else?", "answer": ""}]
+    panel.locator("#tab-ask").click()
     panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
     panel.locator("#generate").click()
     expect(panel.locator("#version")).to_have_text("1 / 1")
@@ -470,15 +488,23 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     assert panel.locator("#answer").input_value() == first
     panel.locator("#next").click()
     assert panel.locator("#answer").input_value() == "Refined fixture answer."
-    panel.reload()
+    panel.evaluate("location.reload()")
+    panel.locator("#tab-ask").wait_for()
+    panel.locator("#tab-ask").click()
     panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
     expect(panel.locator("#version")).to_have_text("2 / 2")
+    panel.locator("#tab-chat").click()
     panel.locator("#chat-input").fill("How can I improve this answer?")
     panel.locator("#chat-input").press("Enter")
     panel.locator("#messages").filter(has_text="Fixture chat reply.").wait_for()
     chat = next(payload for path, _, payload in requests if path == "/ext/chat")
     assert chat["messages"] == [{"role": "user", "text": "How can I improve this answer?"}]
     assert chat["page"]["company"] == "Fixture Company"
+    expect(panel.locator(".bubble.user p")).to_have_text("How can I improve this answer?")
+    expect(panel.locator(".bubble.assistant p")).to_have_text("Fixture chat reply.")
+    assert "You:" not in panel.locator("#messages").inner_text()
+    assert "AI:" not in panel.locator("#messages").inner_text()
+    assert panel.locator(".bubble time").count() == 2
     panel.locator("#clear-chat").click()
     assert panel.locator("#messages").inner_text() == ""
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
@@ -720,3 +746,208 @@ def test_workday_resumes_after_sign_in(loaded_extension, extension_server):
     page.goto(server + '/workday-spa.html')
     expect(page.locator('#name')).to_have_value('Fixture Student', timeout=15000)
     assert page.evaluate('[nextClicks,submitClicks,submissions]') == [0, 0, 0]
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_sidebar_answers_learning_phone_and_manual_cover(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.emulate_media(color_scheme=theme)
+    page.goto(server + '/phone.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert 'error' not in result, result
+    assert not any(path == '/ext/cover-letter' for path, _, _ in requests)
+    assert page.locator('#autoapply-sidebar').evaluate('el => !!el.shadowRoot')
+    panel = page.frame_locator('#autoapply-sidebar iframe')
+    expect(panel.locator('#connection')).to_contain_text('Connected')
+    fields = [dict(field, key=field['key'].split(':', 1)[1]) for field in result['fields'] if field['key'].startswith('0:')]
+    values = [dict(key=field['key'], status='RESOLVED', value='+1 301-401-9768', force=True) for field in fields if 'phone' in field['label'].lower()]
+    worker.evaluate('async ({tabId, values}) => chrome.scripting.executeScript({target: {tabId}, func: values => autoApplyContent.fill(values), args: [values]})', dict(tabId=tab_id, values=values))
+    for selector, value in {'#wd': '3014019768', '#gh': '3014019768', '#us': '(301) 401-9768', '#intl': '+1 301-401-9768', '#ext': ''}.items():
+        expect(page.locator(selector)).to_have_value(value)
+    expect(page.get_by_label('Country Phone Code')).to_have_value('us')
+    page.locator('#us').fill('2025550100')
+    page.locator('#us').press('Tab')
+    expect(panel.locator('#saved-status')).to_have_text('Saved')
+    assert any(path == '/ext/remember' and payload['value'] == '2025550100' for path, _, payload in requests)
+    panel.locator('#tab-answers').click()
+    # Editing replaces the displayed value; keep the card locator stable.
+    card = panel.locator('.answer-card').filter(has=panel.locator('.field-label', has_text=re.compile(r'^Phone$')))
+    expect(card.locator('.answer-value')).to_have_text('2025550100')
+    assert card.bounding_box()['height'] <= 64
+    assert card.locator('.source-pill').count() == 1
+    assert card.get_by_role('button', name='Edit', exact=True).inner_text() == '✎'
+    card.get_by_role('button', name='Edit', exact=True).click()
+    expect(card).to_have_class(re.compile(r'editing'))
+    card.get_by_role('button', name='Cancel', exact=True).click()
+    expect(card.locator('.answer-value')).to_have_text('2025550100')
+    card.get_by_role('button', name='Edit', exact=True).click()
+    card.get_by_label('Phone', exact=True).fill('3015550100')
+    card.get_by_role('button', name='Save', exact=True).click()
+    expect(page.locator('#us')).to_have_value('3015550100')
+    # The page fills before the asynchronous remember request finishes.
+    expect(card.locator('.answer-value')).to_have_text('3015550100')
+    assert any(path == '/ext/remember' and payload['value'] == '3015550100' for path, _, payload in requests)
+    before = len([entry for entry in requests if entry[0] == '/ext/remember'])
+    page.locator('#password').fill('fixture secret')
+    page.locator('#password').press('Tab')
+    page.locator('#essay').fill('My own essay')
+    page.locator('#essay').press('Tab')
+    expect(panel.locator('#completed-answers')).to_contain_text('My own essay')
+    assert len([entry for entry in requests if entry[0] == '/ext/remember']) == before
+    panel.locator('#tab-fill').click()
+    panel.locator('#cover-letter').click()
+    expect(panel.locator('#cover-questions')).to_contain_text('Which project')
+    page.screenshot(path=str(ROOT / '.tmp' / ('t032-sidebar-' + theme + '.png')), animations='disabled')
+    panel.locator('#minimize').click()
+    expect(page.locator('#autoapply-sidebar .restore')).to_be_visible()
+    page.locator('#autoapply-sidebar .restore').click()
+    expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
+    panel.locator('#close').click()
+    expect(page.locator('#autoapply-sidebar')).to_be_hidden()
+    worker.evaluate("id => globalThis.autoApplySidebar(id, 'toggle')", tab_id)
+    expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
+
+
+@pytest.mark.parametrize('scenario', ['confirmed', 'no_click', 'invalid'])
+def test_detected_manual_submission(loaded_extension, extension_server, scenario):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + '/phone.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    # Fixture button has no submission handler; this records only a human click.
+    if scenario != 'no_click':
+        page.locator('#fixture-submit').click()
+    page.locator('#confirmation').evaluate("(el, invalid) => el.innerHTML = 'Thank you for applying' + (invalid ? '<p role=alert>Required field error</p>' : '')", scenario == 'invalid')
+    panel = page.frame_locator('#autoapply-sidebar iframe')
+    if scenario == 'confirmed':
+        expect(panel.locator('#applied-status')).to_be_visible()
+        page.locator('#confirmation').evaluate("el => el.append(' ')" )
+        page.wait_for_timeout(700)
+        assert len([entry for entry in requests if entry[0] == '/ext/applied']) == 1
+        panel.locator('#undo-applied').click()
+        expect(panel.locator('#applied-status')).to_be_hidden()
+        assert any(path == '/ext/unapplied' for path, _, _ in requests)
+    else:
+        page.wait_for_timeout(900)
+        assert not any(path == '/ext/applied' for path, _, _ in requests)
+
+
+def fixture_delay(worker, **payload):
+    worker.evaluate("""async payload => {
+        const {server, key} = await chrome.storage.local.get(['server', 'key']);
+        const response = await fetch(server + '/ext/fixture-delay', {method:'POST',
+            headers:{'Content-Type':'application/json', 'X-AutoApply-Key':key}, body:JSON.stringify(payload)});
+        if (!response.ok) throw new Error('Fixture delay configuration failed');
+    }""", payload)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_chat_bubbles_typing_composer_and_scroll(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + "/phone.html")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    worker.evaluate("id => autoApplyAutofill(id)", tab_id)
+    panel = context.new_page()
+    panel.set_viewport_size({"width": 360, "height": 640})
+    panel.emulate_media(color_scheme=theme)
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}")
+    panel.locator("#tab-chat").click()
+    fixture_delay(worker, hold=["chat"])
+    composer = panel.locator("#chat-input")
+    composer.fill("First line")
+    composer.press("Shift+Enter")
+    composer.press("End")
+    composer.type("Second line")
+    assert "\n" in composer.input_value()
+    composer.press("Enter")
+    expect(panel.locator(".typing")).to_be_visible()
+    expect(panel.locator(".bubble.user p")).to_contain_text("First line")
+    assert composer.bounding_box()["height"] <= 40
+    assert panel.locator("#send").bounding_box()["y"] == composer.bounding_box()["y"]
+    fixture_delay(worker, release=["chat"])
+    expect(panel.locator(".bubble.assistant p")).to_have_text("Fixture chat reply.")
+    expect(panel.locator(".typing")).to_have_count(0)
+    user, assistant = panel.locator(".bubble.user"), panel.locator(".bubble.assistant")
+    assert user.bounding_box()["x"] > assistant.bounding_box()["x"]
+    assert user.evaluate("e => getComputedStyle(e).backgroundColor") != assistant.evaluate("e => getComputedStyle(e).backgroundColor")
+    assert user.evaluate("e => e.offsetWidth <= e.parentElement.clientWidth * .86")
+    assert not re.search(r"You:|AI:", panel.locator("#messages").inner_text())
+    for index in range(8):
+        composer.fill("A longer fixture message to exercise scrolling. " * 3)
+        composer.press("Enter")
+        expect(panel.locator(".bubble.assistant")).to_have_count(index + 2)
+        expect(panel.locator("#send")).to_be_enabled()
+    panel.wait_for_function("() => {const e=document.querySelector('#messages');return e.scrollHeight > e.clientHeight && e.scrollTop + e.clientHeight >= e.scrollHeight - 2;}")
+    panel.screenshot(path=str(ROOT / '.tmp' / ('t032-chat-' + theme + '.png')), animations='disabled')
+    panel.locator("#clear-chat").click()
+    expect(panel.locator(".bubble")).to_have_count(0)
+
+
+def test_preselected_phone_flag_and_displayed_choice_without_options(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + "/phone.html")
+    page.locator("form").evaluate('''form => form.insertAdjacentHTML('afterbegin',
+        '<div class="intl-phone"><div class="country-selector"><button type="button" role="combobox" aria-label="Country" aria-required="true"><span class="flag" title="United States">🇺🇸</span></button></div><span>+1</span><input type="tel" aria-label="National phone"></div>' +
+        '<div role="combobox" aria-label="Schedule choice" aria-required="true">Full time</div>')''')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => autoApplyAutofill(id)", tab_id)
+    for label in ("Country", "Schedule choice"):
+        field = next(field for field in result["fields"] if field["label"] == label)
+        assert field["answered"] and field["options"] == []
+        assert label not in result["summary"]["needs_input"]
+    assert result["summary"]["skipped"] >= 2
+
+
+@pytest.mark.parametrize("with_ai", [False, True])
+def test_autofill_returns_before_delayed_writing_and_cover(loaded_extension, extension_server, with_ai):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    fixture_delay(worker, hold=["write", "cover"] if with_ai else ["cover"], auto_cover=True)
+    page = context.new_page()
+    page.goto(server + "/form.html")
+    if not with_ai:
+        page.locator("#writing").fill("My existing answer")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => autoApplyAutofill(id)", tab_id)
+    assert not result.get("error") and not result["busy"]
+    assert page.locator("#name").input_value() == "Fixture Student"
+    assert page.locator("#resume").evaluate("e => e.files.length") == 1
+    assert page.locator("#cover").evaluate("e => e.files.length") == 0
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}")
+    expect(panel.locator("#autofill")).to_be_enabled()
+    if with_ai:
+        expect(panel.locator("#writing-progress")).to_contain_text("Writing:")
+        assert page.locator("#writing").input_value() == ""
+        # Review and save a deterministic answer while the fake AI call is held.
+        panel.get_by_label("Unresolved required *", exact=True).fill("Reviewed while writing")
+        panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
+        expect(page.locator("#missing")).to_have_value("Reviewed while writing")
+        fixture_delay(worker, release=["write"])
+        expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
+        expect(panel.locator("#writing-progress")).to_contain_text("Answer filled:")
+    expect(panel.locator("#cover-progress")).to_have_text("Writing cover letter...")
+    assert page.locator("#cover").evaluate("e => e.files.length") == 0
+    fixture_delay(worker, release=["cover"])
+    expect(panel.locator("#cover-progress")).to_have_text("Cover letter attached")
+    assert page.locator("#cover").evaluate("e => e.files[0].name") == "fixture-cover.pdf"
+    final = worker.evaluate("async id => (await chrome.storage.session.get('tabResults')).tabResults[id]", tab_id)
+    assert final["summary"]["needs_writing"] == []
+    assert not final["coverBusy"]
+    if with_ai:
+        assert any(field["value"] == "Reviewed while writing" for field in final["completed"])
+    assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]

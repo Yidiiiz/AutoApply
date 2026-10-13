@@ -33,7 +33,10 @@ unresolved fields report NEEDS_INPUT, OPTIONAL_SKIP or NEEDS_WRITING. File field
 report FILE with resume/cover_letter. Overlength answers require input. Longer
 extracted descriptions are stored locally. Remembered answers preserve field
 kind, options and application scope and appear in the existing saved answer store.
-These endpoints never call AI or submit applications.
+These endpoints never submit applications. Only `POST /ext/applied` marks a listing
+as applied after detected confirmation of the user’s manual submission; it records
+`{application_id, url, evidence}` and reuses the protected dashboard check-off path.
+Repeated confirmations are idempotent. `POST /ext/unapplied` reuses dashboard Undo.
 
 Question labels also use normalized whole-word keyword concepts when the existing
 rules do not classify them. Verified saved answers can match reworded labels with
@@ -53,8 +56,27 @@ POST `/api/ext-run/cancel` skips remaining items. Dashboard writes retain the
 existing same-origin dashboard token requirement. GET `/ext/run/next` claims
 the next pending item; POST `/ext/run/result` accepts `application_id`,
 `state` (filled, needs_input, failed, skipped) and optional `detail`.
-Runs live only in dashboard memory and never change application submission state.
-Final submission stays manual. The extension UI and AI endpoints are separate tasks.
+Runs live only in dashboard memory. Confirmed manual submissions update an item
+to `submitted` through `/ext/applied`; generic confirmation text requires a submit
+click in the same tab within two minutes. Validation errors prevent detection.
+Final submission stays manual. Finished or cancelled runs collapse after a brief
+summary toast; Last run reopens results.
+
+The toolbar and Alt+Shift+S toggle an in-page, shadow-root isolated sidebar.
+Alt+Shift+F opens it and fills. Each tab remembers open, closed or minimized state.
+Fill, Answers, Ask AI and Chat retain the answer helper, refinement history,
+cover-letter questions, downloads, pairing and run pause controls. Answers can be
+edited inline; ordinary field edits on the page are learned automatically. Passwords,
+files and hidden/honeypot fields are excluded; essays stay in this page's Answers
+view without becoming reusable memory. Cover letters generate automatically only
+when an upload field exists; Generate cover letter remains available manually.
+Autofill returns after deterministic fields are filled, so the form can be reviewed
+while AI answers fill progressively and the cover letter is written and attached
+in the background. Separate progress lines show writing, attachment, or errors.
+Chat uses timestamped bubbles and a one-row composer (Enter sends; Shift+Enter
+adds a newline). Completed answers use compact rows with inline Save/Cancel edits.
+Phone formatting follows the page's national-number and country-code controls;
+Phone Extension stays empty and the profile number is unchanged.
 
 Start from the repository directory:
 

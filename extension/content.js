@@ -1,6 +1,70 @@
 (() => {
   if (globalThis.autoApplyContent) return;
-  let nextKey = 0;
+  let nextKey = 0, extensionFilling = 0;
+  let sidebarHost;
+  function sidebar(mode = 'toggle', tabId) {
+    if (window !== window.top) return;
+    if (!sidebarHost) {
+      sidebarHost = document.createElement('div');
+      sidebarHost.id = 'autoapply-sidebar';
+      sidebarHost.style.cssText = 'all:initial!important;position:fixed!important;inset:0 0 0 auto!important;width:min(380px,100vw)!important;height:100dvh!important;z-index:2147483647!important;display:block!important;';
+      const shadow = sidebarHost.attachShadow({mode:'open'});
+      const style = document.createElement('style');
+      style.textContent = ':host{color-scheme:light dark} .panel{height:100%;background:Canvas;box-shadow:-8px 0 32px #0002;animation:slide .18s ease-out}iframe{border:0;width:100%;height:100%;display:block} .restore{position:fixed;right:0;top:40%;border:1px solid #71717a;border-radius:8px 0 0 8px;padding:12px 8px;background:Canvas;color:CanvasText;cursor:pointer;font:13px ui-sans-serif,system-ui} [hidden]{display:none!important}@keyframes slide{from{transform:translateX(100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){.panel{animation:none}}';
+      const panel = document.createElement('div'); panel.className = 'panel';
+      const frame = document.createElement('iframe'); frame.src = chrome.runtime.getURL('sidepanel.html')+(tabId?'?tabId='+tabId:''); frame.title = 'AutoApply application assistant';
+      panel.append(frame);
+      const restore = document.createElement('button'); restore.className='restore'; restore.textContent='AutoApply'; restore.setAttribute('aria-label','Restore AutoApply sidebar');
+      restore.onclick=()=>{sidebar('open');chrome.runtime.sendMessage({type:'sidebar-state',state:'open'}).catch(()=>{});};
+      shadow.append(style,panel,restore); document.documentElement.append(sidebarHost);
+      sidebarHost.dataset.state='closed';
+    }
+    const state = mode === 'toggle' ? sidebarHost.dataset.state === 'open' ? 'closed' : 'open' : mode;
+    sidebarHost.dataset.state=state;
+    sidebarHost.style.setProperty('display',state==='closed'?'none':'block','important');
+    sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(380px,100vw)','important');
+    sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
+    sidebarHost.shadowRoot.querySelector('.restore').hidden=state!=='minimized';
+    return state;
+  }
+  function valueOf({element,members,field}) {
+    if (field.kind==='file') return Array.from(element.files || [],file=>file.name).join(', ');
+    if (['radio','checkbox'].includes(field.kind)) return field.kind==='checkbox'&&members.length===1 ? element.checked : members.filter(el=>el.checked).map(label)[field.kind==='radio'?'shift':'slice']();
+    if (field.kind==='select') return element.multiple ? Array.from(element.selectedOptions,o=>clean(o.text)) : clean(element.selectedOptions[0]?.text);
+    if (field.kind==='combobox') return comboSelection(element) || clean(comboInput(element)?.value);
+    return element.isContentEditable ? element.textContent : element.value;
+  }
+  const editTimers=new Map(), observedValues=new Map();
+  function learn(event) {
+    if(extensionFilling || !event.isTrusted) return;
+    const record=Array.from(records.values()).find(r=>r.members.includes(event.target)||r.element.contains(event.target));
+    if(!record || ['file','password','hidden'].includes(record.field.kind)||!visible(record.element)) return;
+    const value=valueOf(record), encoded=JSON.stringify(value);
+    if(observedValues.get(record.field.key)===encoded) return;
+    clearTimeout(editTimers.get(record.field.key));
+    editTimers.set(record.field.key,setTimeout(()=>{
+      observedValues.set(record.field.key,encoded);
+      chrome.runtime.sendMessage({type:'user-answer',key:record.field.key,value}).catch(()=>{});
+    },400));
+  }
+  document.addEventListener('change',learn,true); document.addEventListener('blur',learn,true);
+  document.addEventListener('click',event=>{
+    const button=event.target.closest('button,input[type="submit"],[role="button"]');
+    if(event.isTrusted && button && visible(button) && (button.type==='submit'||/^(submit(?: application)?|apply(?: now| application)?)$/i.test(clean(button.textContent||button.value)))) {
+      chrome.runtime.sendMessage({type:'submit-intent'}).catch(()=>{});
+    }
+  },true);
+  let confirmationTimer;
+  function detectConfirmation() {
+    const url=location.href;
+    const strong=/greenhouse\.io|lever\.co/.test(location.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(location.pathname)||/ashbyhq\.com/.test(location.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(location.pathname);
+    const evidence=(document.body.innerText||'').match(/thank you for applying|application (?:has been |was )?submitted|we have received your application|application received/i)?.[0] || (document.querySelector('[data-automation-id="congratulations"]') ? 'Workday congratulations' : '');
+    const invalid=Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).some(el=>visible(el)&&(/error|required|invalid|missing|correct/i.test(text(el))||el.getAttribute('aria-invalid')==='true'));
+    if(!invalid&&(strong||evidence)) chrome.runtime.sendMessage({type:'submission-confirmation',url,evidence:evidence||'Confirmation URL',strong:Boolean(strong)}).catch(()=>{});
+  }
+  new MutationObserver(()=>{clearTimeout(confirmationTimer);confirmationTimer=setTimeout(detectConfirmation,300);}).observe(document.body,{childList:true,subtree:true,characterData:true});
+  setTimeout(detectConfirmation,300);
+  if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
   let records = new Map();
   const clean = value => String(value || "").replace(/\s+/g, " ").trim();
   const text = element => clean(element?.textContent);
@@ -250,7 +314,7 @@
     const repeated = new Set();
     const keys = new Set();
     for (const element of controls) {
-      if (grouped.has(element)) continue;
+      if (grouped.has(element) || /honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
       let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button[aria-haspopup="listbox"]') || element.getAttribute("data-automation-id") === "multiSelectInput" ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : element.type || "text";
       if (!["text", "textarea", "select", "radio", "checkbox", "combobox", "file", "date", "number", "email", "tel", "url"].includes(kind)) kind = "text";
@@ -289,6 +353,7 @@
         section, max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
+      observedValues.set(key,JSON.stringify(valueOf(records.get(key))));
     }
     previousStep = workdayState();
     return {page: pageInfo(), fields, workday_step: previousStep?.step, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
@@ -302,6 +367,7 @@
       try {
         openCombo(record.element);
         record.field.options = (await settledComboOptions(record.element, 700)).map(text);
+        record.field.answered = occupied(record);
         fields.push({...record.field});
       } finally { closeCombo(record.element); }
     }
@@ -311,17 +377,22 @@
   function phoneCountrySelection(element) {
     const container = comboContainer(element);
     const identity = [label(element), element.id, element.name, container.className].join(" ");
-    const shown = text(container);
-    // Country controls next to a phone input often render only a flag and dial code.
-    const phone = /phone|dial|calling|country.code/i.test(identity) ||
-      container.parentElement?.querySelector('input[type="tel"]');
-    return phone && /\+\d{1,4}\b/.test(shown) ? shown : "";
+    let group = container;
+    for (let depth = 0; depth < 3 && group && !group.matches('form,body'); depth++, group = group.parentElement) {
+      const phone = /phone|dial|calling|country.code/i.test(identity) || group.querySelector('input[type="tel"]');
+      if (!phone) continue;
+      const shown = text(group);
+      if (/\+\d{1,4}\b/.test(shown)) return shown;
+      const flag = container.querySelector('.iti__flag,.selected-flag,[class*="flag"],img[alt]');
+      if (flag && visible(flag) && /country/i.test(identity)) return flag.getAttribute('title') || flag.getAttribute('alt') || 'Selected country';
+    }
+    return "";
   }
 
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return element.files.length > 0;
-    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || clean(comboInput(element)?.value));
+    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || clean(comboInput(element)?.value) || !comboInput(element) && !/^(select|choose|search)\b/i.test(text(element)) && text(element));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
       !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
     return Boolean(clean(element.isContentEditable || !("value" in element) ? element.textContent : element.value));
@@ -391,12 +462,37 @@
     }
   }
 
+  async function phoneValue(element, value, field) {
+    if(/phone.*extension|extension.*phone/i.test(field.label)) return '';
+    if(field.kind!=='tel'&&!/phone|mobile/i.test(field.label)) return value;
+    const digits=String(value).replace(/\D/g,'');
+    if(digits.length!==11||!digits.startsWith('1')) return value;
+    let group=element.closest('[data-automation-id="phoneNumber"],fieldset,[role="group"],.intl-tel-input,.iti')||element.parentElement;
+    for(let i=0;i<2&&group?.parentElement&&!group.matches('form,body');i++) {if(group.querySelector('[data-automation-id="countryPhoneCode"],select,[role="combobox"],.iti__flag-container'))break;group=group.parentElement;}
+    if(group?.matches("form,body"))group=null;
+    const country=Array.from(group?.querySelectorAll('select,[role="combobox"],button[aria-haspopup="listbox"],[data-automation-id="countryPhoneCode"]')||[]).find(el=>el!==element&&/country|dial.code|phone.code/i.test(label(el)+' '+el.getAttribute('data-automation-id')));
+    const picker=group?.querySelector('.iti__flag-container,.iti__country-container,.selected-flag,[class*="flag-dropdown"]');
+    if(country && !occupied({element:country,members:[country],field:{kind:country.tagName==='SELECT'?'select':'combobox'}})) {
+      if(country.tagName==='SELECT') {const option=Array.from(country.options).find(o=>/united states|\+1(?:\D|$)/i.test(o.text));if(option){nativeSet(country,'value',option.value);events(country);}}
+      else await fillCombo(country,'United States (+1)');
+    }
+    const hint=element.placeholder||'',pattern=element.getAttribute('pattern')||'';
+    const workday=location.hostname.endsWith('.myworkdayjobs.com')||element.closest('[data-automation-id^="formField"]')&&/^phone number/i.test(field.label);
+    if(!workday&&!country&&!picker&&(hint.includes('+')||pattern.includes('\\+')||/international/i.test(field.label)&&!hint&&!pattern&&!(element.maxLength>0&&element.maxLength<=12)&&element.inputMode!=='numeric'))return value;
+    const national=digits.slice(1);
+    if(workday)return national;
+    if(/\(\d{3}\)\s*\d{3}[- ]\d{4}/.test(hint))return '('+national.slice(0,3)+') '+national.slice(3,6)+'-'+national.slice(6);
+    if(/\d{3}-\d{3}-\d{4}/.test(hint))return national.slice(0,3)+'-'+national.slice(3,6)+'-'+national.slice(6);
+    return national;
+  }
   async function fill(answers, files = {}) {
     const started = performance.now();
-    const summary = {filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
+    extensionFilling++;
+    try {
+    const summary = {completed: [], filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
     for (const answer of answers) {
       const record = records.get(answer.key);
-      if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record)) { summary.skipped++; continue; }
+      if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) { summary.skipped++; continue; }
       const {element, members, field} = record;
       const unresolved = writing => {
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
@@ -448,10 +544,11 @@
             if (element.checked !== answer.value) element.click(); events(element);
           } else {
             if (matches.some(member => !member) || field.kind === "radio" && matches.length !== 1) { unresolved(false); continue; }
+            if(answer.force && field.kind==="checkbox") for(const member of members) if(member.checked && !matches.includes(member)) member.click();
             for (const member of matches) { if (!member.checked) member.click(); events(member); }
           }
         } else {
-          const value = String(answer.value ?? "");
+          const value = String(await phoneValue(element, answer.value ?? "", field));
           if (field.max_length !== null && value.length > field.max_length) { unresolved(false); continue; }
           if (element.isContentEditable || !("value" in element)) element.textContent = value;
           else nativeSet(element, "value", value);
@@ -459,10 +556,13 @@
         }
         mark(record, "#68a879");
         summary.filled++;
+        const value=valueOf(record); observedValues.set(field.key,JSON.stringify(value));
+        summary.completed.push({...field,value,source:answer.source||"AI"});
       } catch { unresolved(false); }
     }
     summary.fill_ms = Math.round(performance.now() - started);
     return summary;
+    } finally { extensionFilling--; }
   }
   function workdayState() {
     if (!location.hostname.endsWith('.myworkdayjobs.com') &&
@@ -499,5 +599,5 @@
     previousStep = null;
     stepTimer = setTimeout(detectStep, 700);
   }
-  globalThis.autoApplyContent = {scan, collectOptions, fill, enterApplication};
+  globalThis.autoApplyContent = {scan, collectOptions, fill, enterApplication, sidebar};
 })();

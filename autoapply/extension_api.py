@@ -412,7 +412,24 @@ def run_result(dashboard, payload):
     return dict(ok=True)
 
 
+def applied(dashboard, payload):
+    application_id = _id(payload.get('application_id'))
+    url = _url(payload.get('url'))
+    evidence = _text(payload, 'evidence', 2000, required=True)
+    result = dashboard.mark_applied(application_id, evidence=json.dumps(dict(url=url, evidence=evidence)))
+    with dashboard._ext_mutex:
+        for item in dashboard._ext_run:
+            if item['application_id'] == application_id and item['state'] != 'skipped':
+                item.update(state='submitted', detail=evidence)
+    return result
+
+
+def unapplied(dashboard, payload):
+    return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
+
+
 ROUTES = {('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
+          ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
           ('POST', '/ext/cover-letter'): cover_letter,
