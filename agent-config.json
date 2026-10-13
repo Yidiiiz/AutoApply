@@ -1,8 +1,8 @@
 {
   "max_concurrent_workers": 1,
-  "max_worker_launches_per_budget": 6,
+  "max_worker_launches_per_budget": 20,
   "max_task_attempts": 3,
-  "worker_timeout_seconds": 900,
+  "worker_timeout_seconds": 2400,
   "check_timeout_seconds": 3000,
   "max_log_bytes_per_run": 20000000,
   "model": "gpt-6.1-sol",
