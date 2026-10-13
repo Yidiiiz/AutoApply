@@ -634,3 +634,5 @@ When no editable fields are present, Autofill follows a clearly labeled Apply
 entry and chooses Apply Manually in the Workday dialog. Sign-in pages stop with
 **Sign in to Workday in this tab, then press Autofill** and report needs_input.
 Credentials, Next, Save and Continue, and final submission remain manual.
+
+Workday tabs autofilled during this browser session automatically refill after sign-in or a step change. Use Save and Continue yourself; the extension fills the new step, reports its name and unresolved fields, and keeps the original application match. Workday dropdowns, searchable prompts, split date inputs and resume uploads are supported. The first saved employment or education entry supplies repeatable section facts; additional entries can be added manually. Review and final submission remain manual.

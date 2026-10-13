@@ -31,8 +31,8 @@ def _url(value):
     try:
         value = canonical_url(value)
         parts = urlsplit(value)
-        if parts.hostname.endswith('.myworkdayjobs.com') and parts.path.endswith('/apply'):
-            value = parts._replace(path=parts.path[:-6]).geturl()
+        if parts.hostname.endswith('.myworkdayjobs.com'):
+            value = parts._replace(path=re.sub(r'/apply(?:/.*)?$', '', parts.path, flags=re.I)).geturl()
         return value
     except ValueError:
         raise SettingsRejected('url must be an HTTP(S) URL') from None
@@ -106,6 +106,40 @@ def _education_date_part(q, field, profile):
     return True, Answer(selected, 'profile:education.' + path) if selected is not None else None
 
 
+def _repeatable_answer(q, field, profile):
+    """Use explicit facts from the first saved work/education entry."""
+    section, label = normalize(field.get('section', '')), normalize(q.label).strip(' *')
+    work = bool(re.search(r'\b(work experience|employment)\b', section))
+    education = bool(re.search(r'\beducation\b', section))
+    if not work and not education:
+        return False, None
+    entries = profile.get('employment' if work else 'education_history', [])
+    entry = entries[0] if entries and isinstance(entries[0], dict) else {} if work else profile.get('education', {})
+    names = ({'job title': 'title', 'company': 'company', 'location': 'location',
+              'role description': 'description', 'i currently work here': 'current'} if work else
+             {'school or university': 'school', 'school': 'school', 'degree': 'degree', 'field of study': 'major'})
+    date = re.fullmatch(r'(start|end|from|to) date (month|year)', label)
+    key = names.get(label)
+    if date:
+        key = 'start_date' if date[1] in {'start', 'from'} else 'end_date' if work else 'graduation_date'
+    if not key:
+        return False, None
+    value = entry.get(key)
+    if date:
+        match = re.fullmatch(r'(\d{4})-(\d{2})(?:-\d{2})?', str(value or ''))
+        if not match or not 1 <= int(match[2]) <= 12:
+            return True, None
+        month = int(match[2])
+        candidates = [match[1]] if date[2] == 'year' else (
+            [str(month)] if q.kind == 'number' or not q.options else
+            [calendar.month_name[month], str(month), f'{month:02}', calendar.month_abbr[month]])
+        value = next((fitted for candidate in candidates
+                      if (fitted := answers.fit_options(candidate, q.options)) is not None), None)
+    elif value is not None and not isinstance(value, bool):
+        value = answers.fit_options(str(value), q.options)
+    return True, Answer(value, 'profile:' + ('employment.0.' if work else 'education.') + key) if value is not None else None
+
+
 def ping(dashboard, payload):
     identity = dashboard.config.profile.get('identity', {})
     return dict(ok=True, name='AutoApply', profile_name=' '.join(
@@ -147,6 +181,9 @@ def resolve_answers(dashboard, payload):
             education_part, education_answer = _education_date_part(q, field, profile)
             if education_part:
                 answer = education_answer
+            repeated, repeated_answer = _repeatable_answer(q, field, profile)
+            if repeated:
+                answer = repeated_answer
             # Remember requests omit required/length. Only verified memory may
             # reuse that descriptor, and the actual field is validated below.
             remembered = resolver.resolve_result(replace(q, required=False, max_length=None), app).answer
@@ -154,7 +191,12 @@ def resolve_answers(dashboard, payload):
                 answer = remembered
             if answer:
                 try:
-                    answers.validate_answer(q, answer.value)
+                    if q.kind == 'checkbox' and isinstance(answer.value, bool) and len(q.options) <= 1:
+                        pass
+                    elif isinstance(answer.value, list) and (field.get('multiple') is True or q.kind == 'checkbox'):
+                        answers.validate_answer(replace(q, kind='multiselect'), answer.value)
+                    else:
+                        answers.validate_answer(q, answer.value)
                     if q.max_length == 0 and answer.value:
                         raise ValueError('Field cannot accept text')
                 except (ValueError, TypeError):

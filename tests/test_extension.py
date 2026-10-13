@@ -34,6 +34,8 @@ def extension_server():
         "Nonmatching choice *": "Yes", "Uncommitted choice *": "Computer Science",
         "Start date month": "August", "Start date year": "2024",
         "End date month": "5", "End date year": "2028",
+        "Job Title": "Fixture Engineer", "Company": "Fixture Employer",
+        "How Did You Hear About Us?": ["LinkedIn"], "I have a preferred name": True,
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -64,7 +66,7 @@ def extension_server():
                 return
             file = {"/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
-                    "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html"}.get(self.path)
+                    "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
                 self.send_error(404)
                 return
@@ -128,6 +130,8 @@ def extension_server():
                         status, value = "NEEDS_WRITING", None
                     elif label in canned:
                         status, value = "RESOLVED", canned[label]
+                        if label == "Start date month" and field["kind"] == "number":
+                            value = "8"
                     else:
                         status, value = ("NEEDS_INPUT" if field["required"] else "OPTIONAL_SKIP"), None
                     answers.append({"key": field["key"], "value": value, "source": "fixture", "status": status})
@@ -233,7 +237,7 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert next(field for field in fields if field["label"] == "About you")["max_length"] == 200
     assert sum(path == "/ext/resume" for path, _, _ in requests) == 1
     assert all(key == KEY for _, key, _ in requests)
-    assert all(path in {"/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter"} for path, _, _ in requests)
+    assert all(path in {"/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
     assert page.locator("#writing").input_value() == "I enjoy building useful local tools."
 
     panel = context.new_page()
@@ -615,7 +619,7 @@ def test_workday_entry_stops_at_sign_in(loaded_extension, extension_server, batc
     worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    detail = "Sign in to Workday in this tab, then press Autofill"
+    detail = "Sign in to Workday in this tab. Autofill will resume automatically."
     if batch:
         worker.evaluate("""async server => {
             await fetch(server + '/ext/fixture-start', {method:'POST', headers:{'X-AutoApply-Key':'fixture-pairing-key', 'Content-Type':'application/json'}, body:JSON.stringify({workday:true})});
@@ -659,3 +663,60 @@ def test_generic_sign_in_stops_before_profile_answers(loaded_extension, extensio
     assert not result.get('error')
     assert page.evaluate('credentialInputs') == 0
     assert not any(endpoint == '/ext/answers' for endpoint, _, _ in requests)
+
+
+@pytest.mark.parametrize('run_tab', [False, True])
+def test_workday_spa_refills_without_navigation(loaded_extension, extension_server, run_tab):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused:true, chromeRun:{error:'Not paired. Open Pairing settings and save your dashboard key.'}})")
+    worker.evaluate("config => chrome.storage.local.set(config)", {'server': server, 'key': KEY})
+    page = context.new_page()
+    page.goto(server + '/workday-spa.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    match = {'application_id': 7, 'company': 'Run Company', 'title': 'Run Intern'} if run_tab else None
+    result = worker.evaluate("async args => globalThis.autoApplyAutofill(args.id, args.match)", {'id': tab_id, 'match': match})
+    assert not result.get('error'), result
+    expect(page.locator('#name')).to_have_value('Fixture Student')
+    expect(page.locator('#country')).to_have_text('United States')
+    expect(page.locator('[data-automation-id=selectedItem]')).to_have_text('LinkedIn')
+    expect(page.locator('#preferred')).to_be_checked()
+    assert page.evaluate('[nextClicks,submitClicks,submissions]') == [0, 0, 0]
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
+    expect(panel.locator('#chrome-run-status')).not_to_contain_text('Not paired')
+    # Only the user advances. Workday replaces fields while staying in the same tab.
+    page.locator('#next').click()
+    expect(page.locator('#job-title')).to_have_value('Fixture Engineer', timeout=20000)
+    expect(page.locator('#employer')).to_have_value('Fixture Employer')
+    expect(page.locator('#month')).to_have_value('8')
+    expect(page.locator('#year')).to_have_value('2024')
+    expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
+    expect(page.locator('#filename')).to_have_text('fixture-resume.pdf')
+    expect(panel.locator('#progress')).to_contain_text('Workday step: My Experience - filled')
+    expect(panel.locator('#company')).to_have_text('Run Company' if run_tab else 'Fixture Company')
+    answers = [p for endpoint, _, p in requests if endpoint == '/ext/answers']
+    assert {p['application_id'] for p in answers} == {7 if run_tab else 42}
+    assert all(p['page']['company'] == ('Run Company' if run_tab else 'Fixture Company') for p in answers)
+    assert sum(endpoint == '/ext/match' for endpoint, _, _ in requests) == (0 if run_tab else 1)
+    assert page.evaluate('[nextClicks,submitClicks,submissions]') == [1, 0, 0]
+    # Filling and opening menus must not cause a refill loop.
+    page.wait_for_timeout(1200)
+    assert len([p for endpoint, _, p in requests if endpoint == '/ext/answers']) == len(answers)
+
+
+def test_workday_resumes_after_sign_in(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused:true})")
+    worker.evaluate("config => chrome.storage.local.set(config)", {'server':server, 'key':KEY})
+    page = context.new_page()
+    page.goto(server + '/workday-signin.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert result['state'] == 'needs_input'
+    assert page.evaluate('credentialInputs') == 0
+    # Fixture simulates the successful sign-in redirect without any employer service.
+    page.goto(server + '/workday-spa.html')
+    expect(page.locator('#name')).to_have_value('Fixture Student', timeout=15000)
+    assert page.evaluate('[nextClicks,submitClicks,submissions]') == [0, 0, 0]

@@ -1,0 +1,32 @@
+<!doctype html><html><head><title>205 F5, Inc. (United States)</title></head><body>
+<div data-automation-id="progressBar"><span data-automation-id="progressBarActiveStep">My Information</span></div>
+<main><form id="step"></form></main>
+<script>
+window.nextClicks=0; window.submitClicks=0; window.submissions=0;
+const step=document.querySelector('#step');
+function information() {
+  step.innerHTML='<h2>My Information</h2><label>Full name *<input id="name" data-automation-id="legalNameSection_firstName" required></label><div data-automation-id="formField-country"><label id="country-label">Country *</label><button type="button" id="country" aria-labelledby="country-label" aria-haspopup="listbox" aria-expanded="false">Select One</button></div><div data-automation-id="multiSelectContainer"><label for="source">How Did You Hear About Us?</label><input id="source" role="combobox" data-automation-id="multiSelectInput" aria-expanded="false"></div><label>I have a preferred name<input id="preferred" type="checkbox"></label><button type="button" id="next">Save and Continue</button><button type="button" id="submit">Submit</button>';
+  document.querySelector('#country').onclick=e=>menu(e.currentTarget,['United States','Canada']);
+  const source=document.querySelector('#source');
+  source.onkeydown=e=>{if(e.key==='ArrowDown') menu(source,['LinkedIn','Other']); if(e.key==='Escape') close(source);};
+  source.oninput=()=>menu(source,['LinkedIn','Other'].filter(x=>x.toLowerCase().includes(source.value.toLowerCase())));
+  document.querySelector('#next').onclick=()=>{nextClicks++; experience();};
+  document.querySelector('#submit').onclick=()=>submitClicks++;
+}
+function close(control) { document.querySelector('[role=listbox]')?.remove(); control.setAttribute('aria-expanded','false'); }
+function menu(control,choices) {
+  close(control); control.setAttribute('aria-expanded','true');
+  const list=document.createElement('div'); list.role='listbox'; list.id='choices'; control.setAttribute('aria-controls',list.id);
+  choices.forEach(value=>{const option=document.createElement('div'); option.role='option'; option.textContent=value; option.onclick=()=>{if(control.tagName==='BUTTON')control.textContent=value;else {const selected=document.createElement('span');selected.dataset.automationId='selectedItem';selected.textContent=value;control.after(selected);control.value='';} close(control);};list.append(option);});control.after(list);
+  control.addEventListener('keydown',e=>{if(e.key==='Escape')close(control);},{once:true});
+}
+function experience() {
+  history.replaceState({},'', '/workday-spa.html/apply/applyManually');
+  document.querySelector('[data-automation-id=progressBarActiveStep]').textContent='My Experience';
+  step.innerHTML='<h2>My Experience</h2><fieldset><legend>Work Experience</legend><label>Job Title<input id="job-title" data-automation-id="jobTitle"></label><label>Company<input id="employer" data-automation-id="company"></label><div data-automation-id="dateInputWrapper"><label>Start date</label><input id="month" type="number" data-automation-id="dateSectionMonth"><input id="year" type="number" data-automation-id="dateSectionYear"></div></fieldset><div data-automation-id="formField-resume"><h3>Resume/CV</h3><input id="resume" type="file" data-automation-id="file-upload-input-ref" hidden><span id="filename"></span></div><label>Why this role? *<textarea id="writing" required></textarea></label><button type="button" id="next">Save and Continue</button><button type="button" id="submit">Submit</button>';
+  document.querySelector('#resume').onchange=e=>document.querySelector('#filename').textContent=e.target.files[0]?.name || '';
+  document.querySelector('#next').onclick=()=>nextClicks++;
+  document.querySelector('#submit').onclick=()=>submitClicks++;
+}
+step.onsubmit=e=>{e.preventDefault();submissions++;}; information();
+</script></body></html>

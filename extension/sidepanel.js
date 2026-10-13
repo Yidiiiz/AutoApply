@@ -23,7 +23,7 @@ function inputFor(field) {
   if (["select", "radio", "combobox", "checkbox"].includes(field.kind)) {
     input = document.createElement("select");
     const options = field.options || [];
-    input.multiple = field.kind === "checkbox" && options.length > 1;
+    input.multiple = field.multiple || field.kind === "checkbox" && options.length > 1;
     if (!input.multiple) { const blank = node("option", options.length ? "Choose an answer" : "No options available — check the page"); blank.value = ""; input.append(blank); }
     for (const value of options) { const option = node("option", value); option.value = value; input.append(option); }
     input.disabled = !options.length;
@@ -187,3 +187,4 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.chromeRun) renderRun(changes.chromeRun.newValue);
 });
 renderRun((await chrome.storage.session.get("chromeRun")).chromeRun);
+send({type: "run-status-refresh"}).then(renderRun).catch(showError);

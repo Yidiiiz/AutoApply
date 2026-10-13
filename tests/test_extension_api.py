@@ -118,6 +118,8 @@ def test_extension_unexpected_errors_return_json(http_dashboard, monkeypatch, er
     ('https://jobs.lever.co/example/abc', 'https://jobs.lever.co/example/abc/apply?source=test'),
     ('https://job-boards.greenhouse.io/example/jobs/123', 'https://example.test/careers?gh_jid=123'),
     ('https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123', 'https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123/apply'),
+    ('https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123', 'https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123/apply/applyManually?source=test'),
+    ('https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123/apply/applyManually', 'https://tenant.myworkdayjobs.com/Jobs/job/NY/Intern_R123/apply/next'),
 ])
 def test_match(http_dashboard, config, db, listing, stored, tab):
     job_id, _ = db.ingest(replace(listing, url=stored), config)
@@ -452,3 +454,20 @@ def test_writing_unavailable_configuration_and_malformed_json(http_dashboard, wr
     monkeypatch.setattr('autoapply.codex_writer.CodexWritingProvider', lambda *args: writing_provider)
     writing_provider.result = ProviderUnavailable('Invalid JSON', 'MALFORMED_RESPONSE')
     assert ext(http_dashboard, 'POST', '/ext/write', dict(question='Why?'))[0] == 400
+
+
+def test_first_work_experience_facts(http_dashboard, config):
+    profile = dict(config.profile)
+    profile['employment'] = [dict(company='Fixture Employer', title='Engineer', start_date='2024-08', current=True),
+                             dict(company='Second Employer', title='Another title')]
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    fields = [dict(key='title', label='Job Title'), dict(key='company', label='Company'),
+              dict(key='month', label='Start date month', kind='number'),
+              dict(key='year', label='Start date year', kind='number'),
+              dict(key='current', label='I currently work here', kind='checkbox')]
+    for field in fields:
+        field.update(section='Work Experience', required=True)
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://unmatched.test/job', fields=fields))
+    assert status == 200
+    assert [answer['value'] for answer in result['answers']] == ['Engineer', 'Fixture Employer', '8', '2024', True]
+    assert all(answer['status'] == 'RESOLVED' for answer in result['answers'])

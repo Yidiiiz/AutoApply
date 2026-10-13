@@ -22,6 +22,8 @@
     const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).map(id => text(document.getElementById(id))).filter(Boolean).join(" ");
     return explicit || text(element.closest("label")) || clean(element.getAttribute("aria-label")) || labelled ||
       clean(element.getAttribute("placeholder")) || text(element.previousElementSibling) ||
+      text(element.closest('[data-automation-id^="formField"]')?.querySelector('label')) ||
+      clean(element.getAttribute('data-automation-id')?.replace(/([a-z])([A-Z])/g, '$1 $2')) ||
       clean(element.name || element.id) || "Unlabelled field";
   }
 
@@ -51,6 +53,8 @@
     for (const type of ["keydown", "keyup"]) element.dispatchEvent(new KeyboardEvent(type, {key, code: key, bubbles: true}));
   }
   function comboContainer(element) {
+    const workday = element.closest('[data-automation-id="multiSelectContainer"],[data-automation-id^="formField"]');
+    if (workday) return workday;
     const control = element.closest('[class*="-control"],[class*="__control"]');
     if (control) return control.parentElement;
     // Some react-select themes omit control classes and nest the input separately.
@@ -68,7 +72,7 @@
       lists.push(comboContainer(element));
       if (element.getAttribute("aria-expanded") === "true") lists.push(...document.querySelectorAll('[role="listbox"]'));
     }
-    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option'))))]
+    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="promptOption"]'))))]
       .filter(option => !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
         text(option) && !/^(loading\b|no options\b|no results\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
@@ -88,6 +92,7 @@
   }
   function openCombo(element) {
     element.focus();
+    if (element.matches('button[aria-haspopup="listbox"]')) { element.click(); return; }
     keypress(element, "ArrowDown");
     if (element.getAttribute("aria-expanded") !== "true" && !element.getAttribute("list")) {
       const control = element.closest('[class*="-control"],[class*="__control"]') || element;
@@ -97,7 +102,8 @@
   function closeCombo(element) { keypress(element, "Escape"); element.blur(); }
   function comboInput(element) {
     return element.matches("input,textarea") ? element : element.querySelector("input,textarea") ||
-      (element.isContentEditable ? element : null);
+      (element.isContentEditable ? element :
+        comboContainer(element).querySelector('input[data-automation-id="searchBox"],input[role="searchbox"]'));
   }
   function searchCombo(element, value) {
     const input = comboInput(element);
@@ -115,7 +121,9 @@
   function comboSelection(element) {
     const container = comboContainer(element);
     return text(container.querySelector('[class*="singleValue"],[class*="single-value"]')) ||
-      clean(container.querySelector('input[type="hidden"]')?.value);
+      clean(container.querySelector('input[type="hidden"]')?.value) ||
+      text(container.querySelector('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"]')) ||
+      (element.matches('button[aria-haspopup="listbox"]') && !/^(select|choose)( one)?(?:\.{3})?$/i.test(text(element)) ? text(element) : "");
   }
   function referencedLabel(element, attribute) {
     return (element.getAttribute(attribute) || "").split(/\s+/)
@@ -164,7 +172,8 @@
       element.getAttribute("aria-labelledby"), element.getAttribute("aria-describedby"), direct, group].join(" ")).replace(/[_-]/g, " ");
     const purpose = /\bcover\b/.test(identity) ? "Cover Letter" : /\b(resume|cv)\b/.test(identity) ? "Resume/CV" : "";
     const fieldLabel = direct || group;
-    return purpose && !/\b(resume|cv|cover)\b/i.test(fieldLabel || "") ? purpose : fieldLabel || purpose || "File attachment";
+    return purpose && !/\b(resume|cv|cover)\b/i.test(fieldLabel || "") ? purpose : fieldLabel || purpose ||
+      (element.getAttribute('data-automation-id') === 'file-upload-input-ref' ? 'Resume/CV' : 'File attachment');
   }
   function filenameShown(element, filename) {
     const container = fileContainer(element);
@@ -232,20 +241,33 @@
     const started = performance.now();
     records = new Map();
     const fields = [];
-    const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"]'))
-      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : visible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox")) &&
+    const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button[aria-haspopup="listbox"]'))
+      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : visible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button[aria-haspopup="listbox"]'))) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
     const grouped = new Set();
+    const repeated = new Set();
     const keys = new Set();
     for (const element of controls) {
       if (grouped.has(element)) continue;
-      let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" ? "combobox" :
+      let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button[aria-haspopup="listbox"]') || element.getAttribute("data-automation-id") === "multiSelectInput" ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : element.type || "text";
       if (!["text", "textarea", "select", "radio", "checkbox", "combobox", "file", "date", "number", "email", "tel", "url"].includes(kind)) kind = "text";
       let members = [element];
       let fieldLabel = kind === "file" ? fileLabel(element) : label(element);
+      const section = sectionHint(element);
+      if (/^(work experience|employment|education)\b/i.test(section)) {
+        const identity = section + ':' + fieldLabel;
+        if (repeated.has(identity)) continue;
+        repeated.add(identity);
+      }
+      const datePart = element.getAttribute('data-automation-id');
+      if (/^dateSection(Month|Year)$/.test(datePart || '')) {
+        const date = element.closest('[data-automation-id="dateInputWrapper"],[data-automation-id^="formField"]');
+        const heading = text(date?.querySelector('label')) || clean(date?.getAttribute('aria-label')) || fieldLabel;
+        fieldLabel = heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date') + ' ' + (datePart.endsWith('Month') ? 'month' : 'year');
+      }
       let container;
       if (["radio", "checkbox"].includes(kind)) {
         container = element.closest(kind === "radio" ? '[role="radiogroup"],fieldset' : 'fieldset,[role="group"]');
@@ -262,12 +284,14 @@
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
-        options, ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
-        section: sectionHint(element), max_length: element.maxLength >= 0 ? element.maxLength : null});
+        options, multiple: element.getAttribute("data-automation-id") === "multiSelectInput" ||
+          element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
+        section, max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
     }
-    return {page: pageInfo(), fields, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+    previousStep = workdayState();
+    return {page: pageInfo(), fields, workday_step: previousStep?.step, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
 
   async function collectOptions(keys) {
@@ -407,7 +431,11 @@
             unresolved(false); continue;
           }
         } else if (field.kind === "combobox") {
-          if (!await fillCombo(element, answer.value)) { unresolved(false); continue; }
+          let ok = true;
+          for (const value of Array.isArray(answer.value) ? answer.value : [answer.value]) {
+            if (!await fillCombo(element, value)) { ok = false; break; }
+          }
+          if (!ok) { unresolved(false); continue; }
         } else if (field.kind === "select") {
           const option = best(Array.from(element.options).filter(option => !option.disabled && option.value !== ""), answer.value, option => option.text);
           if (!option) { unresolved(false); continue; }
@@ -417,10 +445,10 @@
           const values = Array.isArray(answer.value) ? answer.value : [answer.value];
           const matches = values.map(value => best(members, value, label));
           if (field.kind === "checkbox" && members.length === 1 && typeof answer.value === "boolean") {
-            nativeSet(element, "checked", answer.value); events(element);
+            if (element.checked !== answer.value) element.click(); events(element);
           } else {
             if (matches.some(member => !member) || field.kind === "radio" && matches.length !== 1) { unresolved(false); continue; }
-            for (const member of matches) { nativeSet(member, "checked", true); events(member); }
+            for (const member of matches) { if (!member.checked) member.click(); events(member); }
           }
         } else {
           const value = String(answer.value ?? "");
@@ -435,6 +463,41 @@
     }
     summary.fill_ms = Math.round(performance.now() - started);
     return summary;
+  }
+  function workdayState() {
+    if (!location.hostname.endsWith('.myworkdayjobs.com') &&
+        !document.querySelector('[data-automation-id="progressBar"],[data-automation-id="progressBarActiveStep"],[data-automation-id="signInContent"]')) return null;
+    const active = document.querySelector('[data-automation-id="progressBarActiveStep"]') ||
+      document.querySelector('[data-automation-id="progressBar"] [aria-current="step"]');
+    const step = text(active) || text(document.querySelector('main h1,main h2,form h1,form h2,[data-automation-id="heading"]'));
+    const fields = Array.from(document.querySelectorAll('input,textarea,select,button[aria-haspopup="listbox"]'))
+      .filter(el => el.type === 'file' || visible(el));
+    return {step, sign_in: signInPage(), fields};
+  }
+  let previousStep = workdayState(), stepTimer;
+  function detectStep() {
+    const state = workdayState();
+    if (!state) { previousStep = null; return; }
+    // Compare element identity, not values or menu contents changed by filling.
+    const replaced = state.fields.length && previousStep?.fields.length &&
+      previousStep.fields.every(el => !el.isConnected);
+    const changed = !previousStep || state.step !== previousStep.step ||
+      state.sign_in !== previousStep.sign_in || replaced ||
+      state.fields.length > 0 && previousStep.fields.length === 0;
+    previousStep = state;
+    if (changed && !state.sign_in && state.fields.length) {
+      chrome.runtime.sendMessage({type: 'workday-step', step: state.step}).catch(() => {});
+    }
+  }
+  new MutationObserver(() => {
+    clearTimeout(stepTimer);
+    stepTimer = setTimeout(detectStep, 700);
+  }).observe(document.body, {subtree: true, childList: true, characterData: true,
+    attributes: true, attributeFilter: ['aria-current', 'data-automation-id', 'class', 'hidden']});
+  // Full document navigation also resumes tabs authorized earlier in the session.
+  if (previousStep && !previousStep.sign_in && previousStep.fields.length) {
+    previousStep = null;
+    stepTimer = setTimeout(detectStep, 700);
   }
   globalThis.autoApplyContent = {scan, collectOptions, fill, enterApplication};
 })();
