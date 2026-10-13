@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -1134,3 +1134,124 @@ def test_greenhouse_phone_country_commit_signals(
     assert [f['label'] for f in summary['completed']] == (['Country'] if committed else [])
     assert page.locator('#country').input_value() == ''
     assert page.evaluate('clicks') == dict(next=0, submit=0, submissions=0)
+
+
+def robust_fixture(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + '/workday-robust.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    return context, worker, extension_id, page, tab_id, requests
+
+
+def test_workday_real_labels_conditional_options_and_attached_resume(loaded_extension, extension_server):
+    context, worker, extension_id, page, tab_id, requests = robust_fixture(loaded_extension, extension_server)
+    result = worker.evaluate("id=>globalThis.autoApplyAutofill(id)", tab_id)
+    assert not result.get('error'), result
+    expect(page.locator('input[aria-labelledby=real-question]')).to_have_value('Fixture Student')
+    expect(page.locator('#email')).to_have_value('student@example.test')
+    choice = next(f for f in result['pending'] if f['label']=='Lazy choice *')
+    assert choice['options'] == ['Yes', 'No']
+    assert not any('secondaryQuestionnaire--' in f['label'] for f in result['fields'])
+    assert any(f['value']=='existing-resume.pdf' for f in result['completed'])
+    assert not any(endpoint=='/ext/resume' for endpoint, _, _ in requests)
+    assert page.evaluate('clicks') == {'next':0,'submit':0,'uploads':0}
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    assert not panel.locator('#auto-advance').is_checked()
+    panel.locator('#next-page').click()
+    expect(page.locator('#submit')).to_have_text('Submit')
+    panel.locator('#next-page').click()
+    assert page.evaluate('clicks.submit') == 0
+
+
+def test_workday_load_options_retry(loaded_extension, extension_server):
+    context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate('optionsEnabled=false')
+    result = worker.evaluate("id=>globalThis.autoApplyAutofill(id)", tab_id)
+    assert next(f for f in result['pending'] if f['label']=='Lazy choice *')['options'] == []
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    page.evaluate('optionsEnabled=true')
+    panel.get_by_role('button',name='Load options').click()
+    expect(panel.locator('#needs-input select option')).to_have_text(['Choose an answer','Yes','No'])
+
+
+@pytest.mark.parametrize('cancel,sign_in', [(False,True),(False,False),(True,True)])
+def test_delayed_form_poll_and_cancellation(loaded_extension, extension_server, cancel, sign_in):
+    context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("""() => {
+        const main=document.querySelector('#main');
+        main.innerHTML='<div data-automation-id="signInContent">Sign in<input type="password"></div>';
+        setTimeout(()=>{main.innerHTML='<form><label>Full name *<input id="delayed" required></label></form>';},2500);
+    }""")
+    if not sign_in:
+        page.evaluate("document.querySelector('#main').innerHTML=''")
+    result = worker.evaluate("id=>globalThis.autoApplyAutofill(id)", tab_id)
+    assert result['waiting'] and not result['busy']
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    if cancel:
+        panel.locator('#cancel-form-wait').click()
+        page.wait_for_timeout(4500)
+        expect(page.locator('#delayed')).to_have_value('')
+        expect(panel.locator('#progress')).to_have_text('Form waiting cancelled.')
+    else:
+        expect(page.locator('#delayed')).to_have_value('Fixture Student',timeout=12000)
+
+
+@pytest.mark.parametrize('validation', [False, True])
+def test_auto_advance_stops_at_submit_or_validation(loaded_extension, extension_server, validation):
+    context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("validation=>{window.validation=validation;document.querySelector('#lazy').required=false;document.querySelector('#lazy').value='Yes';}", validation)
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    panel.locator('#auto-advance').check()
+    worker.evaluate("""async () => {for(let n=0;n<100;n++){const {autoAdvanceProfiles={}}=await chrome.storage.local.get('autoAdvanceProfiles');if(Object.values(autoAdvanceProfiles).includes(true))return;await new Promise(r=>setTimeout(r,20));}throw Error('Preference not saved');}""")
+    result = worker.evaluate("id=>globalThis.autoApplyAutofill(id)",tab_id)
+    assert not result.get('error'), result
+    assert page.evaluate('clicks.next') == 1
+    assert page.evaluate('clicks.submit') == 0
+    if validation:
+        assert any('correct the required' in error for error in result['summary']['errors'])
+    else:
+        expect(page.locator('#submit')).to_have_text('Submit')
+    panel.reload()
+    expect(panel.locator('#auto-advance')).to_be_checked()
+
+
+@pytest.mark.parametrize('caption,accessible', [('Submit',''),('Submit Application',''),('Apply',''),('Apply Now',''),('Next','Submit Application')])
+def test_next_page_rejects_final_controls(loaded_extension, extension_server, caption, accessible):
+    _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("args=>{const next=document.querySelector('#next');next.textContent=args.caption;if(args.accessible)next.setAttribute('aria-label',args.accessible);}", {'caption':caption,'accessible':accessible})
+    response=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>globalThis.autoApplyContent.nextPage()}))[0].result""",tab_id)
+    assert response['clicked'] is False
+    assert page.evaluate('clicks') == {'next':0,'submit':0,'uploads':0}
+
+
+def test_workday_preceding_text_replaces_identifier_label(loaded_extension, extension_server):
+    _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("""() => {
+        const input=document.querySelector('[aria-labelledby=real-question]');
+        input.setAttribute('aria-labelledby','fake-label');
+        const fake=document.createElement('span');fake.id='fake-label';fake.textContent='secondaryQuestionnaire__abcdef0123456789';fake.hidden=true;document.body.append(fake);
+        document.querySelector('#real-question').removeAttribute('data-automation-id');
+    }""")
+    response=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>globalThis.autoApplyContent.scan()}))[0].result""",tab_id)
+    assert response['fields'][0]['label'] == 'Full name *'
+
+
+def test_greenhouse_filename_and_remove_skip_resume(loaded_extension, extension_server):
+    _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("""() => {
+        const region=document.querySelector('[data-automation-id=formField-resume]');
+        region.removeAttribute('data-automation-id');region.className='upload';region.querySelector('div').innerHTML='old-cv.docx <button type="button">Remove</button>';
+    }""")
+    response=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        const api=globalThis.autoApplyContent;const {fields}=await api.scan();const field=fields.find(f=>f.kind==='file');
+        const filled=await api.fill([{key:field.key,status:'FILE',value:'resume',force:true}],{resume:{filename:'replacement.pdf',mime:'application/pdf',base64:'YWJj'}});
+        return {field,filled};}}))[0].result""",tab_id)
+    assert response['field']['answered'] is True
+    assert page.evaluate('clicks.uploads') == 0

@@ -29,7 +29,7 @@
   }
   function valueOf({element,members,field,savedDate}) {
     if (savedDate) return savedDate;
-    if (field.kind==='file') return Array.from(element.files || [],file=>file.name).join(', ');
+    if (field.kind==='file') return Array.from(element.files || [],file=>file.name).join(', ') || attachedFile(element);
     if (['radio','checkbox'].includes(field.kind)) return field.kind==='checkbox'&&members.length===1 ? element.checked : members.filter(el=>el.checked).map(label)[field.kind==='radio'?'shift':'slice']();
     if (field.kind==='select') return element.multiple ? Array.from(element.selectedOptions,o=>clean(o.text)) : clean(element.selectedOptions[0]?.text);
     if (field.kind==='combobox') return comboSelection(element) || clean(comboInput(element)?.value);
@@ -82,20 +82,37 @@
     return true;
   }
 
+  function usableLabel(value) {
+    value = clean(value);
+    if (!value || !/\s/.test(value) && (/--|_/.test(value) || /[a-f0-9]{16,}/i.test(value))) return '';
+    return value;
+  }
   function label(element) {
-    const explicit = Array.from(element.labels || []).map(text).filter(Boolean).join(" ");
-    const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).map(id => text(document.getElementById(id))).filter(Boolean).join(" ");
-    return explicit || text(element.closest("label")) || clean(element.getAttribute("aria-label")) || labelled ||
-      clean(element.getAttribute("placeholder")) || text(element.previousElementSibling) ||
-      text(element.closest('[data-automation-id^="formField"]')?.querySelector('label')) ||
-      clean(element.getAttribute('data-automation-id')?.replace(/([a-z])([A-Z])/g, '$1 $2')) ||
-      clean(element.name || element.id) || "Unlabelled field";
+    const sources = [Array.from(element.labels || []).map(text).join(' '), text(element.closest('label')),
+      element.getAttribute('aria-label'), referencedLabel(element, 'aria-labelledby')];
+    const container = element.closest('[data-automation-id^="formField"],fieldset,[role="group"]');
+    if (container) {
+      sources.push(referencedLabel(container, 'aria-labelledby'));
+      sources.push(...Array.from(container.querySelectorAll('legend,label,[data-automation-id="richText"]'))
+        .filter(node => !node.contains(element) && visible(node) &&
+          Boolean(node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)).map(text));
+    }
+    // Walk nearby preceding text before considering a placeholder; never expose control IDs.
+    for (let node = element, depth = 0; node && node !== document.body && depth < 5; node = node.parentElement, depth++) {
+      for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling.matches('input,select,textarea,button') || sibling.querySelector('input,select,textarea,button')) break;
+        if (visible(sibling)) sources.push(text(sibling));
+      }
+      if (node === container) break;
+    }
+    sources.push(element.getAttribute('placeholder'));
+    return sources.map(usableLabel).find(Boolean) || 'Unlabelled field';
   }
 
   function groupLabel(container, fallback) {
-    return text(container?.querySelector("legend")) || clean(container?.getAttribute("aria-label")) ||
-      (container?.getAttribute("aria-labelledby") || "").split(/\s+/).map(id => text(document.getElementById(id))).filter(Boolean).join(" ") ||
-      text(container?.querySelector("h1,h2,h3,h4,[role='heading']")) || fallback;
+    return [text(container?.querySelector('legend')), container?.getAttribute('aria-label'),
+      container ? referencedLabel(container, 'aria-labelledby') : '',
+      text(container?.querySelector('h1,h2,h3,h4,[role="heading"]')), fallback].map(usableLabel).find(Boolean) || 'Unlabelled field';
   }
 
   function commonContainer(members) {
@@ -153,14 +170,16 @@
       previous = signature;
       await pause(50);
     } while (Date.now() < end);
-    return [];
+    return comboOptions(element);
   }
   async function openCombo(element) {
     element.focus();
     if (element.matches('button[aria-haspopup="listbox"]')) { element.click(); return; }
     keypress(element, "ArrowDown");
-    if (!element.getAttribute("list") && !await waitFor(() => comboOptions(element).length, 120)) {
-      const control = element.closest('[class*="-control"],[class*="__control"]') || element;
+    if (!element.getAttribute("list") && !await waitFor(() => comboOptions(element).length, 120) && element.getAttribute('aria-expanded') !== 'true') {
+      element.click();
+      if (await waitFor(() => comboOptions(element).length, 120) || element.getAttribute('aria-expanded') === 'true') return;
+      const control = element.closest('[class*="-control"],[class*="__control"]') || comboContainer(element) || element;
       const toggle = control.querySelector('button[type="button"][aria-label*="Toggle"],button[type="button"][aria-label*="Open"],[class*="dropdown-indicator"],[class*="indicatorContainer"]');
       const target = toggle && visible(toggle) ? toggle : control;
       target.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
@@ -198,7 +217,7 @@
       .map(id => text(document.getElementById(id))).filter(Boolean).join(" ");
   }
   function usableFileLabel(value) {
-    value = clean(value);
+    value = usableLabel(value);
     // Upload buttons describe an action, not the field's purpose.
     if (!/\b(resume|cv|cover)\b/i.test(value) && /^(attach|upload|drop|choose|browse|select|drag)\b/i.test(value)) return "";
     return value;
@@ -242,6 +261,12 @@
     const fieldLabel = direct || group;
     return purpose && !/\b(resume|cv|cover)\b/i.test(fieldLabel || "") ? purpose : fieldLabel || purpose ||
       (element.getAttribute('data-automation-id') === 'file-upload-input-ref' ? 'Resume/CV' : 'File attachment');
+  }
+  function attachedFile(element) {
+    const container = element.closest('[data-automation-id^="formField"],[data-automation-id="fileUpload"],[class*="upload"],[class*="Upload"]') || fileContainer(element);
+    const shown = Array.from(container.querySelectorAll('*')).filter(visible).map(text);
+    const filename = shown.map(value => value.match(/[^\s<>]+\.(?:pdf|docx?|rtf|txt|odt)\b/i)?.[0]).find(Boolean);
+    return filename || (shown.some(value => /successfully uploaded/i.test(value)) ? 'Already attached' : '');
   }
   function filenameShown(element, filename) {
     const container = fileContainer(element);
@@ -291,11 +316,11 @@
   }
 
   function enterApplication() {
-    if (signInPage()) return false;
+    if (signInPage() || /review/i.test(workdayState()?.step || '')) return false;
     const manual = manualEntry();
     const entry = manual || Array.from(document.querySelectorAll('button,a[href],[role="button"]')).find(element =>
       visible(element) && /^(apply|apply for this job)$/i.test((element.getAttribute('aria-label') || element.textContent).trim()));
-    if (!entry) return false;
+    if (!entry || entry.type === "submit" || entry.form || entry.closest("form")) return false;
     // Exact entry labels only: never Next, Save and Continue, or Submit.
     if (entry.tagName === 'A') {
       const url = new URL(entry.href);
@@ -307,6 +332,7 @@
 
   async function scan() {
     const started = performance.now();
+    const previousRecords = records;
     records = new Map();
     const fields = [];
     const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button[aria-haspopup="listbox"]'))
@@ -338,7 +364,7 @@
           (kind === "checkbox" && container ? container.contains(other) : element.name ? other.name === element.name : container && container.contains(other)));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
-        if (members.length > 1 || kind === "radio") fieldLabel = groupLabel(container, element.name || fieldLabel);
+        if (members.length > 1 || kind === "radio") fieldLabel = groupLabel(container, fieldLabel);
         members.forEach(member => grouped.add(member));
       }
       if (!element.dataset.autoapplyKey || keys.has(element.dataset.autoapplyKey)) element.dataset.autoapplyKey = `aa-${++nextKey}`;
@@ -352,10 +378,19 @@
         section, max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
+      if (kind === 'file' && fields[fields.length - 1].answered) fields[fields.length - 1].attached_file = valueOf(records.get(key));
       observedValues.set(key,JSON.stringify(valueOf(records.get(key))));
     }
+    // Preserve composite section dates while rescanning conditional controls.
+    for (const [key, old] of previousRecords) {
+      if (!old.dateElements || !records.has(key)) continue;
+      const current = records.get(key);
+      current.field = {...current.field, ...old.field}; current.dateElements = old.dateElements; current.savedDate = old.savedDate;
+      for (const date of old.dateElements.slice(1)) { records.delete(date.dataset.autoapplyKey); }
+    }
+    const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
     previousStep = workdayState();
-    return {page: pageInfo(), fields, workday_step: previousStep?.step, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+    return {page: pageInfo(), fields: retained, workday_step: previousStep?.step, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
 
   async function collectOptions(keys) {
@@ -365,7 +400,7 @@
       if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
       try {
         await openCombo(record.element);
-        record.field.options = (await settledComboOptions(record.element, 700)).map(text);
+        record.field.options = (await settledComboOptions(record.element, 3000)).map(text);
         record.field.answered = occupied(record) || !record.field.options.length && displayedChoice(record.element);
         fields.push({...record.field});
       } finally { closeCombo(record.element); }
@@ -401,7 +436,7 @@
   }
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
-    if (field.kind === "file") return element.files.length > 0;
+    if (field.kind === "file") return Boolean(element.files.length || attachedFile(element));
     if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || clean(comboInput(element)?.value) || !comboInput(element) && !/^(select|choose|search)\b/i.test(text(element)) && text(element));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
       !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
@@ -513,6 +548,7 @@
       const record = records.get(answer.key);
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) { summary.skipped++; continue; }
       const {element, members, field} = record;
+      if (field.kind === "file" && occupied(record)) {summary.skipped++;continue;}
       if (["combobox","select","radio"].includes(field.kind) && !field.options.length && occupied(record)) { summary.skipped++; continue; }
       const unresolved = writing => {
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
@@ -823,5 +859,25 @@
     previousStep = null;
     stepTimer = setTimeout(detectStep, 700);
   }
-  globalThis.autoApplyContent = {scan, collectOptions, fill, prepareSections, enterApplication, sidebar};
+  function validationErrors() {
+    return [...new Set(Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"],[data-automation-id*="error" i]'))
+      .filter(visible).map(node => text(node) || label(node)).filter(Boolean))];
+  }
+  async function nextPage(requireComplete = false) {
+    const errors = validationErrors();
+    if (errors.length) return {clicked: false, errors};
+    if (signInPage()) return {clicked: false, errors: ['Sign in before continuing.']};
+    if (requireComplete && (await scan()).fields.some(field => field.required && !field.answered)) return {clicked: false, errors: []};
+    const button = Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"],[role="button"]'))
+      .find(node => {
+        const caption = clean(node.textContent || node.value || node.getAttribute('aria-label'));
+        const identity = [caption, node.getAttribute('aria-label'), node.getAttribute('data-automation-id')].join(' ');
+        return visible(node) && !/submit|apply/i.test(identity) && /^(next|save and continue|continue)$/i.test(caption);
+      });
+    if (!button) return {clicked: false, errors: []};
+    button.click();
+    await pause(1000);
+    return {clicked: true, errors: validationErrors()};
+  }
+  globalThis.autoApplyContent = {scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
 })();

@@ -82,44 +82,60 @@ async function coverLetter(result, answers) {
   }
 }
 
-export async function autofill(tabId, application) {
-  if (running) return {error: "Autofill is already running."};
-  running = true;
-  let result = {busy: true, progress: "Scanning application..."};
-  try {
-    await showSidebar(tabId);
-    await report(result);
-    let scanned = await scan(tabId);
-    if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
-    activeResults.delete(scanned.tabId);
-    await showSidebar(scanned.tabId);
-    result = {...scanned, completed: [], busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
-    activeResults.set(result.tabId, result);
-    const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
-    const saved = autofillTabs[result.tabId] || {};
-    result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.matched;
-    result.matched ||= await api("/ext/match", {url: result.url});
-    autofillTabs[result.tabId] = {...saved, matched: result.matched};
-    await chrome.storage.session.set({autofillTabs});
-    if (result.matched.company) result.page.company = result.matched.company;
-    if (result.matched.title) result.page.title = result.matched.title;
-    if (result.sign_in) {
-      result.state = "needs_input";
-      result.detail = result.progress = "Sign in to Workday in this tab. Autofill will resume automatically.";
-      return await report({...result, busy: false});
-    }
-    if (!result.fields.length) throw new Error("No visible editable fields found on this page.");
-    await progress(result, "Matching profile answers...");
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const formWaits = new Map(), cancelledTabs = new Set();
+function cancelWait(tabId) {
+  clearTimeout(formWaits.get(tabId)); formWaits.delete(tabId); cancelledTabs.add(tabId); pendingSteps.delete(tabId);
+}
+function pollForForm(result) {
+  const end = Date.now() + 60000;
+  async function tick() {
+    if (cancelledTabs.has(result.tabId)) return;
+    try {
+      const scanned = await scan(result.tabId);
+      if (!scanned.sign_in && scanned.fields.length) {
+        formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
+      }
+      if (Date.now() < end) formWaits.set(result.tabId, setTimeout(tick, 1000));
+      else { formWaits.delete(result.tabId); result.waiting = false; result.progress = 'No form appeared. Press Autofill to try again.'; await report(result); }
+    } catch { formWaits.delete(result.tabId); }
+  }
+  formWaits.set(result.tabId, setTimeout(tick, 1000));
+}
+async function advancePreference(value) {
+  const profile = await api('/ext/ping');
+  const {server = '', autoAdvanceProfiles = {}} = await chrome.storage.local.get(['server','autoAdvanceProfiles']);
+  const key = server + ':' + (profile.profile_id || profile.profile_name || profile.name || 'default');
+  if (value !== undefined) { autoAdvanceProfiles[key] = Boolean(value); await chrome.storage.local.set({autoAdvanceProfiles}); }
+  return {enabled: Boolean(autoAdvanceProfiles[key])};
+}
+async function clickNext(result, automatic = false) {
+  const scanned = await scan(result.tabId);
+  if (automatic && (result.pending.length || result.writing.length || result.summary.errors.length ||
+      scanned.sign_in || scanned.fields.some(field => field.required && !field.answered))) return false;
+  const [frame] = await chrome.scripting.executeScript({target:{tabId:result.tabId},
+    func: automatic => globalThis.autoApplyContent.nextPage(automatic), args:[automatic]});
+  if (frame.result.errors.length) { result.summary.errors.push(...frame.result.errors); result.progress = 'Fix the page validation errors before continuing.'; await report(result); return false; }
+  if (!frame.result.clicked) { if (!automatic) { result.progress = 'No Next page button is available. Review and submit on the page yourself.'; await report(result); } return false; }
+  const after = await scan(result.tabId);
+  // An unchanged form means navigation did not succeed; never repeatedly click it.
+  return after.url !== scanned.url || after.workday_step !== scanned.workday_step ||
+    after.fields.map(field=>field.key).join() !== scanned.fields.map(field=>field.key).join();
+}
+async function matchAndFill(result, prepare = false) {
+    const sectionAnswers=[];
+    if (prepare) {
     const profile = await api('/ext/profile-sections');
     const prepared = await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',
       func: profile => globalThis.autoApplyContent?.prepareSections(profile), args:[profile]});
-    const sectionAnswers=[]; result.sections=[];
+    result.sections=[];
     result.fields=prepared.filter(frame=>frame.result).flatMap(frame=>{
       const prefix=frame.frameId+':';
       sectionAnswers.push(...frame.result.answers.map(answer=>({...answer,key:prefix+answer.key})));
       result.sections.push(...frame.result.sections);
       return frame.result.fields.map(field=>({...field,key:prefix+field.key}));
     });
+    }
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
     const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
@@ -147,17 +163,103 @@ export async function autofill(tabId, application) {
     const files = {};
     if (answers.some(answer => answer.status === "FILE" && answer.value === "resume" && !result.fields.find(field => field.key === answer.key)?.answered)) files.resume = await api("/ext/resume");
     await fill(result, answers, files);
+
+  // A failed resolved choice still needs its lazy options in the panel.
+  for (const field of result.pending.filter(field => field.kind === 'combobox' && !field.options.length && !unresolved.some(item=>item.key===field.key))) {
+    await loadOptions(result, field.key);
+  }
+}
+async function loadOptions(result, key) {
+  const field = result.fields.find(item=>item.key===key);
+  if (field?.kind !== 'combobox') {
+    const updated = (await scan(result.tabId)).fields.find(item=>item.key===key);
+    if (updated) for (const list of [result.fields,result.pending]) Object.assign(list.find(item=>item.key===key) || {}, updated);
+    return;
+  }
+  const [frameId, local] = key.split(':');
+  const [frame] = await chrome.scripting.executeScript({target:{tabId:result.tabId,frameIds:[Number(frameId)]},
+    func: keys => globalThis.autoApplyContent.collectOptions(keys), args:[[local]]});
+  for (const field of frame.result.fields) {
+    for (const list of [result.fields,result.pending]) Object.assign(list.find(item=>item.key===key) || {}, field, {key});
+  }
+}
+async function rescanRevealed(result) {
+  for (let pass = 0; pass < 3; pass++) {
+    await delay(500);
+    const scanned = await scan(result.tabId);
+    const known = new Set(result.fields.map(field=>field.key));
+    const added = scanned.fields.filter(field=>!known.has(field.key) && !field.answered);
+    for (const name of ['pending','writing']) result[name] = result[name].filter(field=>scanned.fields.some(item=>item.key===field.key&&!item.answered));
+    result.fields = scanned.fields;
+    if (!added.length) continue;
+    const all = result.fields;
+    result.fields = added;
+    await matchAndFill(result);
+    result.fields = all;
+  }
+  result.summary.needs_input = result.pending.map(field=>field.label);
+  result.summary.needs_writing = result.writing.map(field=>field.label);
+}
+
+export async function autofill(tabId, application, advanceCount = 0) {
+  if (running) return {error: "Autofill is already running."};
+  running = true;
+  let result = {busy: true, progress: "Scanning application..."};
+  try {
+    await showSidebar(tabId);
+    await report(result);
+    let scanned = await scan(tabId);
+    if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
+    clearTimeout(formWaits.get(scanned.tabId)); formWaits.delete(scanned.tabId); cancelledTabs.delete(scanned.tabId);
+    const wasWaiting = activeResults.get(scanned.tabId)?.waiting;
+    pendingSteps.delete(scanned.tabId);
+    activeResults.delete(scanned.tabId);
+    await showSidebar(scanned.tabId);
+    result = {...scanned, completed: [], busy: true, pending: [], writing: [], summary: {filled: 0, skipped: 0, needs_input: [], needs_writing: [], errors: []}};
+    activeResults.set(result.tabId, result);
+    const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
+    const saved = autofillTabs[result.tabId] || {};
+    result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.matched;
+    result.matched ||= await api("/ext/match", {url: result.url});
+    autofillTabs[result.tabId] = {...saved, matched: result.matched};
+    await chrome.storage.session.set({autofillTabs});
+    if (result.matched.company) result.page.company = result.matched.company;
+    if (result.matched.title) result.page.title = result.matched.title;
+    if (!result.sign_in && !result.fields.length && /review/i.test(result.workday_step || '')) {
+      result.progress = 'Review the application and submit on the page yourself.';
+      return await report({...result,busy:false});
+    }
+    if (result.sign_in || !result.fields.length) {
+      result.state = "needs_input";
+      result.detail = result.progress = result.sign_in ? "Sign in to Workday in this tab. Autofill will resume automatically." : 'Waiting for the application form...';
+      result.waiting = true;
+      pollForForm(result);
+      return await report({...result, busy: false});
+    }
+    if (result.workday_step || wasWaiting) {
+      for (let tick = 0; tick < 3; tick++) { await delay(1000); Object.assign(result, await scan(result.tabId)); }
+    }
+    if (result.matched.company) result.page.company = result.matched.company;
+    if (result.matched.title) result.page.title = result.matched.title;
+    for (const field of result.fields.filter(field=>field.attached_file)) result.completed.push({...field,value:field.attached_file,source:'already-attached'});
+    await progress(result, "Matching profile answers...");
+    await matchAndFill(result, true);
+    await rescanRevealed(result);
     result.progress = result.workday_step ?
       `Workday step: ${result.workday_step} - filled ${result.summary.filled}, needs input ${result.pending.length}` : result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
   } catch (error) { result.error = error.message; }
   finally { running = false; result.busy = false; }
   await report(result);
   if (!result.error && result.writing?.length) {
-    const task = continueWriting(result).catch(error => {
+    const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
       result.summary.errors.push(error.message);
       return report(result);
     }).finally(() => { if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
     writingTasks.set(result.tabId, task);
+  }
+  if (!result.error && !result.waiting && advanceCount < 10 && (await advancePreference()).enabled && await clickNext(result, true)) {
+    pendingSteps.delete(result.tabId);
+    return autofill(result.tabId, result.matched, advanceCount + 1);
   }
   return result;
 }
@@ -173,6 +275,7 @@ async function continueWriting(result) {
         instruction: field.max_length === null ? "" : 'Use at most ' + field.max_length + ' characters.'});
       if (activeResults.get(result.tabId) !== result) return;
       await fill(result, [{key: field.key, status: "RESOLVED", value: written.answer, source: "AI"}]);
+      await rescanRevealed(result);
       result.writingProgress = 'Answer filled: ' + field.label;
       if (written.warning) result.summary.errors.push(field.label + ': ' + written.warning);
     } catch (error) { result.writingProgress = field.label + ': ' + error.message; result.summary.errors.push(result.writingProgress); }
@@ -188,22 +291,39 @@ async function continueWriting(result) {
   }
 }
 
+async function advanceAfterWriting(result) {
+  if (!running && activeResults.get(result.tabId) === result && (await advancePreference()).enabled && await clickNext(result,true)) {
+    pendingSteps.delete(result.tabId); await autofill(result.tabId,result.matched);
+  }
+}
 async function action(message) {
   if (message.type === "autofill") return autofill(message.tabId);
   if (message.type === "page-context") return scan(message.tabId);
+  if (message.type === 'auto-advance-preference') return advancePreference(message.enabled);
+  if (message.type === 'cancel-form-wait') {
+    const {lastResult} = await chrome.storage.session.get('lastResult');
+    const id = message.tabId || lastResult?.tabId; cancelWait(id);
+    const result = activeResults.get(id); if (result) {result.waiting=false;result.progress='Form waiting cancelled.';return report(result);} return {};
+  }
   if (running) throw new Error("Wait for autofill to finish.");
   const {lastResult, tabResults={}} = await chrome.storage.session.get(['lastResult','tabResults']);
   const stored=message.tabId?tabResults[message.tabId]:lastResult;
   const result=activeResults.get(stored?.tabId) || stored;
   if (result?.tabId) activeResults.set(result.tabId, result);
   if (!result?.page) throw new Error("Run autofill on an application first.");
-  if (message.type === "fill-answer") {
+  if (message.type === 'next-page') {
+    if (await clickNext(result)) {pendingSteps.delete(result.tabId);return autofill(result.tabId,result.matched);}
+  } else if (message.type === 'load-options') {
+    await loadOptions(result, message.key);
+  } else if (message.type === "fill-answer") {
     await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, source: "you"}]);
     const field = result.fields.find(field => field.key === message.key);
     if (message.remember && field && !["textarea","file"].includes(field.kind)) {
       await api("/ext/remember", {...field, ...context(result), url: result.url, value: message.value});
       result.saved = "Saved";
     }
+    await rescanRevealed(result);
+    if ((await advancePreference()).enabled && await clickNext(result,true)) return autofill(result.tabId,result.matched);
   } else if (message.type === 'undo-applied') {
     await api('/ext/unapplied',{application_id:result.matched.application_id});result.applied=false;
     const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
@@ -231,12 +351,13 @@ async function drainSteps() {
   if (tabId === undefined) return;
   pendingSteps.delete(tabId);
   const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
-  if (autofillTabs[tabId]) await autofill(tabId);
+  if (autofillTabs[tabId] && !cancelledTabs.has(tabId)) await autofill(tabId);
   stepDrain = setTimeout(drainSteps, 100);
 }
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (message.type !== "workday-step" || sender.id !== chrome.runtime.id ||
       !sender.tab?.id || sender.frameId !== 0) return;
+  if (activeResults.get(sender.tab.id)?.busy || cancelledTabs.has(sender.tab.id)) return;
   pendingSteps.add(sender.tab.id);
   clearTimeout(stepDrain);
   stepDrain = setTimeout(drainSteps, 100);
@@ -247,7 +368,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied"].includes(message.type)) return;
+  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait"].includes(message.type)) return;
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });
@@ -365,6 +486,7 @@ chrome.tabs.onActivated.addListener(async ({tabId}) => {
 chrome.tabs.onRemoved.addListener(async tabId => {
   const {tabResults = {}} = await chrome.storage.session.get("tabResults");
   const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
+  cancelWait(tabId);
   activeResults.delete(tabId);
   delete tabResults[tabId]; delete autofillTabs[tabId]; pendingSteps.delete(tabId);
   const {sidebarTabs={}}=await chrome.storage.session.get("sidebarTabs");delete sidebarTabs[tabId];await chrome.storage.session.set({sidebarTabs});

@@ -63,6 +63,13 @@ function prompts() {
       });
       save.disabled = input.disabled;
       actions.append(save);
+      if (['select','radio','checkbox','combobox'].includes(field.kind) && !field.options?.length) {
+        actions.append(button('Load options', async event => {
+          event.target.disabled = true;
+          try { await perform({type:'load-options',key:field.key}); }
+          catch (error) { status.textContent=error.message;event.target.disabled=false; }
+        }));
+      }
       row.append(actions, status);
     }
     actions.append(button("Skip", () => perform({type: "skip-answer", key: field.key}).catch(showError)));
@@ -87,7 +94,7 @@ function completedAnswers(){
     const card=node('div','');card.className='answer-card';
     const label=node('p',field.label);label.className='field-label';
     const value=node('p',Array.isArray(field.value)?field.value.join(', '):String(field.value??''));value.className='answer-value';
-    const source=node('small',/^profile/i.test(field.source||'')?'Profile':/fuzzy.*memory|fuzzy.*saved/i.test(field.source||'')?'Saved (similar)':/memory|saved|user_provided/i.test(field.source||'')?'Saved':field.source==='you'?'You':field.source==='file'?'Upload':'AI');
+    const source=node('small',field.source==='already-attached'?'Already attached':/^profile/i.test(field.source||'')?'Profile':/fuzzy.*memory|fuzzy.*saved/i.test(field.source||'')?'Saved (similar)':/memory|saved|user_provided/i.test(field.source||'')?'Saved':field.source==='you'?'You':field.source==='file'?'Upload':'AI');
     source.className='source-pill';
     const details=node('div','');details.className='answer-details';details.append(label,value);
     card.append(details,source);
@@ -113,6 +120,8 @@ function render(value) {
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
   element("progress").textContent = value.progress || "";
   element("autofill").disabled = Boolean(value.busy);
+  element('next-page').disabled = Boolean(value.busy || value.waiting);
+  element('cancel-form-wait').hidden = !value.waiting;
   element("cover-letter").disabled = Boolean(value.busy || value.coverBusy);
   element("cover-progress").textContent = value.coverProgress || "";
   element("writing-progress").textContent = value.writingProgress || "";
@@ -240,3 +249,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 renderRun((await chrome.storage.session.get("chromeRun")).chromeRun);
 send({type: "run-status-refresh"}).then(renderRun).catch(showError);
+
+element('next-page').onclick=()=>perform({type:'next-page'}).catch(showError);
+element('cancel-form-wait').onclick=()=>perform({type:'cancel-form-wait'}).catch(showError);
+element('auto-advance').onchange=()=>send({type:'auto-advance-preference',enabled:element('auto-advance').checked}).then(value=>{if(value.error)throw Error(value.error);}).catch(showError);
+send({type:'auto-advance-preference'}).then(value=>{element('auto-advance').checked=Boolean(value.enabled);}).catch(showError);

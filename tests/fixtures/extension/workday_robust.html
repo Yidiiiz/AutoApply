@@ -1,0 +1,17 @@
+<!doctype html><html><body>
+<div data-automation-id="progressBarActiveStep">Questions</div><main id="main"><form id="form">
+<div data-automation-id="formField-question"><div data-automation-id="richText" id="real-question">Full name *</div><div><input id="secondaryQuestionnaire--af3d50e305021001fddb4781f9c10002" aria-label="secondaryQuestionnaire--af3d50e305021001fddb4781f9c10002" aria-labelledby="real-question" required></div></div>
+<div data-automation-id="formField-menu"><div>Lazy choice *</div><input id="lazy" role="combobox" aria-expanded="false" required><button id="toggle" type="button" aria-label="Open choices">Open</button></div>
+<div data-automation-id="formField-resume"><label>Resume/CV</label><input id="resume" type="file" hidden><div>Successfully Uploaded existing-resume.pdf <button type="button">Remove</button></div></div>
+<button id="next" type="button" data-automation-id="pageFooterNextButton">Save and Continue</button><button id="submit" type="button">Submit Application</button>
+</form></main><script>
+window.clicks={next:0,submit:0,uploads:0};window.optionsEnabled=true;
+const form=document.querySelector('#form'), lazy=document.querySelector('#lazy');
+form.onsubmit=e=>{e.preventDefault();clicks.submit++;};
+form.querySelector('input[required]').oninput=()=>{if(!document.querySelector('#email'))setTimeout(()=>{const row=document.createElement('label');row.innerHTML='Email<input id="email" required>';form.insertBefore(row,lazy.parentElement);},200);};
+document.querySelector('#resume').onchange=()=>clicks.uploads++;
+document.querySelector('#toggle').onclick=()=>{lazy.setAttribute('aria-expanded','true'); if(!optionsEnabled)return; setTimeout(()=>{if(document.querySelector('[role=listbox]'))return;const list=document.createElement('div');list.role='listbox';list.id='choices';lazy.setAttribute('aria-controls','choices');for(const value of ['Yes','No']){const o=document.createElement('div');o.role='option';o.textContent=value;o.onclick=()=>{lazy.value=value;const selected=document.createElement('span');selected.dataset.automationId='selectedItem';selected.textContent=value;lazy.after(selected);list.remove();lazy.setAttribute('aria-expanded','false');};list.append(o);}lazy.after(list);},1400);};
+lazy.onkeydown=e=>{if(e.key==='Escape'){document.querySelector('[role=listbox]')?.remove();lazy.setAttribute('aria-expanded','false');}};
+document.querySelector('#next').onclick=()=>{clicks.next++;if(window.validation){const error=document.createElement('div');error.role='alert';error.textContent='Please correct the required answer';form.append(error);return;}document.querySelector('[data-automation-id=progressBarActiveStep]').textContent='Review';form.innerHTML='<button type="button" data-automation-id="pageFooterNextButton" id="submit">Submit</button>';document.querySelector('#submit').onclick=()=>clicks.submit++;};
+document.querySelector('#submit').onclick=()=>clicks.submit++;
+</script></body></html>
