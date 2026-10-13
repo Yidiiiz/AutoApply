@@ -3,7 +3,7 @@ import json
 import pytest
 import yaml
 
-from autoapply.answers import AnswerResolver
+from autoapply.answers import AnswerResolver, fit_options
 from autoapply.concepts import canonical_key
 from autoapply.models import Answer, Question
 from autoapply.question_keywords import (AUTHORIZATION_STATEMENT, CONCEPTS, authorization_answer,
@@ -158,3 +158,44 @@ def test_fuzzy_never_crosses_concepts(config, db, listing):
 def test_saved_wording_does_not_override_verified_authorization(config, db, listing):
     app = save(db, config, listing, ZIPLINE_LABEL, 'Yes')
     assert AnswerResolver(config, db).resolve(Question('a', ZIPLINE_LABEL, 'text', True), app).value == AUTHORIZATION_STATEMENT
+
+
+@pytest.mark.parametrize('value', ['United States', 'USA', 'US', 'U.S.', 'United States of America'])
+@pytest.mark.parametrize('suffix', [' +1', ' (+1)', '(+1)'])
+def test_fit_options_phone_country_aliases(value, suffix):
+    options = ['United Arab Emirates +971', 'United Kingdom +44',
+               'United States Minor Outlying Islands +1', 'United States' + suffix]
+    assert fit_options(value, options) == options[-1]
+
+
+@pytest.mark.parametrize('value,option', [
+    ('United Kingdom', 'United Kingdom +44'),
+    ('United Arab Emirates', 'United Arab Emirates(+971)'),
+    ('Afghanistan', 'Afghanistan (+93)'),
+    ('Albania', 'Albania +355'),
+])
+def test_fit_options_trailing_dial_code(value, option):
+    assert fit_options(value, ['United States +1', option]) == option
+
+
+@pytest.mark.parametrize('value', ['United States', 'USA', 'US', 'U.S.', 'United States of America'])
+@pytest.mark.parametrize('options', [
+    ['United Arab Emirates +971', 'United Kingdom +44', 'United States Minor Outlying Islands +1'],
+    ['United States +1 extra'], ['+1 United States'], ['United States 1'],
+    ['United States (+1'], ['United States +1)'],
+    ['United States +1', 'United States (+1)'],
+])
+def test_fit_options_phone_country_abstains(value, options):
+    assert fit_options(value, options) is None
+
+
+def test_fit_options_preserves_exact_and_other_matching():
+    assert fit_options('United States', ['United States +1', 'United States']) == 'United States'
+    assert fit_options('US', ['United States +1', 'US']) == 'US'
+    assert fit_options('United States', ['United States', 'United States']) is None
+    assert fit_options('US', ['United States']) is None
+    assert fit_options('United', ['United States +1', 'United Kingdom +44']) is None
+    assert fit_options('Yes', ['Yes, I require sponsorship']) is None
+    assert fit_options('I am a protected veteran', ['Protected veteran']) == 'Protected veteran'
+    assert fit_options('decline', ['Prefer not to say']) == 'Prefer not to say'
+    assert fit_options('US', []) == 'US'

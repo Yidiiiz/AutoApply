@@ -87,7 +87,7 @@ function completedAnswers(){
     const card=node('div','');card.className='answer-card';
     const label=node('p',field.label);label.className='field-label';
     const value=node('p',Array.isArray(field.value)?field.value.join(', '):String(field.value??''));value.className='answer-value';
-    const source=node('small',field.source?.startsWith('profile')?'Profile':/memory|saved/i.test(field.source||'')?'Saved answer':field.source==='you'?'You':field.source==='file'?'Upload':'AI');
+    const source=node('small',/^profile/i.test(field.source||'')?'Profile':/fuzzy.*memory|fuzzy.*saved/i.test(field.source||'')?'Saved (similar)':/memory|saved|user_provided/i.test(field.source||'')?'Saved':field.source==='you'?'You':field.source==='file'?'Upload':'AI');
     source.className='source-pill';
     const details=node('div','');details.className='answer-details';details.append(label,value);
     card.append(details,source);
@@ -122,6 +122,8 @@ function render(value) {
     element("skipped").textContent = `Skipped ${value.summary.skipped} (including existing answers)`;
     element("upload-errors").textContent = value.summary.errors.join("\n");
   }
+  const sectionText=(value.sections||[]).map(s=>s.name[0].toUpperCase()+s.name.slice(1)+': '+s.added+' added'+(s.skipped?', '+s.skipped+' not in list':'')).join(' · ');
+  for(const id of ['section-results','answer-section-results']) element(id).textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
   element("autofill").textContent=value.busy?"Filling…":"Autofill this page";

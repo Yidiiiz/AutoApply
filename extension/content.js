@@ -27,7 +27,8 @@
     sidebarHost.shadowRoot.querySelector('.restore').hidden=state!=='minimized';
     return state;
   }
-  function valueOf({element,members,field}) {
+  function valueOf({element,members,field,savedDate}) {
+    if (savedDate) return savedDate;
     if (field.kind==='file') return Array.from(element.files || [],file=>file.name).join(', ');
     if (['radio','checkbox'].includes(field.kind)) return field.kind==='checkbox'&&members.length===1 ? element.checked : members.filter(el=>el.checked).map(label)[field.kind==='radio'?'shift':'slice']();
     if (field.kind==='select') return element.multiple ? Array.from(element.selectedOptions,o=>clean(o.text)) : clean(element.selectedOptions[0]?.text);
@@ -154,13 +155,16 @@
     } while (Date.now() < end);
     return [];
   }
-  function openCombo(element) {
+  async function openCombo(element) {
     element.focus();
     if (element.matches('button[aria-haspopup="listbox"]')) { element.click(); return; }
     keypress(element, "ArrowDown");
-    if (element.getAttribute("aria-expanded") !== "true" && !element.getAttribute("list")) {
+    if (!element.getAttribute("list") && !await waitFor(() => comboOptions(element).length, 120)) {
       const control = element.closest('[class*="-control"],[class*="__control"]') || element;
-      control.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
+      const toggle = control.querySelector('button[type="button"][aria-label*="Toggle"],button[type="button"][aria-label*="Open"],[class*="dropdown-indicator"],[class*="indicatorContainer"]');
+      const target = toggle && visible(toggle) ? toggle : control;
+      target.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
+      target.click();
     }
   }
   function closeCombo(element) { keypress(element, "Escape"); element.blur(); }
@@ -321,11 +325,6 @@
       let members = [element];
       let fieldLabel = kind === "file" ? fileLabel(element) : label(element);
       const section = sectionHint(element);
-      if (/^(work experience|employment|education)\b/i.test(section)) {
-        const identity = section + ':' + fieldLabel;
-        if (repeated.has(identity)) continue;
-        repeated.add(identity);
-      }
       const datePart = element.getAttribute('data-automation-id');
       if (/^dateSection(Month|Year)$/.test(datePart || '')) {
         const date = element.closest('[data-automation-id="dateInputWrapper"],[data-automation-id^="formField"]');
@@ -335,7 +334,7 @@
       let container;
       if (["radio", "checkbox"].includes(kind)) {
         container = element.closest(kind === "radio" ? '[role="radiogroup"],fieldset' : 'fieldset,[role="group"]');
-        members = controls.filter(other => other.type === kind && other.form === element.form &&
+        members = controls.filter(other => (sectionField(element) !== "current" || other===element) && other.type === kind && other.form === element.form &&
           (kind === "checkbox" && container ? container.contains(other) : element.name ? other.name === element.name : container && container.contains(other)));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
@@ -365,9 +364,9 @@
       const record = records.get(key);
       if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
       try {
-        openCombo(record.element);
+        await openCombo(record.element);
         record.field.options = (await settledComboOptions(record.element, 700)).map(text);
-        record.field.answered = occupied(record);
+        record.field.answered = occupied(record) || !record.field.options.length && displayedChoice(record.element);
         fields.push({...record.field});
       } finally { closeCombo(record.element); }
     }
@@ -378,21 +377,32 @@
     const container = comboContainer(element);
     const identity = [label(element), element.id, element.name, container.className].join(" ");
     let group = container;
-    for (let depth = 0; depth < 3 && group && !group.matches('form,body'); depth++, group = group.parentElement) {
-      const phone = /phone|dial|calling|country.code/i.test(identity) || group.querySelector('input[type="tel"]');
+    for (let depth = 0; depth < 5 && group && !group.matches('form,body'); depth++, group = group.parentElement) {
+      const phone = /phone|dial|calling|country.code/i.test(identity + " " + group.className) || group.querySelector('input[type="tel"],input[autocomplete="tel"],input[id*="phone"],input[name*="phone"]');
       if (!phone) continue;
-      const shown = text(group);
-      if (/\+\d{1,4}\b/.test(shown)) return shown;
-      const flag = container.querySelector('.iti__flag,.selected-flag,[class*="flag"],img[alt]');
-      if (flag && visible(flag) && /country/i.test(identity)) return flag.getAttribute('title') || flag.getAttribute('alt') || 'Selected country';
+      // Popup options are choices, not an already selected phone country.
+      const popup = '[role="listbox"],[role="option"],[class*="__menu"],[class*="-menu"]';
+      const shown = [element, ...group.querySelectorAll('span,button,[class*="value"],[class*="dial-code"]')]
+        .filter(node => visible(node) && !node.closest(popup)).map(text).join(' ');
+      if (/\+\d{1,3}\b/.test(shown)) return shown;
+      const flag = Array.from(group.querySelectorAll('.iti__flag,.selected-flag,[class*="flag"],img[alt]'))
+        .find(node => visible(node) && !node.closest(popup));
+      if (flag && visible(flag) ) return flag.getAttribute('title') || flag.getAttribute('alt') || 'Selected country';
     }
     return "";
   }
 
+  function displayedChoice(element) {
+    const control=element.closest('[class*="__control"],[class*="-control"]') || element;
+    const shown=clean(element.getAttribute('aria-valuetext')) ||
+      Array.from(control.querySelectorAll('span,[class*="value"],[class*="selection"]')).filter(visible).map(text).find(value=>
+        /[a-z0-9]/i.test(value) && !/^(select|choose|search|loading|no options|no results)\b/i.test(value) && value!==label(element));
+    return Boolean(shown && !/^(select|choose|search)\b/i.test(shown));
+  }
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return element.files.length > 0;
-    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || clean(comboInput(element)?.value) || !comboInput(element) && !/^(select|choose|search)\b/i.test(text(element)) && text(element));
+    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || clean(comboInput(element)?.value) || !comboInput(element) && !/^(select|choose|search)\b/i.test(text(element)) && text(element));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
       !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
     return Boolean(clean(element.isContentEditable || !("value" in element) ? element.textContent : element.value));
@@ -427,7 +437,7 @@
   async function fillCombo(element, value) {
     let committed = false;
     try {
-      openCombo(element);
+      await openCombo(element);
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
       const searches = [...new Set([clean(value), prefix])];
@@ -440,6 +450,7 @@
       }
       if (!option) return false;
       const selected = text(option);
+      const choices = comboOptions(element).map(text);
       if (option.tagName === "OPTION" && element.getAttribute("list")) {
         nativeSet(element, "value", selected);
         events(element);
@@ -448,9 +459,17 @@
         option.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
         option.click();
         committed = Boolean(await waitFor(() => {
-          const selection = comboSelection(element);
-          return normal(selection) === normal(selected) ||
-            element.getAttribute("aria-expanded") === "false" && normal(element.value) === normal(selected);
+          const selection = normal(comboSelection(element));
+          const matchesSelected = Boolean(selection && normal(selected).includes(selection));
+          // A different displayed option overrides other commit signals.
+          if (selection && choices.some(choice => normal(choice) !== normal(selected) &&
+            (normal(choice) === selection || !matchesSelected && normal(choice).includes(selection)))) return false;
+          const container = comboContainer(element);
+          const singleValue = text(container.querySelector('[class*="singleValue"],[class*="single-value"]'));
+          const closed = element.getAttribute("aria-expanded") === "false";
+          return matchesSelected || option.getAttribute("aria-selected") === "true" ||
+            closed && Boolean(singleValue) && !container.querySelector('[class*="placeholder"]') ||
+            closed && normal(element.value) === normal(selected);
         }));
       }
       return committed;
@@ -494,6 +513,7 @@
       const record = records.get(answer.key);
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) { summary.skipped++; continue; }
       const {element, members, field} = record;
+      if (["combobox","select","radio"].includes(field.kind) && !field.options.length && occupied(record)) { summary.skipped++; continue; }
       const unresolved = writing => {
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
         summary[writing ? "writing" : "pending"].push({...field});
@@ -504,7 +524,17 @@
       if (answer.status === "OPTIONAL_SKIP") { summary.skipped++; continue; }
       if (!["RESOLVED", "FILE"].includes(answer.status)) { unresolved(false); continue; }
       try {
-        if (field.kind === "file") {
+        if (record.dateElements) {
+          if (!/^\d{4}-(0[1-9]|1[0-2])(?:-01)?$/.test(String(answer.value))) { unresolved(false); continue; }
+          record.savedDate=String(answer.value).slice(0,7);
+          for (const date of record.dateElements) {
+            if (occupied({element:date,members:[date],field:{kind:date.tagName==='SELECT'?'select':date.type||'text'}})) continue;
+            const value=dateValue(date,String(answer.value));
+            if(date.tagName==='SELECT') {const option=best(Array.from(date.options),value,o=>o.text);if(!option)continue;nativeSet(date,'value',option.value);}
+            else nativeSet(date,'value',value);
+            events(date);
+          }
+        } else if (field.kind === "file") {
           const file = files[answer.value];
           if (!file) { unresolved(answer.value === "cover_letter"); continue; }
           const bytes = Uint8Array.from(atob(file.base64), char => char.charCodeAt(0));
@@ -564,6 +594,200 @@
     return summary;
     } finally { extensionFilling--; }
   }
+
+  const sectionNormal = value => normal(value.replace(/([a-z])([A-Z])/g, '$1 $2')).replace(/[^a-z0-9]+/g, ' ').trim();
+  const sectionNames = {
+    experience: ['work experience','employment','employment history','work history','professional experience','experience','internships'],
+    projects: ['projects','relevant experience','personal projects','technical projects','research','research experience','extracurricular','activities','portfolio'],
+    education: ['education'], skills: ['skills'], links: ['websites','website','links','web links','social network urls']
+  };
+  function sectionKind(value) {
+    value = sectionNormal(value).replace(/ section$/, '');
+    return Object.keys(sectionNames).find(kind => sectionNames[kind].includes(value));
+  }
+  function resumeSections() {
+    const found = new Map();
+    for (const node of document.querySelectorAll('legend,h1,h2,h3,h4,[role="heading"],[aria-label],[data-automation-id]')) {
+      const kind = sectionKind(node.getAttribute('aria-label') || node.getAttribute('data-automation-id') || text(node));
+      if (!kind) continue;
+      let container = node;
+      while (container && !container.matches('form,body') && !container.querySelector('input,select,textarea,button,[role="combobox"]')) container = container.parentElement;
+      if (container && !container.matches('form,body') && !found.has(container)) found.set(container, kind);
+    }
+    return [...found].filter(([container,kind],i,all) => !all.some(([other,k]) => k===kind && other!==container && other.contains(container)));
+  }
+  function sectionField(element) {
+    let value = sectionNormal(label(element)).replace(/ star$/, '');
+    const part = element.getAttribute('data-automation-id') || '';
+    if (/dateSection(Month|Year)/.test(part)) {
+      const wrapper = element.closest('[data-automation-id="dateInputWrapper"],[data-automation-id^="formField"]');
+      value = sectionNormal(text(wrapper?.querySelector('label')) || wrapper?.getAttribute('aria-label') || value) + ' ' + (part.endsWith('Month') ? 'month' : 'year');
+    }
+    if (/^(current|currently work here|i currently work here|present|still working|current role|current employer|i currently attend|currently enrolled)\b/.test(value)) return 'current';
+    if (/^(from|start|start date)\b/.test(value)) return 'start_date';
+    if (/^(to|end|end date|graduation)\b/.test(value)) return 'end_date';
+    if (/^(job title|title|position|role|project name|name)($| )/.test(value) && !/description/.test(value)) return 'title';
+    if (/^(company|employer|organization|organisation)\b/.test(value)) return 'company';
+    if (/^(school|school or university|institution|university)\b/.test(value) && !/location/.test(value)) return 'school';
+    if (/^(degree)\b/.test(value)) return 'degree';
+    if (/^(discipline|major|field of study)\b/.test(value)) return 'major';
+    if (/gpa|overall result/.test(value)) return 'gpa';
+    if (/^(location|city|office location|school location)\b/.test(value)) return 'location';
+    if (/^(description|responsibilities|role description|achievements|summary|details|relevant coursework)\b/.test(value)) return 'description';
+    if (/^(technologies|tools)\b/.test(value)) return 'technologies';
+    if (/url|link|website|github|portfolio/.test(value)) return 'url';
+    return '';
+  }
+  function entryGroups(container, kind) {
+    const anchors = Array.from(container.querySelectorAll('input,textarea,select,[role="combobox"],button[aria-haspopup="listbox"]'))
+      .filter(el => sectionField(el) === (kind==='education'?'school':kind==='links'?'url':'title'));
+    return [...new Set(anchors.map(anchor => {
+      let group = anchor.parentElement;
+      while (group.parentElement && group.parentElement !== container &&
+        !anchors.some(other => other!==anchor && group.parentElement.contains(other))) group = group.parentElement;
+      return group.querySelectorAll('input,select,textarea,[role="combobox"]').length>1?group:anchors.length===1?container:group;
+    }))];
+  }
+  function trimSection(value, maximum) {
+    value = String(value || '').trim();
+    if (maximum===null || maximum===undefined || maximum<0 || value.length<=maximum) return value;
+    const cut = value.slice(0, maximum), boundary = Math.max(cut.lastIndexOf('\n'), ...Array.from(cut.matchAll(/[.!?](?=\s)/g), m=>m.index+1));
+    return cut.slice(0, boundary>0?boundary:cut.lastIndexOf(' ')>0?cut.lastIndexOf(' '):maximum).trim();
+  }
+  function dateValue(element, value) {
+    const match = /^(\d{4})-(\d{2})/.exec(value || '');
+    if (!match) return '';
+    const [,year,month] = match, hint = sectionNormal(label(element)+' '+element.placeholder+' '+element.getAttribute('data-automation-id'));
+    if (/year/.test(hint) || element.type==='number' && Number(element.min)>=1900) return year;
+    if (/month/.test(hint) && element.type!=='month') {
+      const name = new Date(Number(year),Number(month)-1,1).toLocaleString('en-US',{month:'long'});
+      if (element.tagName==='SELECT') return Array.from(element.options).find(o=>[name.toLowerCase(),name.slice(0,3).toLowerCase(),month,String(Number(month))].includes(normal(o.text)))?.text || name;
+      return String(Number(month));
+    }
+    if (element.type==='month') return year+'-'+month;
+    if (element.type==='date') return year+'-'+month+'-01';
+    if (/yyyy/.test(normal(element.placeholder)) && !/mm|dd/.test(normal(element.placeholder))) return year;
+    if (/mm[/-]yyyy/i.test(element.placeholder||'') && !/dd/i.test(element.placeholder||'')) return month+'/'+year;
+    if (/mm.*yyyy|mm.*dd|date/.test(hint)) return month+'/01/'+year;
+    return month+'/'+year;
+  }
+  function selectedSkills(element) {
+    const container = comboContainer(element);
+    return Array.from(container.querySelectorAll('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"],[class*="multiValueLabel"],[class*="multi-value__label"],[class*="token"],[data-skill]')).map(text).map(normal);
+  }
+  async function fillSkills(element, skills) {
+    if(clean(comboInput(element)?.value)) return {added:0,skipped:0};
+    let added=0, skipped=0;
+    for (const skill of skills) {
+      if (selectedSkills(element).includes(normal(skill))) continue;
+      try {
+        await openCombo(element); searchCombo(element,skill);
+        const option = await waitFor(()=>comboOptions(element).find(o=>normal(text(o))===normal(skill)),450);
+        if (option) { option.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0})); option.click(); }
+        else if (element.getAttribute('data-allow-create')==='true' || /token/.test(comboContainer(element).className) || /creatable/i.test(comboContainer(element).className) || comboOptions(element).some(o=>/^(create|add) /i.test(text(o)) && normal(text(o)).includes(normal(skill)))) {
+          const input=comboInput(element);
+          // Keep Enter confined to the token widget, never the containing form.
+          const stop=event=>{if(event.key==='Enter')event.preventDefault();};
+          input.addEventListener('keydown',stop); keypress(input,'Enter'); input.removeEventListener('keydown',stop);
+        }
+        if (await waitFor(()=>selectedSkills(element).includes(normal(skill)),250)) added++; else skipped++;
+      } finally { searchCombo(element,''); closeCombo(element); }
+    }
+    return {added,skipped};
+  }
+  async function prepareSections(profile) {
+    const sections=[], supplied=new Map(), managed=new Set();
+    const containers=resumeSections();
+    extensionFilling++;
+    try {
+      for (const [container,kind] of containers) {
+        const entries = kind==='links'?Object.entries(profile.links||{}).filter(([,url])=>url).map(([title,url])=>({title,url})):profile[kind] || [];
+        if (kind==='skills') continue;
+        const cap = {experience:6,projects:6,education:3,links:6}[kind];
+        let groups=entryGroups(container,kind);
+        const add = Array.from(container.querySelectorAll('button,a,[role="button"],input[type="button"]')).find(el=>visible(el) &&
+          el.type!=='submit' && /^(add(?: another)?(?: (?:work experience|experience|employment|project|education|website|link))?|\+)$/.test(sectionNormal(el.getAttribute('aria-label') || text(el) || el.value) || text(el)) &&
+          (el.tagName!=='A' || !el.getAttribute('href') || el.getAttribute('href')==='#'));
+        if (add) while (groups.length<Math.min(entries.length,cap)) {
+          const before=groups.length; add.click();
+          if (!await waitFor(()=>entryGroups(container,kind).length>before,1500)) break;
+          groups=entryGroups(container,kind);
+        }
+        if (!groups.length) continue;
+        let added=0;
+        for (const [index,group] of groups.slice(0,cap).entries()) {
+          const entry=entries[index]; if(!entry) break;
+          const elements=Array.from(group.querySelectorAll('input,textarea,select,[role="combobox"],button[aria-haspopup="listbox"]')).filter(visible);
+          // Preserve an entire entry already containing user facts.
+          const occupiedGroup=elements.some(el=>!['hidden','button'].includes(el.type) && sectionField(el)!=='current' && occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.getAttribute('role')==='combobox'?'combobox':el.type||'text'}}));
+          for (const el of elements) {
+            managed.add(el);
+            if(occupiedGroup) continue;
+            const key=sectionField(el); if(!key) continue;
+            let value=entry[key];
+            if(key==='company') value=entry.company || entry.organization;
+            if(kind==='links' && key==='url') {const named=Object.keys(profile.links||{}).find(name=>sectionNormal(label(el)).includes(sectionNormal(name)));if(named)value=profile.links[named];}
+            if(key==='title' && /^(role|position)$/.test(sectionNormal(label(el))) && kind==='projects') value=entry.organization || entry.title;
+            if(key==='technologies') value=(entry.technologies||[]).join(', ');
+            if(key==='current') value=Boolean(entry.current);
+            if(key==='end_date' && entry.current) value=el.required && el.type==='text' && !/month|year/.test(sectionNormal(label(el)))?'Present':'';
+            else if(/_date$/.test(key)) value=dateValue(el,value);
+            if(value!==undefined && value!=='') supplied.set(el,{value:trimSection(value,el.maxLength>=0?el.maxLength:null),boolean:key==='current'});
+          }
+          if(!occupiedGroup) added++;
+        }
+        sections.push({name:kind,added,skipped:0});
+      }
+      await scan();
+      for(const [container,kind] of containers) {
+        if(kind==='skills' && profile.skills?.length) for(const record of records.values()) {
+          if(!container.contains(record.element) || !/skills/i.test(record.field.label)) continue;
+          managed.add(record.element);
+          if(record.field.kind==='combobox') {
+            const counts=await fillSkills(record.element,profile.skills||[]); sections.push({name:kind,...counts}); record.field.answered=true;
+          } else if(['textarea','text'].includes(record.field.kind) && !occupied(record)) {
+            const included=[];
+            for(const skill of profile.skills) {
+              if(record.field.max_length!==null && [...included,skill].join(', ').length>record.field.max_length) break;
+              included.push(skill);
+            }
+            supplied.set(record.element,{value:included.join(', ')});
+            sections.push({name:kind,added:included.length,skipped:profile.skills.length-included.length});
+          }
+        }
+        if(kind==='projects' && profile.projects?.length && !entryGroups(container,kind).length) for(const record of records.values()) {
+          if(!container.contains(record.element) || record.field.kind!=='textarea' || /tell|describe|why|how|essay|\?/.test(normal(record.field.label))) continue;
+          managed.add(record.element);
+          const value=(profile.projects||[]).map(p=>[p.title,p.organization,(p.technologies||[]).join(', ')].filter(Boolean).join(' - ')+': '+clean(p.description)).join('\n');
+          supplied.set(record.element,{value:trimSection(value,record.field.max_length)});
+          sections.push({name:kind,added:(profile.projects||[]).length,skipped:0});
+        }
+      }
+      // One stable question per absent required start date, shared by month/year controls.
+      for(const [container,kind] of containers.filter(([,k])=>['experience','projects','education'].includes(k))) {
+        for(const [index,group] of entryGroups(container,kind).entries()) {
+          const entry=(profile[kind]||[])[index]; if(!entry || entry.start_date) continue;
+          const dates=Array.from(records.values()).filter(r=>group.contains(r.element) && sectionField(r.element)==='start_date' && !occupied(r));
+          if(!dates.some(r=>r.field.required)) continue;
+          const first=dates[0];
+          first.dateElements=dates.map(r=>r.element);
+          first.field={...first.field,label:kind==='education'?entry.school+': start date':entry.title+' at '+(entry.company||entry.organization||'')+': start date',kind:'text',options:[],required:true,max_length:null,section:''};
+          first.field.section_missing_date=true;
+          dates.slice(1).forEach(r=>records.delete(r.field.key));
+        }
+      }
+      const answers=[];
+      for(const record of records.values()) {
+        const chosen=supplied.get(record.element);
+        if(managed.has(record.element) && !record.field.section_missing_date) {
+          record.field.section_managed=true;
+          answers.push({key:record.field.key,status:chosen?'RESOLVED':'OPTIONAL_SKIP',value:chosen?.boolean?chosen.value==='true':chosen?.value,source:'profile:sections'});
+        }
+      }
+      return {fields:Array.from(records.values(),r=>({...r.field,answered:occupied(r)})),answers,sections};
+    } finally { extensionFilling--; }
+  }
+
   function workdayState() {
     if (!location.hostname.endsWith('.myworkdayjobs.com') &&
         !document.querySelector('[data-automation-id="progressBar"],[data-automation-id="progressBarActiveStep"],[data-automation-id="signInContent"]')) return null;
@@ -599,5 +823,5 @@
     previousStep = null;
     stepTimer = setTimeout(detectStep, 700);
   }
-  globalThis.autoApplyContent = {scan, collectOptions, fill, enterApplication, sidebar};
+  globalThis.autoApplyContent = {scan, collectOptions, fill, prepareSections, enterApplication, sidebar};
 })();

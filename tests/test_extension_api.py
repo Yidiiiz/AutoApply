@@ -508,3 +508,48 @@ def test_detected_applied_evidence_idempotence_and_undo(http_dashboard, config, 
     protected_queue(db, listing)
     assert ext(http_dashboard, 'POST', '/ext/applied', dict(payload, application_id=3556))[0] == 403
     assert ext(http_dashboard, 'POST', '/ext/applied', dict(payload, evidence=''))[0] == 400
+
+
+def test_normalized_profile_sections_pairing_and_saved_date(http_dashboard, config):
+    profile = dict(config.profile)
+    profile.update(employment=[dict(company='Past', title='Intern', start_date='2022-09', end_date='2023-02', current='False', description='- Built tools.\n- Tested tools.'),
+                               dict(company='Self', title='Freelancer', start_date='', current='True')],
+                   projects=[dict(name='Robot', role='Builder', start_date='2024-03', technologies=['Python'])],
+                   education=dict(school='Fixture', degree='Bachelor', major='Computing', graduation_date='2028-05', currently_enrolled=False),
+                   skills=['Python', 'Rust'], skill_categories={'Languages': ['Python', 'JavaScript']}, links={'github': 'https://example.test/code'})
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    assert request(http_dashboard[0], 'GET', '/ext/profile-sections')[0] == 403
+    status, result, _ = ext(http_dashboard, 'GET', '/ext/profile-sections')
+    assert status == 200
+    assert result['experience'][0]['title'] == 'Freelancer' and result['experience'][0]['current'] is True
+    assert result['experience'][1]['current'] is False
+    assert result['experience'][1]['description'] == '- Built tools.\n- Tested tools.'
+    assert result['skills'] == ['Python', 'JavaScript', 'Rust']
+    assert result['education'][0]['start_date'] == '' and result['education'][0]['end_date'] == '2028-05'
+    assert result['projects'][0]['organization'] == 'Builder'
+    assert result['projects'][0]['current'] is True
+    payload = dict(url='https://fixture.test/job', label='Freelancer at Self: start date', kind='text', value='2023-02')
+    assert ext(http_dashboard, 'POST', '/ext/remember', payload)[0] == 200
+    field = dict(key='start', label=payload['label'], kind='text', required=True, section_missing_date=True)
+    answer = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://other.test/job', fields=[field]))[1]['answers'][0]
+    assert answer['value'] == '2023-02' and answer['source'] == 'verified_memory'
+
+
+@pytest.mark.parametrize('section', ['experience', 'projects'])
+@pytest.mark.parametrize('dates, expected', [
+    (dict(start_date='2026-09'), True),
+    (dict(start_date='2026-08', end_date='', current=None), True),
+    (dict(start_date='2026-07', current=''), True),
+    (dict(start_date='2026-06', end_date='2026-09'), False),
+    (dict(start_date='2026-05', current=False), False),
+    (dict(start_date='2026-04', current='False'), False),
+    (dict(start_date='', current=True), True),
+    (dict(start_date='', current='True'), True),
+    (dict(start_date=''), False),
+])
+def test_profile_sections_infer_ongoing_only_when_current_unset(section, dates, expected):
+    from autoapply.extension_api import profile_sections
+    profile = {'employment' if section == 'experience' else 'projects': [dates]}
+    result = profile_sections(Mock(config=Mock(profile=profile)), {})[section][0]
+    assert result['current'] is expected
+    assert isinstance(result['current'], bool)

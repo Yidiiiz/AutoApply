@@ -23,6 +23,15 @@ def fit_options(value, options):
     exact = [option for option in options if normalize(option) == expected]
     if len(exact) == 1:
         return exact[0]
+    if not exact:
+        country = 'united states' if expected in {'usa', 'us', 'u s', 'united states of america'} else expected
+        matches = []
+        for option in options:
+            name = re.sub(r'(?:\s+\+\d+|\s*\(\+\d+\))\s*$', '', option)
+            if name != option and normalize(name) == country:
+                matches.append(option)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
     veteran = re.sub(r'^i am (?:a )?', '', expected)
     if veteran in {'protected veteran', 'not a protected veteran'}:
         matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]

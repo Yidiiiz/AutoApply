@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import Error, expect, sync_playwright
 
+from autoapply.answers import fit_options
+
 pytestmark = pytest.mark.browser
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "extension"
@@ -27,7 +29,7 @@ def extension_server():
     canned = {
         "Full name *": "Fixture Student", "Email": "student@example.test",
         "Phone": "2025550100", "About you": "I build local tools.",
-        "Country *": "united states", "Work authorization *": "Yes",
+        "Country *": "united states", "Country": "United States", "Work authorization *": "Yes",
         "Skills": ["Python", "JavaScript"], "Contact consent": True,
         "Existing answer *": "Do not overwrite", "Short answer *": "Too long",
         "Additional information": "Plain editable text", "City": "Boston",
@@ -68,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -113,6 +115,8 @@ def extension_server():
                     self.response(200, {"done": True})
             elif self.path in {"/ext/run/result", "/ext/run/status"}:
                 self.response(200, {"ok": True})
+            elif self.path == "/ext/profile-sections":
+                self.response(200, {"experience": [], "projects": [], "education": [], "skills": [], "links": {}})
             elif self.path == "/ext/ping":
                 self.response(200, {"ok": True, "profile_name": "Fixture Student"})
             elif self.path == "/ext/match":
@@ -144,6 +148,9 @@ def extension_server():
                         status, value = "NEEDS_WRITING", None
                     elif label in canned:
                         status, value = "RESOLVED", canned[label]
+                        if label == "Country":
+                            value = fit_options(value, field["options"]) if field.get("options") else None
+                            status = "RESOLVED" if value is not None else "NEEDS_INPUT"
                         if label == "Start date month" and field["kind"] == "number":
                             value = "8"
                     else:
@@ -254,7 +261,7 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert next(field for field in fields if field["label"] == "About you")["max_length"] == 200
     assert sum(path == "/ext/resume" for path, _, _ in requests) == 1
     assert all(key == KEY for _, key, _ in requests)
-    assert all(path in {"/ext/ping", "/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
+    assert all(path in {"/ext/profile-sections", "/ext/ping", "/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
     expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
 
     panel = context.new_page()
@@ -951,3 +958,179 @@ def test_autofill_returns_before_delayed_writing_and_cover(loaded_extension, ext
     if with_ai:
         assert any(field["value"] == "Reviewed while writing" for field in final["completed"])
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
+
+
+@pytest.mark.parametrize("date_controls", ["workday", "greenhouse"])
+def test_repeatable_profile_sections(loaded_extension, extension_server, date_controls):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + "/sections.html")
+    if date_controls == "greenhouse":
+        page.evaluate("""() => {
+            document.querySelector('#work button').textContent='Add another';
+            // Also convert newly added month controls to native month selects.
+            const convert = () => {for(const input of document.querySelectorAll('input[data-automation-id=dateSectionMonth]')) {
+                const select=document.createElement('select');for(const attr of input.attributes) if(attr.name!=='type')select.setAttribute(attr.name,attr.value);
+                select.innerHTML='<option value="">Month</option>'+Array.from({length:12},(_,i)=>'<option value="'+String(i+1).padStart(2,'0')+'">'+new Date(2024,i,1).toLocaleString('en-US',{month:'long'})+'</option>').join('');input.replaceWith(select);
+            }};convert();new MutationObserver(convert).observe(document.querySelector('#work'),{childList:true,subtree:true});
+        }""")
+    profile = dict(
+        experience=[dict(title="Engineer", company="Fixture", location="Boston", start_date="2024-08", end_date="", current=True, description="Built tools."),
+                    dict(title="Freelancer", company="Self", start_date="", end_date="", current=True)],
+        education=[dict(school="Fixture University", degree="Bachelor", major="Computing", start_date="", end_date="2028-05", current=False)],
+        projects=[dict(title="Robot", organization="Builder", start_date="2025-03", end_date="2025-08", url="https://example.test/robot", technologies=["Python"], description="Built a robot. Tested it.")],
+        skills=["Python", "JavaScript", "Rust"], links=dict(github="https://example.test/code", linkedin="https://example.test/me"))
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    prepared = worker.evaluate("""async ({id, profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: p => globalThis.autoApplyContent.prepareSections(p), args:[profile]}))[0].result""", dict(id=tab_id, profile=profile))
+    missing = [f for f in prepared['fields'] if f.get('section_missing_date')]
+    assert [f['label'] for f in missing] == ['Freelancer at Self: start date', 'Fixture University: start date']
+    answers = prepared['answers'] + [dict(key=f['key'], status='NEEDS_INPUT') for f in missing]
+    summary = worker.evaluate("""async ({id, answers}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: a => globalThis.autoApplyContent.fill(a), args:[answers]}))[0].result""", dict(id=tab_id, answers=answers))
+    assert summary['needs_input'] == ['Freelancer at Self: start date', 'Fixture University: start date']
+    assert page.locator('#work .entry').count() == 2
+    assert int(page.locator('#work .entry').first.locator('[data-automation-id=dateSectionMonth]').first.input_value()) == 8
+    assert page.locator('#work .entry').first.locator('[data-automation-id=dateSectionYear]').first.input_value() == '2024'
+    assert page.locator('#work .entry input[type=checkbox]').first.is_checked()
+    assert not page.locator('#work .entry .end').first.is_visible()
+    assert page.locator('#projects input[type=date]').first.input_value() == '2025-03-01'
+    assert page.locator('#projects input[type=date]').last.input_value() == '2025-08-01'
+    assert page.locator('#skill-text').input_value() == 'Python, JavaScript, Rust'
+    assert page.locator('#tags').inner_text() == 'PythonJavaScript'
+    assert any(s == dict(name='skills', added=2, skipped=1) for s in prepared['sections'])
+    assert 'Robot - Builder - Python: Built a robot.' in page.locator('#project-text textarea').input_value()
+    assert page.locator('section').filter(has=page.locator('h2', has_text='Websites')).locator('input').count() == 2
+    country = next(f for f in prepared['fields'] if f['label'] == 'Country')
+    assert not country['answered']
+    # A stable date question can be answered once and distributed to month/year controls.
+    worker.evaluate("""async ({id, key}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: key => globalThis.autoApplyContent.fill([{key,status:'RESOLVED',value:'2023-02'}]),args:[key]}))[0].result""", dict(id=tab_id, key=missing[0]['key']))
+    assert int(page.locator('#work .entry').last.locator('[data-automation-id=dateSectionMonth]').first.input_value()) == 2
+    before = page.locator('form').evaluate("e => Array.from(e.querySelectorAll('input,textarea'),n=>[n.value,n.checked])")
+    worker.evaluate("""async ({id, profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: async p => {const r=await globalThis.autoApplyContent.prepareSections(p);return globalThis.autoApplyContent.fill(r.answers)},args:[profile]}))[0].result""", dict(id=tab_id, profile=profile))
+    assert page.locator('form').evaluate("e => Array.from(e.querySelectorAll('input,textarea'),n=>[n.value,n.checked])") == before
+    assert page.evaluate('clicks') == dict(next=0, submit=0, submissions=0)
+
+
+def test_saved_source_labels(loaded_extension):
+    context, worker, extension_id = loaded_extension
+    panel = context.new_page()
+    worker.evaluate("""() => chrome.storage.session.set({lastResult:{tabId:999,page:{title:'Fixture'},
+        completed:['profile:identity','USER_PROVIDED','verified_memory','verified_fuzzy_memory','AI','you'].map((source,i)=>({key:String(i),label:'Fact '+i,kind:'text',value:'Fixture',source})),
+        pending:[],writing:[],summary:{filled:6,skipped:0,errors:[]},sections:[{name:'experience',added:2,skipped:0}]}})""")
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
+    expect(panel.locator('.source-pill')).to_have_text(['Profile','Saved','Saved','Saved (similar)','AI','You'])
+    assert panel.locator('#section-results').text_content() == 'Experience: 2 added'
+    assert panel.locator('#answer-section-results').text_content() == 'Experience: 2 added'
+
+
+def test_existing_resume_entry_and_displayed_choice(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/sections.html')
+    page.evaluate("""() => {
+        const fields=document.querySelectorAll('#work .entry input');fields[0].value='User title';fields[1].value='User employer';
+        const choice=document.createElement('div');choice.className='select__control';choice.innerHTML='<input role="combobox" aria-label="Other choice" required><span class="selection">Selected fact</span>';document.querySelector('form').append(choice);
+    }""")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    result = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:async () => {
+        const api=globalThis.autoApplyContent;
+        const prepared=await api.prepareSections({experience:[{title:'Profile title',company:'Profile employer',start_date:'2024-08',current:true},{title:'Second',company:'Second employer',start_date:'2022-01',current:false}],projects:[],education:[],skills:[],links:{}});
+        await api.fill(prepared.answers);return prepared;
+    }}))[0].result""", tab_id)
+    assert page.locator('#work .entry').first.locator('input').first.input_value() == 'User title'
+    assert page.locator('#work .entry').first.locator('input').nth(1).input_value() == 'User employer'
+    assert page.locator('#work .entry').first.locator('input').nth(3).is_checked() is False
+    assert page.locator('#work .entry').last.locator('input').first.input_value() == 'Second'
+    assert next(f for f in result['fields'] if f['label']=='Other choice')['answered'] is True
+    assert page.evaluate('clicks') == dict(next=0,submit=0,submissions=0)
+
+
+@pytest.mark.parametrize("collect_first", [False, True])
+def test_greenhouse_empty_click_only_phone_country(loaded_extension, extension_server, collect_first):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
+    page = context.new_page()
+    page.goto(server + "/sections.html")
+    country = page.locator("#country")
+    country.focus()
+    country.press("ArrowDown")
+    assert page.locator("#country-options [role=option]").count() == 0
+    page.locator(".select__control").dispatch_event("mousedown")
+    assert page.locator("#country-options [role=option]").count() == 0
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    if collect_first:
+        collected = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},
+            func: async () => {const api=globalThis.autoApplyContent;const scan=await api.scan();
+                const country=scan.fields.find(f=>f.label==='Country');
+                return {initial:country, collected:await api.collectOptions([country.key])};}
+        }))[0].result""", tab_id)
+        assert not collected['initial']['answered'] and not collected['initial']['required']
+        field = collected['collected']['fields'][0]
+        assert not field['answered']  # Visible dial codes in the popup are not a selection.
+        assert len(field['options']) == 244
+        assert field['options'][:2] == ['United States +1', 'Afghanistan +93']
+    result = worker.evaluate("id => autoApplyAutofill(id)", tab_id)
+    country_requests = [field for endpoint, _, payload in requests if endpoint == "/ext/answers"
+                        for field in payload["fields"] if field["label"] == "Country" and field.get("options")]
+    assert country_requests
+    assert len(country_requests[-1]["options"]) == 244
+    assert fit_options("United States", country_requests[-1]["options"]) == "United States +1"
+    expect(page.locator(".select__single-value")).to_have_text("+1")
+    assert country.input_value() == '' and country.get_attribute('aria-expanded') == 'false'
+    assert any(f['label'] == 'Country' for f in result['completed'])
+    assert 'Country' not in result['summary']['needs_input']
+    assert not any(f['label'] == 'Country' for f in result['pending'])
+    panel = context.new_page()
+    panel.goto(f"chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}")
+    expect(panel.locator('.prompt').filter(has_text=re.compile(r'^Country'))).to_have_count(0)
+    again = worker.evaluate("id => autoApplyAutofill(id)", tab_id)
+    assert next(f for f in again['fields'] if f['label'] == 'Country')['answered']
+    assert 'Country' not in again['summary']['needs_input']
+    assert page.evaluate('clicks') == dict(next=0, submit=0, submissions=0)
+
+
+@pytest.mark.parametrize("displayed, selected, closed, placeholder_gone, committed", [
+    ("+1", False, False, False, True),
+    ("", True, False, False, True),
+    ("🇺🇸", False, True, True, True),
+    ("United Kingdom +44", True, True, True, False),
+    ("+44", True, True, True, False),
+])
+def test_greenhouse_phone_country_commit_signals(
+    loaded_extension, extension_server, displayed, selected, closed, placeholder_gone, committed,
+):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + "/sections.html")
+    page.evaluate("""config => {
+        document.querySelector('#country-options').addEventListener('click', event => {
+            document.querySelector('.select__single-value').textContent = config.displayed;
+            event.target.setAttribute('aria-selected', String(config.selected));
+            document.querySelector('#country').setAttribute('aria-expanded', String(!config.closed));
+            if (!config.placeholder_gone) {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'select__placeholder';
+                document.querySelector('.select__value-container').append(placeholder);
+            }
+        });
+    }""", dict(displayed=displayed, selected=selected, closed=closed, placeholder_gone=placeholder_gone))
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    summary = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: async () => {
+            const api = globalThis.autoApplyContent;
+            const country = (await api.scan()).fields.find(f => f.label === 'Country');
+            return api.fill([{key:country.key, status:'RESOLVED', value:'United States', source:'profile_rule'}]);
+        }
+    }))[0].result""", tab_id)
+    assert summary['filled'] == int(committed)
+    assert summary['needs_input'] == ([] if committed else ['Country'])
+    assert [f['label'] for f in summary['completed']] == (['Country'] if committed else [])
+    assert page.locator('#country').input_value() == ''
+    assert page.evaluate('clicks') == dict(next=0, submit=0, submissions=0)

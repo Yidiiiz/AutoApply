@@ -110,10 +110,21 @@ export async function autofill(tabId, application) {
     }
     if (!result.fields.length) throw new Error("No visible editable fields found on this page.");
     await progress(result, "Matching profile answers...");
+    const profile = await api('/ext/profile-sections');
+    const prepared = await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',
+      func: profile => globalThis.autoApplyContent?.prepareSections(profile), args:[profile]});
+    const sectionAnswers=[]; result.sections=[];
+    result.fields=prepared.filter(frame=>frame.result).flatMap(frame=>{
+      const prefix=frame.frameId+':';
+      sectionAnswers.push(...frame.result.answers.map(answer=>({...answer,key:prefix+answer.key})));
+      result.sections.push(...frame.result.sections);
+      return frame.result.fields.map(field=>({...field,key:prefix+field.key}));
+    });
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
-    const fields = result.fields.map(field => field.options_partial ? {...field, options: []} : field);
+    const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
     let {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
+    answers.push(...sectionAnswers);
     // Resolve searchable profile answers first; open menus only for unresolved prompts.
     const unresolved = result.fields.filter(field => field.kind === "combobox" && !field.answered &&
       !answers.some(answer => answer.key === field.key && answer.status === "RESOLVED"));

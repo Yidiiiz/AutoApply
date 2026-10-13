@@ -140,6 +140,55 @@ def _repeatable_answer(q, field, profile):
     return True, Answer(value, 'profile:' + ('employment.0.' if work else 'education.') + key) if value is not None else None
 
 
+def profile_sections(dashboard, payload):
+    """Explicit resume facts only; no writer or applicant-data mutation."""
+    profile = dashboard.config.profile
+    def boolean(value):
+        return value is True or str(value).lower() == 'true'
+    def date(value):
+        value = str(value or '')
+        return value[:7] if re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])(?:-\d{2})?', value) else ''
+    def current(entry):
+        value = entry.get('current')
+        if value is not None and value != '':
+            return boolean(value)
+        return bool(date(entry.get('start_date')) and not entry.get('end_date'))
+    def description(value):
+        if isinstance(value, list):
+            return '\n'.join(str(line).strip() for line in value)
+        return str(value or '').strip()
+    experience = [dict(company=str(e.get('company') or ''), title=str(e.get('title') or ''),
+                       location=str(e.get('location') or ''), start_date=date(e.get('start_date')),
+                       end_date=date(e.get('end_date')), current=current(e),
+                       description=description(e.get('description')))
+                  for e in profile.get('employment', []) if isinstance(e, dict)]
+    projects = [dict(title=str(e.get('name') or ''), organization=str(e.get('role') or ''),
+                     url=str(e.get('url') or ''), start_date=date(e.get('start_date')),
+                     end_date=date(e.get('end_date')), current=current(e),
+                     technologies=e.get('technologies') or [], description=description(e.get('description')))
+                for e in profile.get('projects', []) if isinstance(e, dict)]
+    for entries in (experience, projects):
+        entries.sort(key=lambda e: (e['current'], e['start_date']), reverse=True)
+    history = profile.get('education_history') or [profile.get('education', {})]
+    education = [dict(school=str(e.get('school') or ''), degree=str(e.get('degree') or ''),
+                      major=str(e.get('major') or ''), location=str(e.get('location') or ''),
+                      gpa=str(e.get('gpa') or ''), start_date=date(e.get('start_date')),
+                      end_date=date(e.get('end_date') or e.get('graduation_date')),
+                      current=boolean(e.get('currently_enrolled')),
+                      description=description(e.get('relevant_coursework')))
+                 for e in history if isinstance(e, dict) and e]
+    skills, seen = [], set()
+    groups = list((profile.get('skill_categories') or {}).values()) + [profile.get('skills') or []]
+    for group in groups:
+        for skill in group:
+            skill = str(skill).strip()
+            if skill and skill.casefold() not in seen:
+                skills.append(skill)
+                seen.add(skill.casefold())
+    return dict(experience=experience, projects=projects, education=education,
+                skills=skills, links=profile.get('links') or {})
+
+
 def ping(dashboard, payload):
     identity = dashboard.config.profile.get('identity', {})
     return dict(ok=True, name='AutoApply', profile_name=' '.join(
@@ -189,6 +238,22 @@ def resolve_answers(dashboard, payload):
             remembered = resolver.resolve_result(replace(q, required=False, max_length=None), app).answer
             if remembered and remembered.source == 'verified_memory':
                 answer = remembered
+            if field.get('section_missing_date') is True:
+                sections = profile_sections(dashboard, {})
+                labels = [e['title'] + ' at ' + (e.get('company') or e.get('organization') or '') + ': start date'
+                          for kind in ('experience', 'projects') for e in sections[kind] if not e['start_date']]
+                labels += [e['school'] + ': start date' for e in sections['education'] if not e['start_date']]
+                answer = None
+                if q.label in labels and q.kind == 'text':
+                    rows = db.rows("SELECT answer,provenance FROM known_answers WHERE normalized_question=? AND verified=1 AND source='USER_PROVIDED' ORDER BY id DESC", (normalize(q.label),))
+                    revision = dashboard.config.profile_snapshot().revision
+                    for row in rows:
+                        data = json.loads(row.get('provenance') or '{}')
+                        value = json.loads(row['answer'])
+                        if (data.get('provenance', {}).get('canonical_profile_revision') == revision
+                                and isinstance(value, str) and re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])(?:-01)?', value)):
+                            answer = Answer(value, 'verified_memory')
+                            break
             if answer:
                 try:
                     if q.kind == 'checkbox' and isinstance(answer.value, bool) and len(q.options) <= 1:
@@ -201,7 +266,7 @@ def resolve_answers(dashboard, payload):
                         raise ValueError('Field cannot accept text')
                 except (ValueError, TypeError):
                     answer = None
-            status = ('RESOLVED' if answer else 'NEEDS_WRITING' if answers.is_writing_question(q)
+            status = ('RESOLVED' if answer else 'NEEDS_WRITING' if not field.get('section_missing_date') and answers.is_writing_question(q)
                       else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP')
             result.append(dict(key=q.key, value=answer.value if answer else None,
                                source=answer.source if answer else '', status=status))
@@ -428,7 +493,7 @@ def unapplied(dashboard, payload):
     return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
 
 
-ROUTES = {('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
+ROUTES = {('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
