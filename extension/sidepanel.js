@@ -138,7 +138,7 @@ function render(value) {
     element("skipped").textContent = `Skipped ${value.summary.skipped} (including existing answers)`;
     element("upload-errors").textContent = value.summary.errors.join("\n");
   }
-  const sectionText=(value.sections||[]).map(s=>s.name[0].toUpperCase()+s.name.slice(1)+': '+s.added+' added'+(s.skipped?', '+s.skipped+' not in list':'')).join(' · ');
+  const sectionText=(value.sections||[]).map(s=>s.name[0].toUpperCase()+s.name.slice(1)+(s.total!==undefined?' '+s.added+'/'+s.total:': '+s.added+' added'+(s.skipped?' / '+s.skipped+' not in list':''))).join(' · ');
   for(const id of ['section-results','answer-section-results']) element(id).textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;

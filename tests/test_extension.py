@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -1466,3 +1466,132 @@ def test_t039_labels_rules_navigation_and_snapshot(loaded_extension, extension_s
     expect(writing).to_have_count(1)
     page.locator('#essay').evaluate('e=>e.remove()')
     expect(writing).to_have_count(0)
+
+
+@pytest.mark.parametrize("initial", ["none", "empty", "user"])
+def test_t040_real_workday_repeatable_sections(loaded_extension, extension_server, initial):
+    context, worker, extension_id = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/t040.html')
+    if initial != 'none':
+        page.evaluate('initialEntry()')
+    if initial == 'user':
+        page.locator('#work [data-automation-id=formField-jobTitle] input').fill('User role')
+        page.locator('#work [data-automation-id=formField-companyName] input').fill('User employer')
+    profile = dict(experience=[dict(title='Freelance Software Developer', company='Self', start_date='2019', current=True),
+                               dict(title='Engineer', company='Fixture', start_date='2025-02', end_date='2026-03')],
+                   education=[dict(school='Fixture University', degree='Bachelor of Science', major='Computer Science',
+                                   start_date='2024', end_date='2028-05', gpa='3.5', current=True)],
+                   skills=['Python', 'JavaScript', 'Missing Skill'])
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    invoke = """async ({id,profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: async profile => {const api=globalThis.autoApplyContent;const prepared=await api.prepareSections(profile);
+            await api.fill(prepared.answers);return prepared;},args:[profile]}))[0].result"""
+    prepared = worker.evaluate(invoke, dict(id=tab_id, profile=profile))
+    work = page.locator('#work .entry')
+    assert work.count() == 2
+    assert work.first.locator('[data-automation-id=formField-jobTitle] input').input_value() == ('User role' if initial=='user' else 'Freelance Software Developer')
+    if initial != 'user':
+        assert work.first.locator('[type=checkbox]').is_checked()
+        assert work.first.locator('.end input').first.is_disabled()
+        assert not work.first.locator('.end').is_visible()
+        assert work.first.locator('[data-automation-id=dateSectionMonth-input]').first.input_value() == '01'
+        assert work.first.locator('[data-automation-id=dateSectionYear-input]').first.input_value() == '2019'
+        assert 'current:click' in page.evaluate('order')
+    assert work.last.locator('[data-automation-id=formField-jobTitle] input').input_value() == 'Engineer'
+    assert work.last.locator('[data-automation-id=dateSectionMonth-input]').first.input_value() == '02'
+    assert work.last.locator('[data-automation-id=dateSectionYear-input]').last.input_value() == '2026'
+    assert page.locator('#education .entry').count() == 1
+    assert page.locator('[data-automation-id=formField-firstYearAttended] input').input_value() == '2024'
+    assert page.locator('[data-automation-id=formField-lastYearAttended] input').input_value() == '2028'
+    assert '2024' in page.evaluate('commits')
+    assert page.evaluate("dateKeys.every(key=>/^[0-9]$/.test(key))")
+    assert page.evaluate('dateKeys.length') >= 20
+    assert page.locator('[data-automation-id=formField-fieldOfStudy] [data-automation-id=selectedItem]').inner_text() == 'Computer Science'
+    assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python', 'JavaScript']
+    assert page.evaluate('searches') == ['Computer Science', 'Python', 'JavaScript', 'Missing Skill']
+    assert all(',' not in value for value in page.evaluate('searches'))
+    assert next(s for s in prepared['sections'] if s['name']=='skills') == dict(name='skills', added=2, skipped=1)
+    experience = next(s for s in prepared['sections'] if s['name']=='experience')
+    assert experience['added'] == (1 if initial=='user' else 2)
+    assert experience['total'] == 2
+    assert next(s for s in prepared['sections'] if s['name']=='education')['added'] == 1
+    order = page.evaluate('order')
+    adds = [i for i,event in enumerate(order) if event=='add:work']
+    assert len(adds) == (2 if initial=='none' else 1)
+    if initial=='none':
+        assert 'fill:work' in order[adds[0]+1:adds[1]]
+    # React may remove completed entries' old Add button; re-query for Add Another.
+    assert page.locator('#work [data-automation-id=add-button]').inner_text() == 'Add Another'
+    before = page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input'),n=>[n.value,n.checked])")
+    worker.evaluate(invoke, dict(id=tab_id, profile=profile))
+    assert work.count() == 2
+    assert page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input'),n=>[n.value,n.checked])") == before
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+    panel = context.new_page()
+    worker.evaluate("sections=>chrome.storage.session.set({lastResult:{tabId:999,page:{title:'Fixture'},completed:[],pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]},sections}})", prepared['sections'])
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
+    expect(panel.locator('#section-results')).to_have_text(f"Experience {experience['added']}/2 · Education 1/1 · Skills: 2 added / 1 not in list")
+
+
+def test_t040_inferred_current_and_extra_user_entries(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/t040.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        await globalThis.autoApplyContent.prepareSections({experience:[{title:'Current',company:'Self',start_date:'2024'}]});
+    }}))[0].result""", tab_id)
+    assert page.locator('#work [type=checkbox]').is_checked()
+    assert page.locator('#work .end input').first.is_disabled()
+    page.evaluate("initialEntry();initialEntry()")
+    page.locator('#work .entry').last.locator('[data-automation-id=formField-jobTitle] input').fill('Extra user entry')
+    before = page.evaluate('order.length')
+    worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        await globalThis.autoApplyContent.prepareSections({experience:[{title:'Current',company:'Self',start_date:'2024'}]});
+    }}))[0].result""", tab_id)
+    assert page.locator('#work .entry').count() == 3
+    assert page.locator('#work .entry').last.locator('[data-automation-id=formField-jobTitle] input').input_value() == 'Extra user entry'
+    assert page.evaluate('order.length') == before
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+
+
+@pytest.mark.parametrize("mode", ["delayed_add", "rejected_date", "portal_prompt"])
+def test_t040_waits_verifies_and_handles_prompt_portals(loaded_extension, extension_server, mode):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/t040.html')
+    if mode == 'delayed_add':
+        page.evaluate("() => {document.querySelector('#work button').onclick=()=>setTimeout(initialEntry,1800);}")
+    elif mode == 'rejected_date':
+        page.evaluate("() => {initialEntry();document.querySelector('#work [data-automation-id=dateSectionYear-input]').oninput=e=>e.target.value='';}")
+    else:
+        page.evaluate("""() => {
+            const input=document.querySelector('#skills input'), list=document.querySelector('#skills .results');
+            document.body.append(list);
+            input.closest('[data-automation-id=formField-skills]').querySelector('label').textContent='Technology prompt';
+        }""")
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    result = worker.evaluate("""async ({id,mode})=>(await chrome.scripting.executeScript({target:{tabId:id},func:async mode=>{
+        const api=globalThis.autoApplyContent;
+        if(mode==='portal_prompt') {
+            const field=(await api.scan()).fields.find(f=>f.label==='Technology prompt');
+            return {field,filled:await api.fill([{key:field.key,status:'RESOLVED',value:['Python','JavaScript']}])};
+        }
+        return api.prepareSections({experience:[{title:'Current',company:'Self',start_date:'2024'},
+            ...(mode==='rejected_date'?[{title:'Second',company:'Other',start_date:'2020',end_date:'2022'}]:[])]});
+    },args:[mode]}))[0].result""", dict(id=tab_id, mode=mode))
+    if mode == 'portal_prompt':
+        assert result['field']['kind'] == 'combobox'
+        assert result['field']['multiple'] is True
+        assert result['filled']['filled'] == 1
+        assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python', 'JavaScript']
+    else:
+        assert page.locator('#work .entry').count() == 1
+        section = next(s for s in result['sections'] if s['name']=='experience')
+        assert section['added'] == (0 if mode=='rejected_date' else 1)
+        assert page.locator('#work [data-automation-id=dateSectionYear-input]').first.input_value() == ('' if mode=='rejected_date' else '2024')
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)
