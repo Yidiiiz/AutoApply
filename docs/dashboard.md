@@ -675,3 +675,12 @@ Workday tabs autofilled during this browser session automatically refill after s
 The paired extension fetches explicit resume sections from `GET /ext/profile-sections` without AI. It fills up to six employment entries, six projects, three education entries, and website links using the section’s Add controls. Existing populated entries are preserved. Month dates use day 1 in full date inputs; ongoing roles check the current checkbox and omit end dates. Missing required start dates appear once as a named question: enter `YYYY-MM` in the panel and Save to reuse it on future forms. Skills are added individually to matching tags, with unmatched counts shown in Fill and Answers; free text gets the skills list. Simple projects textareas get a compact list, while essay questions continue through the writer.
 
 The Fill tab has Next page and a per-profile auto-advance preference, off by default. Only Next, Continue, or Save and Continue controls are eligible; Submit and Apply are never clicked. Auto-advance requires all required fields filled, no pending answers or writing, and no validation errors. It stops at Review or after ten steps. Autofill polls once per second for up to 60 seconds after sign-in or an empty form; Cancel waiting stops it. Workday forms settle for three more seconds, and up to three rescans fill newly revealed controls. Choice prompts offer Load options when an async menu is still unavailable. Existing uploaded filenames or Successfully Uploaded status are reported as already attached.
+
+Question recognition uses the stemmed, whole-word concept table in
+`autoapply/question_keywords.py` for wording variants. Its any/all/exclude
+phrases and specificity score keep long questions recognizable without matching
+substrings. Existing tested, narrow rules in `concepts.py` remain higher-priority
+overrides. Standard answers use explicit profile preferences; advertised salary
+ranges take precedence over the configured default (hourly pay is annualized
+at 2,080 hours when requested). Negated commitments and Hispanic/Latino fields
+without a decline option require user input.

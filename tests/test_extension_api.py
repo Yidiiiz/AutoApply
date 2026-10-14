@@ -594,3 +594,37 @@ def test_work_year_only_date_parts(label, expected):
     matched, answer = _repeatable_answer(question, dict(section='Work Experience'),
                                          dict(employment=[dict(start_date='2019', current=True)]))
     assert matched and answer.value == expected
+
+
+@pytest.mark.parametrize('kind,placeholder,expected', [
+    ('text', 'MM/DD/YYYY', '05/17/2027'),
+    ('text', 'DD/MM/YYYY', '17/05/2027'),
+    ('text', 'MM/YYYY', '05/2027'),
+    ('date', '', '2027-05-17'),
+])
+def test_desired_start_date_format(http_dashboard, config, kind, placeholder, expected):
+    profile = config.profile
+    profile['application_preferences'] = dict(desired_start_date='05/17/2027')
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    status, data, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(
+        url='https://jobs.example.test/fixture', fields=[dict(key='start', label='What is your desired start date?',
+            kind=kind, placeholder=placeholder, required=True)]))
+    assert status == 200
+    assert data['answers'][0]['value'] == expected
+
+
+def test_insulet_graduation_format(http_dashboard):
+    status, data, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(
+        url='https://jobs.example.test/fixture', fields=[dict(key='grad', label='When are you expected to graduate?*',
+            kind='text', required=True)]))
+    assert status == 200 and data['answers'][0]['value'] == 'May-28'
+
+
+def test_short_desired_start_date_field(http_dashboard, config):
+    profile = config.profile
+    profile['application_preferences'] = dict(desired_start_date='05/17/2027')
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    status, data, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(
+        url='https://jobs.example.test/fixture', fields=[dict(key='start', label='What is your desired start date?',
+            kind='text', placeholder='MM/YYYY', max_length=7, required=True)]))
+    assert status == 200 and data['answers'][0]['value'] == '05/2027'

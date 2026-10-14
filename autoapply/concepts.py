@@ -87,7 +87,8 @@ def concept(label):
     for pattern, path in patterns:
         if re.fullmatch(pattern, text):
             return path
-    return None
+    from .question_keywords import match
+    return match(label)
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ ALIASES = {'identity.first_name': 'contact.first_name', 'identity.last_name': 'c
            'demographics.racial_ethnic_background': 'demographics.race'}
 PROFILE_PATHS = {v: k for k, v in ALIASES.items() if not k.startswith('demographics.')}
 DEMOGRAPHIC_PATHS = {
+    'demographics.hispanic_latino': ('demographics.hispanic_latino', 'application_preferences.race'),
     'demographics.gender': ('demographics.gender', 'demographics.gender_identity', 'application_preferences.gender'),
     'demographics.race': ('demographics.race', 'demographics.racial_ethnic_background', 'application_preferences.race'),
     'demographics.disability': ('demographics.disability', 'application_preferences.disability'),
@@ -168,6 +170,18 @@ for key in ('sponsorship_combined', 'prior_employment', 'conflict_of_interest',
             'start_date', 'military_service', 'required_demographic_processing_consent'):
     REGISTRY[key] = Concept(key, (), None, 'policy', scopes=('application', 'employer'),
                             factual_fallback=False, special_policy=True)
+
+# Explicit answers for ordinary application questions.
+for key in ('desired_start_date', 'availability_dates', 'default_salary_range',
+            'relatives_at_company', 'family_conflict_of_interest',
+            'schedule_commitment', 'terms_acknowledgement'):
+    path = 'application_preferences.' + key
+    REGISTRY[path] = Concept(path, (), path, 'application_preferences',
+                            scopes=('application', 'employer'), special_policy=True,
+                            answer_type='boolean' if key in {'relatives_at_company', 'family_conflict_of_interest',
+                                                            'schedule_commitment', 'terms_acknowledgement'} else 'text')
+REGISTRY['start_date'] = Concept('start_date', (), 'application_preferences.desired_start_date',
+                                 'application_preferences', scopes=('application', 'employer'), special_policy=True)
 
 # A configured standing preference may apply broadly, but an answer to one
 # employer's office/source question must not manufacture that standing preference.

@@ -1,9 +1,23 @@
-"""Small label-only concept matcher and conservative saved-question similarity."""
+"""Primary label-only question concepts and conservative saved-question similarity.
+
+Add a CONCEPTS row with a canonical key, alternative whole-word phrases (any),
+required phrases (all), and unsafe phrases (exclude). Add its profile path in
+concepts.REGISTRY and formatting in answers when needed. More specific matches
+win; options never classify a question. Narrow tested concepts.py overrides win.
+"""
 import re
 
 
 def normalize(text):
-    return ' '.join(re.sub(r'[^a-z0-9]', ' ', str(text or '').lower()).split())
+    text = re.sub(r"['’]s\b", '', str(text or '').lower())
+    words = re.sub(r'[^a-z0-9]', ' ', text).split()
+    def stem(word):
+        if len(word) > 4 and word.endswith(('sses', 'shes', 'ches', 'xes', 'zes')):
+            return word[:-2]
+        if len(word) > 3 and word.endswith('s') and not word.endswith(('ss', 'us')) and word not in {'this', 'was'}:
+            return word[:-1]
+        return word
+    return ' '.join(stem(word) for word in words)
 
 
 def contains(text, phrase):
@@ -21,7 +35,7 @@ CONCEPTS = [
     dict(key='work_authorization.sponsorship_future', any=['sponsor', 'sponsorship'],
          all=['future'], exclude=[]),
     dict(key='work_authorization.sponsorship_now', any=['sponsor', 'sponsorship'],
-         all=[], exclude=['future']),
+         all=[], exclude=['future', 'hold']),
     dict(key='citizenship.us_citizen', any=['us citizen', 'u s citizen', 'united states citizen',
          'us citizenship', 'u s citizenship', 'united states citizenship'], all=[], exclude=['since birth']),
     dict(key='work_authorization.temporary_authorization', any=['temporary work authorization',
@@ -29,8 +43,31 @@ CONCEPTS = [
     dict(key='visa.status', any=['visa status', 'current visa', 'type of visa'], all=[], exclude=['sponsor', 'sponsorship']),
     dict(key='security.clearance', any=['security clearance', 'clearance'], all=[], exclude=[]),
     dict(key='locations.willing_to_relocate', any=['willing to relocate', 'relocation'], all=[], exclude=['not', 'expense']),
+    dict(key='application_preferences.availability_dates', any=['dates and hours', 'availability dates'],
+         all=[], exclude=[]),
+    dict(key='application_preferences.default_salary_range', any=['salary', 'compensation', 'desired pay', 'hourly rate', 'pay rate'],
+         all=[], exclude=['salary history', 'previous salary']),
+    dict(key='application_preferences.relatives_at_company', any=['relatives', 'relative', 'family member'],
+         all=['work'], exclude=['direct interest', 'conflict', 'not', 'no']),
+    dict(key='application_preferences.family_conflict_of_interest', any=['competes', 'competitor', 'supplier', 'customer'],
+         all=['family', 'direct interest'], exclude=['not', 'no']),
+    dict(key='application_preferences.family_conflict_of_interest', any=['conflict of interest'],
+         all=[], exclude=['not', 'no']),
+    dict(key='application_preferences.schedule_commitment', any=['schedule', 'program', 'hours', 'available', 'work'],
+         all=['commit'], exclude=[]),
+    dict(key='application_preferences.schedule_commitment', any=['are you able', 'are you available', 'can you work', 'able to work'],
+         all=['schedule'], exclude=[]),
+    dict(key='application_preferences.schedule_commitment', any=['are you able', 'are you available'],
+         all=['program', 'hours'], exclude=[]),
+    dict(key='application_preferences.terms_acknowledgement', any=['agree', 'acknowledge', 'certify'],
+         all=['term', 'condition'], exclude=['signature', 'sign', 'name', 'not', 'no', 'cannot']),
+    dict(key='application_preferences.terms_acknowledgement', any=['acknowledge', 'certify', 'agree'],
+         all=['read', 'understand'], exclude=['signature', 'sign', 'name', 'not', 'no', 'cannot']),
+    dict(key='identity.full_name', any=['signature', 'type your name', 'typed name', 'electronic signature'],
+         all=[], exclude=[]),
+    dict(key='demographics.hispanic_latino', any=['hispanic', 'latino', 'hispanic latino', 'hispanic or latino'], all=[], exclude=[]),
     dict(key='start_date', any=['start date', 'when can you start'], all=[], exclude=['education', 'employment history']),
-    dict(key='education.graduation_date', any=['graduation date', 'when will you graduate'], all=[], exclude=['month', 'year']),
+    dict(key='education.graduation_date', any=['graduation date', 'when will you graduate', 'when are you expected to graduate'], all=[], exclude=['month', 'year']),
     dict(key='education.gpa', any=['gpa', 'grade point average'], all=[], exclude=[]),
     dict(key='education.school', any=['school', 'university', 'college'], all=[], exclude=['high school', 'degree', 'major', 'gpa', 'graduation', 'year']),
     dict(key='education.degree', any=['degree', 'degree level'], all=[], exclude=['enrolled', 'pursuing', 'major', 'graduation']),
@@ -44,6 +81,7 @@ CONCEPTS = [
     dict(key='demographics.pronouns', any=['pronouns'], all=[], exclude=[]),
     dict(key='demographics.gender', any=['gender', 'gender identity'], all=[], exclude=[]),
     dict(key='demographics.race', any=['race', 'ethnicity', 'racial ethnic background'], all=[], exclude=[]),
+    dict(key='demographics.veteran_status', any=['veteran'], all=['protected'], exclude=[]),
     dict(key='demographics.veteran_status', any=['veteran', 'veteran status'], all=[], exclude=[]),
     dict(key='demographics.disability', any=['disability', 'disability status'], all=[], exclude=[]),
 ]

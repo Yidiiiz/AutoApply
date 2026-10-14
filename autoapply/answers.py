@@ -1,8 +1,9 @@
 import json
 import re
 import copy
+import calendar
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 
 from .config import fact
 from .jobs import location_rank, normalize, us_location
@@ -49,6 +50,85 @@ def fit_options(value, options):
                    or re.search(r"decline|prefer not|do not wish|don t wish", option, re.I)]
         return matches[0] if len(matches) == 1 else None
     return None
+
+
+def format_start_date(value, kind='text', placeholder=''):
+    """Fit a configured complete date to HTML date controls or a visible hint."""
+    raw = str(value or '')
+    try:
+        parsed = date.fromisoformat(raw) if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw) else datetime.strptime(raw, '%m/%d/%Y').date()
+    except ValueError:
+        return None
+    hint = placeholder.lower()
+    if kind == 'date' or 'yyyy-mm-dd' in hint:
+        return parsed.isoformat()
+    formats = {'dd/mm/yyyy': '%d/%m/%Y', 'mm-dd-yyyy': '%m-%d-%Y',
+               'dd-mm-yyyy': '%d-%m-%Y', 'yyyy/mm/dd': '%Y/%m/%d', 'mm/yyyy': '%m/%Y'}
+    for pattern, output in formats.items():
+        if pattern in hint:
+            return parsed.strftime(output)
+    return parsed.strftime('%m/%d/%Y')
+
+
+def salary_range(label, description, fallback):
+    """Use the first advertised pay range, preserving its unit unless requested."""
+    amount = r'\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)'
+    pattern = amount + r'\s*(?:-|–|—|to)\s*' + amount + r'\s*(?:USD\s*)?(per\s+hour|/\s*(?:hour|hr)|an?\s+hour|hourly|per\s+year|/\s*(?:year|yr)|annually|annual)?'
+    text = normalize(label)
+    for hit in re.finditer(pattern, str(description or ''), re.I):
+        low, high = float(hit[1].replace(',', '')), float(hit[2].replace(',', ''))
+        unit = (hit[3] or '').lower()
+        hourly = bool(re.search(r'hour|hr', unit))
+        if low <= 0 or high < low or not hourly and (low < 1000 or not unit and "$" not in hit[0] and ',' not in hit[0]):
+            continue
+        annual_question = bool(re.search(r'\bannual(?:ly)?\b|\bper year\b', text))
+        hourly_question = bool(re.search(r'\bhourly\b|\bper hour\b', text))
+        if hourly and annual_question:
+            low, high, hourly = low * 2080, high * 2080, False
+        elif not hourly and hourly_question:
+            low, high, hourly = low / 2080, high / 2080, True
+        def money(value):
+            return "$" + (f'{value:,.0f}' if value.is_integer() else f'{value:,.2f}')
+        return money(low) + ' - ' + money(high) + (' per hour' if hourly else '')
+    return fallback
+
+
+def standard_answer(q, app, profile):
+    from .concepts import canonical_key, demographic_value
+    key = canonical_key(q.label)
+    paths = {'start_date': 'application_preferences.desired_start_date'}
+    supported = {'start_date', 'application_preferences.availability_dates',
+                 'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
+                 'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
+                 'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino'}
+    if key not in supported or q.semantic_key != key:
+        return None
+    path = paths.get(key, key)
+    value = fact(profile, path)
+    if key == 'start_date':
+        value = format_start_date(value, q.kind, q.label)
+    elif key == 'application_preferences.default_salary_range':
+        value = salary_range(q.label, app.get('description', ''), value or fact(profile, 'application_preferences.compensation_text'))
+    elif key == 'demographics.hispanic_latino':
+        value = 'decline' if demographic_value(profile, key) == 'decline' else None
+    if value is None:
+        return None
+    if type(value) is bool:
+        if key == 'application_preferences.terms_acknowledgement' and value and q.options:
+            hits = [o for o in q.options if re.fullmatch(r'yes|i agree|agree|i accept|accept|i acknowledge|acknowledge', normalize(o))]
+            if q.kind == 'checkbox' and len(q.options) == 1 and canonical_key(q.options[0]) == key:
+                hits = q.options
+            value = hits[0] if len(hits) == 1 else None
+        else:
+            value = 'Yes' if value else 'No'
+    value = fit_options(value, q.options) if value is not None else None
+    if q.kind == 'multiselect' and value is not None:
+        value = [value]
+    try:
+        validate_answer(q, value)
+    except (ValueError, TypeError):
+        return None
+    return Answer(value, 'profile:' + path, evidence=[path])
 
 
 def validate_answer(q, value):
@@ -121,7 +201,7 @@ class AnswerResolver:
         self.refresh()
         descriptor = describe(q, app, self.snapshot.facts)
         # The complete immutable descriptor also distinguishes exact rendered options.
-        key = descriptor
+        key = (descriptor, app.get('description', ''))
         if key not in self._cache:
             self.computations += 1
             canonical = replace(q, scope=descriptor.scope, semantic_key=descriptor.semantic_key)
@@ -144,7 +224,9 @@ class AnswerResolver:
     def current_result(self, prior, q, app):
         from .field_mapping import describe
         self.refresh()
-        if (prior and prior.context_revision == self._revision and
+        # Salary depends on the current listing as well as the field/profile.
+        if (prior and prior.descriptor.semantic_key != 'application_preferences.default_salary_range'
+                and prior.context_revision == self._revision and
                 prior.descriptor == describe(q, app, self.snapshot.facts)):
             return prior
         return self.resolve_result(q, app)
@@ -243,6 +325,11 @@ class AnswerResolver:
     def _resolve(self, q, app, descriptor, profile):
         from .field_mapping import REJECTED_FIELD
         mapped_key, policy = descriptor.semantic_key, descriptor.policy
+        # Negated ability/requirement wording must not reach affirmative fallbacks.
+        if re.search(r"\bnot (?:able|willing|authorized|eligible|require|need|agree|commit|have)\b|\b(?:unable|cannot)\b|\bcan t\b", normalize(q.label)):
+            return None
+        if mapped_key == 'application_preferences.schedule_commitment' and re.search(r"\b(?:not|no|unable|cannot|never)\b|\bcan t\b", normalize(q.label)):
+            return None
         if policy == 'DO_NOT_ANSWER':
             return None
         # A verified current-authorization fact has one fixed representation.
@@ -310,6 +397,14 @@ class AnswerResolver:
             if value is not None:
                 return Answer(value, AFFIRMATIVE, provenance={'rule': 'affirmative-keywords-v1'})
         if policy == 'REQUIRE_USER':
+            return None
+        standard = standard_answer(q, app, profile)
+        if standard:
+            return standard
+        if mapped_key in {'start_date', 'application_preferences.availability_dates',
+                          'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
+                          'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
+                          'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino'}:
             return None
         if row is None and mapped_key != REJECTED_FIELD:
             fuzzy = self._fuzzy_answer(q, app, descriptor, stored)
@@ -403,6 +498,10 @@ class AnswerResolver:
             first, last = fact(profile, "identity.first_name"), fact(profile, "identity.last_name")
             value = f"{first} {last}" if first and last else None
         text = question_text(q.label)
+        if path == 'education.graduation_date' and text == 'when are you expected to graduate':
+            raw = str(value or '')
+            if re.fullmatch(r'\d{4}-\d{2}(?:-\d{2})?', raw):
+                value = calendar.month_abbr[int(raw[5:7])] + '-' + raw[2:4]
         if path == "application_preferences.discovery_source" and value is not None and q.options:
             selected = fit_options(str(value), q.options)
             if selected is None and normalize(value) == "job board":

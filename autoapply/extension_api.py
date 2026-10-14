@@ -168,7 +168,8 @@ def _graduation_answer(q, field, profile):
         value = (year + '-' + month + '-01' if q.kind == 'date' else
                  short if re.search(r'mmm[-/ ]yy\b', hint, re.I) else
                  month + '/01/' + year if re.search(r'\bdd\b', hint, re.I) else
-                 month + '/' + year)
+                 month + '/' + year if re.search(r'\bmm[/ -]yyyy\b', hint, re.I) else
+                 short if normalize(q.label) == 'when are you expected to graduate' else month + '/' + year)
     return Answer(value, 'profile:education.graduation_date') if value is not None else None
 
 
@@ -270,6 +271,12 @@ def resolve_answers(dashboard, payload):
             repeated, repeated_answer = _repeatable_answer(q, field, profile)
             if repeated:
                 answer = repeated_answer
+            if (resolution.descriptor.semantic_key == 'start_date'
+                    and resolution.descriptor.policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}
+                    and (answer is None or answer.source == 'profile:application_preferences.desired_start_date')):
+                value = answers.format_start_date(profile.get('application_preferences', {}).get('desired_start_date'),
+                                                 q.kind, str(field.get('placeholder') or '') + ' ' + q.label)
+                answer = Answer(value, 'profile:application_preferences.desired_start_date') if value is not None else None
             graduation = _graduation_answer(q, field, profile)
             if graduation is not None:
                 answer = graduation
