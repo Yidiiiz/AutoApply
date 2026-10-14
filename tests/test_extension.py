@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/greenhouse-education.html": "greenhouse_education.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -547,6 +547,34 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     panel.locator("#clear-chat").click()
     assert panel.locator("#messages").inner_text() == ""
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
+
+
+def test_skills_discovery_preserves_collected_options(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/needs_input.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
+    result = worker.evaluate("""async id => {
+        const [frame] = await chrome.scripting.executeScript({target: {tabId: id}, func: async () => {
+            const api = globalThis.autoApplyContent;
+            const scanned = await api.scan();
+            const field = scanned.fields.find(field => field.label.startsWith('Are you interested'));
+            const collecting = api.collectOptions([field.key]);
+            // Sidebar button discovery overlaps a menu whose options load later.
+            const during = api.skillsAvailable();
+            const collected = await collecting;
+            const after = api.skillsAvailable();
+            const filled = await api.fill([{key: field.key, status: 'NEEDS_INPUT'}]);
+            return {collected: collected.fields[0].options,
+                    during, after,
+                    pending: filled.pending[0].options};
+        }});
+        return frame.result;
+    }""", tab_id)
+    expected = ['Spring Co-Op', 'Summer Internship', 'Both']
+    assert result == dict(collected=expected, during=False, after=False, pending=expected)
+    assert page.get_by_role('listbox').count() == 0
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
@@ -1030,8 +1058,10 @@ def test_repeatable_profile_sections(loaded_extension, extension_server, date_co
     assert page.locator('#projects input[type=date]').first.input_value() == '2025-03-01'
     assert page.locator('#projects input[type=date]').last.input_value() == '2025-08-01'
     assert page.locator('#skill-text').input_value() == 'Python, JavaScript, Rust'
+    assert page.locator('#tags').inner_text() == ''
+    skills = worker.evaluate("""async ({id,skills}) => (await chrome.scripting.executeScript({target:{tabId:id},func:s=>globalThis.autoApplyContent.autofillSkills(s),args:[skills]}))[0].result""", dict(id=tab_id,skills=profile['skills']))
+    assert skills['added'] == 2 and skills['skipped'] == 1
     assert page.locator('#tags').inner_text() == 'PythonJavaScript'
-    assert any(s == dict(name='skills', added=2, skipped=1) for s in prepared['sections'])
     assert 'Robot - Builder - Python: Built a robot.' in page.locator('#project-text textarea').input_value()
     assert page.locator('section').filter(has=page.locator('h2', has_text='Websites')).locator('input').count() == 2
     country = next(f for f in prepared['fields'] if f['label'] == 'Country')
@@ -1537,7 +1567,7 @@ def test_t040_real_workday_repeatable_sections(loaded_extension, extension_serve
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
     invoke = """async ({id,profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
         func: async profile => {const api=globalThis.autoApplyContent;const prepared=await api.prepareSections(profile);
-            await api.fill(prepared.answers);return prepared;},args:[profile]}))[0].result"""
+            await api.fill(prepared.answers);prepared.skills=await api.autofillSkills(profile.skills);return prepared;},args:[profile]}))[0].result"""
     prepared = worker.evaluate(invoke, dict(id=tab_id, profile=profile))
     work = page.locator('#work .entry')
     assert work.count() == 2
@@ -1560,9 +1590,10 @@ def test_t040_real_workday_repeatable_sections(loaded_extension, extension_serve
     assert page.evaluate('dateKeys.length') >= 20
     assert page.locator('[data-automation-id=formField-fieldOfStudy] [data-automation-id=selectedItem]').inner_text() == 'Computer Science'
     assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python', 'JavaScript']
-    assert page.evaluate('searches') == ['Computer Science', 'Python', 'JavaScript', 'Missing Skill']
+    assert page.evaluate('searches') == ['Computer Science', 'Python', 'JavaScript', 'Missing Skill', 'Missing Skill']
     assert all(',' not in value for value in page.evaluate('searches'))
-    assert next(s for s in prepared['sections'] if s['name']=='skills') == dict(name='skills', added=2, skipped=1)
+    assert prepared['skills']['added'] == 2 and prepared['skills']['skipped'] == 1
+    assert next(s for s in prepared['sections'] if s['name']=='skills')['message'] == 'Skills: run Autofill skills'
     experience = next(s for s in prepared['sections'] if s['name']=='experience')
     assert experience['added'] == (1 if initial=='user' else 2)
     assert experience['total'] == 2
@@ -1582,7 +1613,7 @@ def test_t040_real_workday_repeatable_sections(loaded_extension, extension_serve
     panel = context.new_page()
     worker.evaluate("sections=>chrome.storage.session.set({lastResult:{tabId:999,page:{title:'Fixture'},completed:[],pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]},sections}})", prepared['sections'])
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
-    expect(panel.locator('#section-results')).to_have_text(f"Experience {experience['added']}/2 · Education 1/1 · Skills: 2 added / 1 not in list")
+    expect(panel.locator('#section-results')).to_have_text(f"Experience {experience['added']}/2 · Education 1/1 · Skills: run Autofill skills")
 
 
 def test_t040_inferred_current_and_extra_user_entries(loaded_extension, extension_server):
@@ -1637,8 +1668,8 @@ def test_t040_waits_verifies_and_handles_prompt_portals(loaded_extension, extens
     if mode == 'portal_prompt':
         assert result['field']['kind'] == 'combobox'
         assert result['field']['multiple'] is True
-        assert result['filled']['filled'] == 1
-        assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python', 'JavaScript']
+        assert result['filled']['filled'] == 0
+        assert page.locator('#skills [data-automation-id=selectedItem]').count() == 0
     else:
         assert page.locator('#work .entry').count() == 1
         section = next(s for s in result['sections'] if s['name']=='experience')
@@ -1722,3 +1753,56 @@ def test_greenhouse_education_container_after_phone_legend(loaded_extension, ext
     assert page.locator('#end-year--0').input_value() == '2028'
     assert next(s for s in prepared['sections'] if s['name'] == 'education')['added'] == int(commits)
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
+@pytest.mark.parametrize('preference,index', [('Yes', 0), ('No', 1), ('decline', 2)])
+def test_t044_self_identify_and_hidden_current(loaded_extension, extension_server, preference, index):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/t044.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    result = worker.evaluate("""async ({id,preference})=>(await chrome.scripting.executeScript({target:{tabId:id},func:async preference=>{
+        const api=globalThis.autoApplyContent;
+        return api.prepareSections({identity:{full_name:'Fixture Student'},application_preferences:{disability:preference},
+            experience:[{title:'Engineer',company:'Fixture',start_date:'2024',current:true}]});
+    },args:[preference]}))[0].result""", dict(id=tab_id, preference=preference))
+    assert result['errors'] == []
+    assert page.locator('#current').is_checked()
+    assert page.locator('.end input').is_disabled()
+    assert page.locator('#name').input_value() == 'Fixture Student'
+    today = page.evaluate("() => {const d=new Date();return [String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0'),String(d.getFullYear())]}")
+    assert page.locator('#signature input').evaluate_all('els=>els.map(e=>e.value)') == today
+    assert page.locator('#employee').input_value() == ''
+    assert page.locator('#language').input_value() == 'en'
+    assert page.locator('#choices input').evaluate_all('els=>els.map(e=>e.checked)') == [i == index for i in range(3)]
+    assert page.evaluate('submissions') == 0
+
+
+def test_t044_skills_action_buttons_progress_and_cancel(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, _ = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server,key=KEY))
+    page = context.new_page()
+    page.goto(server + '/t040.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    expect(panel.locator('#autofill-skills')).to_be_visible()
+    expect(panel.locator('#footer-autofill-skills')).to_be_visible()
+    result = worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        const api=globalThis.autoApplyContent;
+        await api.prepareSections({skills:['Python','JavaScript']});
+        if(document.querySelector('[data-automation-id=selectedItem]')) throw Error('Main autofill filled skills');
+        const progress=[];const timer=setInterval(()=>progress.push(api.skillsStatus().progress),25);
+        const result=await api.autofillSkills(['Python','JavaScript','Missing Skill']);clearInterval(timer);
+        const again=await api.autofillSkills(['Python','JavaScript']);
+        const pending=api.autofillSkills(['Missing Skill','Python']);setTimeout(()=>api.cancelSkills(),100);
+        return {result,again,progress,cancelled:await pending};
+    }}))[0].result""", tab_id)
+    assert result['result']['added'] == 2 and result['result']['skipped'] == 1
+    assert result['again']['added'] == 0
+    assert any('Python - added' in row for row in result['progress'])
+    assert result['cancelled']['progress'].startswith('Cancelled.')
+    assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python','JavaScript']
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)

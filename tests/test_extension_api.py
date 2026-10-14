@@ -795,3 +795,12 @@ def test_date_part_without_resume_section_needs_input(http_dashboard, config, la
     assert data['answers'][0]['status'] == 'NEEDS_INPUT'
     assert data['answers'][0]['value'] is None
     assert data['answers'][0]['source'] == ''
+
+
+def test_self_identification_profile_payload():
+    from unittest.mock import Mock
+    from autoapply.extension_api import profile_sections
+    profile = {'identity': {'full_name': 'Fixture Student'}, 'application_preferences': {'disability': 'No'}}
+    result = profile_sections(Mock(config=Mock(profile=profile)), {})
+    assert result['identity'] == {'full_name': 'Fixture Student'}
+    assert result['application_preferences'] == {'disability': 'No'}

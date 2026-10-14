@@ -122,6 +122,7 @@ let savedTimer;
 function render(value) {
   if (!value || tabId && value.tabId !== tabId) return;
   result = value;
+  if(value.skills_available!==undefined) showSkills(value.skills_available);
   element("error").textContent = value.error || "";
   element("company").textContent = value.matched?.company || value.page?.company || "Current application";
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
@@ -138,7 +139,7 @@ function render(value) {
     element("skipped").textContent = `Skipped ${value.summary.skipped} (including existing answers)`;
     element("upload-errors").textContent = value.summary.errors.join("\n");
   }
-  const sectionText=(value.sections||[]).map(s=>s.name[0].toUpperCase()+s.name.slice(1)+(s.total!==undefined?' '+s.added+'/'+s.total:': '+s.added+' added'+(s.skipped?' / '+s.skipped+' not in list':''))).join(' · ');
+  const sectionText=(value.sections||[]).map(s=>(s.message || s.name[0].toUpperCase()+s.name.slice(1))+(s.message?'':s.total!==undefined?' '+s.added+'/'+s.total:': '+s.added+' added'+(s.skipped?' / '+s.skipped+' not in list':''))).join(' · ');
   for(const id of ['section-results','answer-section-results']) element(id).textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
@@ -264,3 +265,20 @@ function helperRequest(request) { if (request && (!tabId || request.tabId===tabI
 chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.helperRequest)helperRequest(changes.helperRequest.newValue);});
 helperRequest((await chrome.storage.session.get('helperRequest')).helperRequest);
 element('send-structure').onclick=async()=>{try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);element('snapshot-status').textContent='Page structure sent.';}catch(error){element('snapshot-status').textContent=error.message;}};
+
+let skillsBusy=false;
+function showSkills(available) {for(const id of ['autofill-skills','footer-autofill-skills']) element(id).hidden=!available;}
+function renderSkills(value) {element('skills-progress').textContent=value.progress || '';}
+async function runSkills() {
+  if(skillsBusy) return;
+  skillsBusy=true;
+  for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page']) element(id).disabled=true;
+  element('cancel-skills').hidden=false;
+  const timer=setInterval(()=>send({type:'skills-status'}).then(renderSkills).catch(showError),250);
+  try {const response=await send({type:'autofill-skills'});if(response.error)throw Error(response.error);renderSkills(response);}
+  catch(error){showError(error);}
+  finally {clearInterval(timer);skillsBusy=false;element('cancel-skills').hidden=true;for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page'])element(id).disabled=false;}
+}
+for(const id of ['autofill-skills','footer-autofill-skills']) element(id).onclick=runSkills;
+element('cancel-skills').onclick=()=>send({type:'cancel-skills'}).catch(showError);
+send({type:'skills-available'}).then(value=>showSkills(Boolean(value.skills_available))).catch(()=>{});

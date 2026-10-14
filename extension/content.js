@@ -175,7 +175,7 @@
     }
     return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="promptOption"]'))))]
       .filter(option => !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
-        text(option) && !/^(loading\b|no options\b|no results\b)/i.test(text(option)) &&
+        (text(option) || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
   }
   async function settledComboOptions(element, timeout = 6000) {
@@ -424,7 +424,7 @@
     }
     const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
     previousStep = workdayState();
-    return {page: pageInfo(), fields: retained, workday_step: previousStep?.step, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+    return {page: pageInfo(), fields: retained, workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
 
   async function collectOptions(keys) {
@@ -612,6 +612,7 @@
       const record = records.get(answer.key);
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) { summary.skipped++; continue; }
       const {element, members, field} = record;
+      if (isSkillsField(element)) { summary.skipped++; continue; }
       if (/\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b/i.test(field.label)) {
         if (field.required) {summary.needs_input.push(field.label);summary.pending.push({...field});}
         else summary.skipped++;
@@ -824,8 +825,8 @@
     input.removeEventListener('keydown', stop);
   }
   async function promptOption(element, value) {
-    const exact = option => normal(option.getAttribute('data-automation-label') || text(option)) === normal(value);
-    if (!await waitFor(() => comboOptions(element).length, 1200)) return null;
+    const exact = option => skillNormal(option.getAttribute('data-automation-label') || text(option)) === skillNormal(value);
+    if (!comboOptions(element).length) return null;
     const lists = new Set();
     for (const option of comboOptions(element)) {
       for (let node=option.parentElement; node && !node.matches('body,form'); node=node.parentElement) {
@@ -857,31 +858,124 @@
   }
   function selectedSkills(element) {
     const container = comboContainer(element);
-    return Array.from(container.querySelectorAll('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"],[class*="multiValueLabel"],[class*="multi-value__label"],[class*="token"],[data-skill]')).map(text).map(normal);
+    return Array.from(container.querySelectorAll('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"],[class*="multiValueLabel"],[class*="multi-value__label"],[class*="token"],[data-skill]')).map(node=>{const copy=node.cloneNode(true);copy.querySelectorAll('button,[role="button"]').forEach(el=>el.remove());return normal(copy.getAttribute('data-automation-label') || text(copy.querySelector('[data-automation-id="selectedItemLabel"]')) || text(copy));});
   }
-  async function fillSkills(element, skills) {
-    if(clean(comboInput(element)?.value)) return {added:0,skipped:0};
+  const skillNormal = value => normal(value).replace(/[^a-z0-9]/g, '');
+  function isSkillsField(element) {
+    const container=comboContainer(element);
+    return /skills/i.test(label(element)+' '+container.getAttribute('data-automation-id')) &&
+      (isPrompt(element) || element.getAttribute('role')==='combobox' || element.getAttribute('data-automation-id')==='multiSelectInput' ||
+       element.getAttribute('data-allow-create')==='true' || /token|creatable/i.test(container.className));
+  }
+  function skillInputs() {
+    return Array.from(document.querySelectorAll('input,[role="combobox"]')).filter(el=>visible(el) && isSkillsField(el) && !el.parentElement?.closest('[role="combobox"]'));
+  }
+  function pointerClick(element) {
+    for (const type of ['pointerover','pointerdown','mousedown','pointerup','mouseup']) {
+      const EventType=type.startsWith('pointer')?PointerEvent:MouseEvent;
+      element.dispatchEvent(new EventType(type,{bubbles:true,button:0,pointerId:1,pointerType:'mouse'}));
+    }
+    element.click();
+  }
+  let skillsCancelled=false, skillsState={busy:false,progress:''};
+  async function fillSkills(element, skills, progress=()=>{}, cancelled=()=>false) {
     let added=0, skipped=0;
-    for (const skill of skills) {
-      if (selectedSkills(element).includes(normal(skill))) continue;
-      try {
-        await openCombo(element); searchCombo(element,skill);
-        if (isPrompt(element)) promptEnter(comboInput(element));
-        const option = isPrompt(element) ? await promptOption(element,skill) : await waitFor(()=>comboOptions(element).find(o=>normal(text(o))===normal(skill)),450);
-        if (option) { option.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0})); (option.querySelector('input[type="checkbox"]') || option).click(); }
-        else if (!isPrompt(element) && (element.getAttribute('data-allow-create')==='true' || /token/.test(comboContainer(element).className) || /creatable/i.test(comboContainer(element).className) || comboOptions(element).some(o=>/^(create|add) /i.test(text(o)) && normal(text(o)).includes(normal(skill))))) {
-          const input=comboInput(element);
-          // Keep Enter confined to the token widget, never the containing form.
-          const stop=event=>{if(event.key==='Enter')event.preventDefault();};
-          input.addEventListener('keydown',stop); keypress(input,'Enter'); input.removeEventListener('keydown',stop);
-        }
-        if (await waitFor(()=>selectedSkills(element).includes(normal(skill)),1000)) added++; else skipped++;
-      } finally { searchCombo(element,''); closeCombo(element); }
+    const selected=skill=>selectedSkills(element).some(value=>skillNormal(value)===skillNormal(skill));
+    for (const [index,skill] of skills.entries()) {
+      if(cancelled()) break;
+      if(selected(skill)) {progress(index+1,skill,'already added');continue;}
+      let ok=false;
+      for(let attempt=0;attempt<2 && !ok && !cancelled();attempt++) {
+        try {
+          progress(index+1,skill,attempt?'retrying':'searching');
+          await openCombo(element); searchCombo(element,'');
+          let typed='';
+          for(const char of skill) {if(cancelled()) break;searchCombo(element,typed+=char);await pause(35);}
+          if(cancelled()) break;
+          if(isPrompt(element)) promptEnter(comboInput(element));
+          await settledComboOptions(element,3000);
+          const option=await promptOption(element,skill);
+          if(cancelled()) break;
+          if(option) {const box=option.querySelector('input[type="checkbox"]:not(:checked)');pointerClick(box && visible(box)?box:option);}
+          else if(!isPrompt(element) && (element.getAttribute('data-allow-create')==='true' || /token|creatable/i.test(comboContainer(element).className))) promptEnter(comboInput(element));
+          ok=Boolean(await waitFor(()=>selected(skill),2000));
+        } catch { ok=false; }
+        finally {searchCombo(element,'');closeCombo(element);}
+        if(!ok && !cancelled()) await pause(200);
+      }
+      if(cancelled()) break;
+      if(ok) added++; else skipped++;
+      progress(index+1,skill,ok?'added':'skipped');
+      await pause(180);
     }
     return {added,skipped};
   }
+  async function autofillSkills(skills) {
+    if(skillsState.busy) throw Error('Skills autofill is already running.');
+    skillsCancelled=false;skillsState={busy:true,progress:'Starting skills…'};extensionFilling++;
+    try {
+      const element=skillInputs()[0];
+      if(!element) throw Error('No skills tag field found.');
+      const counts=await fillSkills(element,skills,(index,skill,status)=>{skillsState.progress=index+'/'+skills.length+': '+skill+' - '+status;},()=>skillsCancelled);
+      skillsState={...counts,busy:false,progress:(skillsCancelled?'Cancelled. ':'')+counts.added+' added / '+counts.skipped+' skipped'};
+      return skillsState;
+    } finally {skillsState.busy=false;extensionFilling--;}
+  }
+  const checked = input => input.checked || input.getAttribute('aria-checked')==='true';
+  async function setCheckbox(input, value) {
+    if(Boolean(checked(input))===value) return true;
+    input.click();
+    if(await waitFor(()=>Boolean(checked(input))===value,150)) return true;
+    const wrapper=input.closest('[data-automation-id^="formField"]') || input.parentElement;
+    const targets=[...Array.from(input.labels||[]),input.closest('label'),wrapper.querySelector('[role="checkbox"]'),input.nextElementSibling].filter(el=>el && visible(el));
+    for(const target of new Set(targets)) {
+      pointerClick(target);
+      if(await waitFor(()=>Boolean(checked(input))===value,300)) return true;
+    }
+    return false;
+  }
+  async function ensureCurrent(group) {
+    const input=Array.from(group.querySelectorAll('input[type="checkbox"]')).find(el=>sectionField(el)==='current' || /currentlyWorkHere/i.test(el.getAttribute('data-automation-id')||''));
+    if(!input) return false;
+    for(let attempt=0;attempt<2;attempt++) {
+      await setCheckbox(input,true);
+      if(await waitFor(()=>checked(input) && Array.from(group.querySelectorAll('input,select')).filter(el=>sectionField(el)==='end_date').every(el=>!visible(el)),1000)) return true;
+    }
+    return false;
+  }
+  async function selfIdentify(profile, managed) {
+    if(!/Voluntary Self.Identification of Disability|Form CC.305/i.test(document.body.innerText)) return [];
+    const errors=[], today=new Date(), month=String(today.getMonth()+1).padStart(2,'0'), day=String(today.getDate()).padStart(2,'0'), year=String(today.getFullYear());
+    const name=profile.identity?.full_name || profile.full_name;
+    for(const record of records.values()) {
+      const el=record.element, field=el.closest('[data-automation-id^="formField"]');
+      if(!field) continue;
+      const heading=normal(text(field.querySelector('label,[data-automation-id="formLabel"]')) || label(el)).replace(/\s*\*$/,'');
+      if(/employee id/.test(heading)) {managed.add(el);continue;}
+      if(/^(name|full name)$/.test(heading)) {managed.add(el);if(!clean(el.value)&&name){nativeSet(el,'value',name);events(el);}continue;}
+      if(/^language$/.test(heading)) {managed.add(el);if(el.tagName==='SELECT'){const option=Array.from(el.options).find(o=>normal(o.text)==='english');if(option){nativeSet(el,'value',option.value);events(el);}}else if(record.field.kind==='combobox') await fillCombo(el,'English');continue;}
+      if(/^date$/.test(heading) || /^date$/.test(normal(dateHeading(el)).replace(/\s*\*$/,''))) {
+        managed.add(el);
+        const part=el.getAttribute('data-automation-id')||'';
+        const value=/Month/.test(part)?month:/Day/.test(part)?day:/Year/.test(part)?year:el.type==='date'?year+'-'+month+'-'+day:month+'/'+day+'/'+year;
+        if(el.value!==value) {await typeDate(el,value);events(el);el.blur();}
+        if(el.value!==value && Number(el.value)!==Number(value)) errors.push('Self Identify date did not commit');
+      }
+    }
+    const choices=Array.from(document.querySelectorAll('input[type="checkbox"],input[type="radio"]')).filter(el=>/^(yes, i have a disability|no, i do not have a disability|i do not want to answer)/i.test(label(el)));
+    for(const el of choices) managed.add(el);
+    const preference=normal(profile.application_preferences?.disability || profile.demographics?.disability);
+    const prefix=/^yes/.test(preference)?'yes,':/^no/.test(preference)?'no,':/decline|do not|prefer not/.test(preference)?'i do not want to answer':'';
+    const target=choices.find(el=>normal(label(el)).startsWith(prefix));
+    if(prefix && target) {
+      for(const el of choices.filter(el=>el!==target && checked(el))) await setCheckbox(el,false);
+      await setCheckbox(target,true);
+      if(!checked(target) || choices.some(el=>el!==target && checked(el))) errors.push('Disability choice did not commit');
+    } else if(choices.length) errors.push('Choose a disability response in your profile');
+    return errors;
+  }
   async function prepareSections(profile) {
-    const sections=[], supplied=new Map(), managed=new Set(), completed=[];
+    const sections=[], supplied=new Map(), managed=new Set(), completed=[], errors=[];
     const containers=resumeSections();
     extensionFilling++;
     try {
@@ -914,6 +1008,7 @@
           const anchor=elements.find(el=>sectionField(el)===anchorKey);
           const anchorValue=anchor?.matches('[role="combobox"],button[aria-haspopup="listbox"]')?comboSelection(anchor) || comboInput(anchor)?.value:anchor?.value;
           const matchesEntry=Boolean(entry[anchorKey] && normal(anchorValue)===normal(entry[anchorKey]));
+          if(current && skipEnd && (!occupiedGroup || matchesEntry) && !await ensureCurrent(group)) errors.push('I currently work here: could not verify checkbox and To date');
           for (const el of elements) {
             managed.add(el);
             // Only complete a partially filled entry when its anchor matches the profile.
@@ -963,7 +1058,7 @@
           if(!container.contains(record.element) || !/skills/i.test(record.field.label)) continue;
           managed.add(record.element);
           if(record.field.kind==='combobox') {
-            const counts=await fillSkills(record.element,profile.skills||[]); sections.push({name:kind,...counts}); record.field.answered=true;
+            sections.push({name:kind,message:'Skills: run Autofill skills'});
           } else if(['textarea','text'].includes(record.field.kind) && !occupied(record)) {
             const included=[];
             for(const skill of profile.skills) {
@@ -995,6 +1090,9 @@
           dates.slice(1).forEach(r=>records.delete(r.field.key));
         }
       }
+      for(const record of records.values()) if(isSkillsField(record.element)) managed.add(record.element);
+      if(skillInputs().length && !sections.some(s=>s.name==='skills')) sections.push({name:'skills',message:'Skills: run Autofill skills'});
+      errors.push(...await selfIdentify(profile,managed));
       const answers=[];
       for(const record of records.values()) {
         const chosen=supplied.get(record.element);
@@ -1003,7 +1101,7 @@
           answers.push({key:record.field.key,status:chosen?'RESOLVED':'OPTIONAL_SKIP',value:chosen?.boolean?chosen.value==='true':chosen?.value,source:'profile:sections'});
         }
       }
-      return {fields:Array.from(records.values(),r=>({...r.field,answered:occupied(r)})),answers,sections,completed};
+      return {fields:Array.from(records.values(),r=>({...r.field,answered:occupied(r)})),answers,sections,completed,errors};
     } finally { extensionFilling--; }
   }
 
@@ -1111,5 +1209,5 @@
     }
     return {host:location.hostname,nodes,truncated};
   }
-  globalThis.autoApplyContent = {pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
+  globalThis.autoApplyContent = {skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
 })();

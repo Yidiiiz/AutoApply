@@ -52,7 +52,7 @@ async function scan(tabId) {
   await chrome.storage.session.set({jobContexts});
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
-  return {tabId: tab.id, url: tab.url, page, fields, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
+  return {tabId: tab.id, url: tab.url, page, fields, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
 const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
@@ -155,6 +155,7 @@ async function matchAndFill(result, prepare = false) {
       const prefix=frame.frameId+':';
       sectionAnswers.push(...frame.result.answers.map(answer=>({...answer,key:prefix+answer.key})));
       result.sections.push(...frame.result.sections);
+      result.summary.errors.push(...(frame.result.errors || []));
       const completed=(frame.result.completed || []).map(answer=>({...answer,key:prefix+answer.key}));
       result.completed ||= [];
       for(const answer of completed) {
@@ -326,7 +327,35 @@ async function advanceAfterWriting(result) {
     pendingSteps.delete(result.tabId); await autofill(result.tabId,result.matched);
   }
 }
+let skillsRunning=false;
 async function action(message) {
+  if (message.type === 'skills-available') {
+    const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
+    if (!tab?.id || !/^https?:\/\//.test(tab.url || '')) return {skills_available:false};
+    // Button discovery must not rescan and replace records during autofill.
+    const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},
+      func:()=>globalThis.autoApplyContent?.skillsAvailable()});
+    return {skills_available:frames.some(frame=>frame.result)};
+  }
+  if(['autofill-skills','cancel-skills','skills-status'].includes(message.type)) {
+    const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
+    if(!tab?.id) throw Error('Open an application page first.');
+    if(message.type==='cancel-skills' || message.type==='skills-status') {
+      const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:cancel=>cancel?globalThis.autoApplyContent?.cancelSkills():globalThis.autoApplyContent?.skillsStatus(),args:[message.type==='cancel-skills']});
+      return frames.find(f=>f.result?.busy)?.result || frames.find(f=>f.result?.progress)?.result || {};
+    }
+    if(running || skillsRunning) throw Error('Wait for autofill to finish.');
+    skillsRunning=true;
+    try {
+      const profile=await api('/ext/profile-sections');
+      const scanned=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.scan()});
+      const frame=scanned.find(f=>f.result?.skills_available);
+      if(!frame) throw Error('No skills tag field found.');
+      const [filled]=await chrome.scripting.executeScript({target:{tabId:tab.id,frameIds:[frame.frameId]},func:skills=>globalThis.autoApplyContent.autofillSkills(skills),args:[profile.skills || []]});
+      return filled.result;
+    } finally {skillsRunning=false;}
+  }
+  if(message.type==='autofill' && skillsRunning) throw Error('Wait for skills autofill to finish.');
   if (message.type === "autofill") return autofill(message.tabId);
   if (message.type === "page-context") return scan(message.tabId);
   if (message.type === 'auto-advance-preference') return advancePreference(message.enabled);
@@ -409,7 +438,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
+  if (!["skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });

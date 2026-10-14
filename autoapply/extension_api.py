@@ -230,7 +230,12 @@ def profile_sections(dashboard, payload):
                       proficiency=str(e.get('proficiency') or ''))
                  for e in profile.get('languages', []) if isinstance(e, dict) and e.get('language')]
     return dict(experience=experience, projects=projects, education=education, languages=languages,
-                skills=skills, links=profile.get('links') or {})
+                skills=skills, links=profile.get('links') or {},
+                identity={'full_name': profile.get('identity', {}).get('full_name') or
+                          ' '.join(str(profile.get('identity', {}).get(key) or '').strip()
+                                   for key in ('first_name', 'last_name')).strip()},
+                application_preferences={'disability': profile.get('application_preferences', {}).get('disability')
+                                         or profile.get('demographics', {}).get('disability', '')})
 
 
 def ping(dashboard, payload):

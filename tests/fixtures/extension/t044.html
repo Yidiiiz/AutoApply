@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><style>label{display:block}input{min-height:20px}#current{display:none}</style>
+<h1>Self Identify</h1><h2>Voluntary Self-Identification of Disability</h2><p>Form CC-305</p>
+<form><section data-automation-id="workExperienceSection"><div class="entry">
+<div data-automation-id="formField-jobTitle"><label>Job Title<input value="Engineer"></label></div>
+<div data-automation-id="formField-companyName"><label>Company<input></label></div>
+<div data-automation-id="formField-currentlyWorkHere"><input id="current" type="checkbox"><label for="current"><span>I currently work here</span></label></div>
+<div data-automation-id="formField-startDate"><label>From</label><input data-automation-id="dateSectionYear-input"></div>
+<div class="end" data-automation-id="formField-endDate"><label>To</label><input data-automation-id="dateSectionYear-input"></div>
+</div></section>
+<div data-automation-id="formField-name"><label for="name">Name*</label><input id="name"></div>
+<div data-automation-id="formField-employeeID"><label for="employee">Employee ID (if applicable)</label><input id="employee"></div>
+<div data-automation-id="formField-language"><label for="language">Language*</label><select id="language"><option value="">Select</option><option value="en">English</option></select></div>
+<div id="signature" data-automation-id="formField-date"><label>Date*</label><input data-automation-id="dateSectionMonth-input" value="01"><input data-automation-id="dateSectionDay-input" value="01"><input data-automation-id="dateSectionYear-input" value="2000"></div>
+<fieldset id="choices" data-automation-id="formField-disability"><legend>Please check one of the boxes below:*</legend>
+<label><input type="checkbox" checked>Yes, I have a disability, or have had one in the past</label>
+<label><input type="checkbox" checked>No, I do not have a disability and have not had one in the past</label>
+<label><input type="checkbox">I do not want to answer</label></fieldset><button type="submit">Submit</button></form>
+<script>window.submissions=0;document.querySelector('form').onsubmit=e=>{e.preventDefault();submissions++};
+const box=document.querySelector('#current');box.onclick=e=>{if(e.target===box && !window.labelClick){e.preventDefault();return;}document.querySelector('.end').hidden=box.checked;document.querySelector('.end input').disabled=box.checked;};
+document.querySelector('label[for=current]').onmousedown=()=>window.labelClick=true;
+</script>
