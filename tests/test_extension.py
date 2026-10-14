@@ -460,10 +460,21 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
     page = context.new_page()
     page.goto(server + "/form.html")
+    page.evaluate("document.querySelector('form').insertAdjacentHTML('beforeend', '<label>Written open question<textarea id=helper-field required></textarea></label>')")
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
     worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
     page.locator("#autoapply-sidebar iframe").wait_for()
     panel = next(frame for frame in page.frames if frame.url.startswith(f"chrome-extension://{extension_id}/sidepanel.html"))
+    assert panel.locator("#tab-ask").count() == 0
+    panel.locator(".prompt").filter(has_text="Written open question").get_by_role("button", name="Ask AI", exact=True).click()
+    expect(panel.locator("#question")).to_have_value("Written open question")
+    panel.locator("#generate").click()
+    expect(panel.locator("#version")).to_have_text("1 / 1")
+    panel.locator("#fill-answer").click()
+    expect(page.locator("#helper-field")).to_have_value("I enjoy building useful local tools.")
+    panel.locator("#tab-answers").click()
+    expect(panel.locator(".answer-card").filter(has_text="Written open question").locator(".source-pill")).to_have_text("AI")
+    panel.locator("#tab-fill").click()
     panel.get_by_label("Unresolved required *", exact=True).fill("User fixture answer")
     panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#missing")).to_have_value("User fixture answer")
@@ -479,7 +490,8 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     panel.locator("#cover-questions").get_by_role("button").wait_for(state="detached")
     cover = [payload for path, _, payload in requests if path == "/ext/cover-letter"][-1]
     assert cover["answers"] == [{"question": "Which project should the letter highlight?", "answer": "A fixture robotics project"}, {"question": "Anything else?", "answer": ""}]
-    panel.locator("#tab-ask").click()
+    panel.locator("#tab-chat").click()
+    panel.locator("#subtab-helper").click()
     panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
     panel.locator("#generate").click()
     expect(panel.locator("#version")).to_have_text("1 / 1")
@@ -491,27 +503,44 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     refine = [payload for path, _, payload in requests if path == "/ext/write"][-1]
     assert refine["previous"] == first
     assert refine["instruction"] == "Shorter"
+    assert refine["use_job_description"] is True
+    assert "description" in refine["page"] and refine["page"]["url"] == page.url
+    panel.locator("#use-job-description").uncheck()
+    panel.locator("#refine").click()
+    expect(panel.locator("#version")).to_have_text("3 / 3")
+    disabled = [payload for path, _, payload in requests if path == "/ext/write"][-1]
+    assert disabled["use_job_description"] is False and "description" not in disabled["page"]
+    panel.locator("#previous").click()
     panel.locator("#previous").click()
     assert panel.locator("#answer").input_value() == first
     panel.locator("#next").click()
     assert panel.locator("#answer").input_value() == "Refined fixture answer."
     panel.evaluate("location.reload()")
-    panel.locator("#tab-ask").wait_for()
-    panel.locator("#tab-ask").click()
-    panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
-    expect(panel.locator("#version")).to_have_text("2 / 2")
+    panel.locator("#tab-chat").wait_for()
     panel.locator("#tab-chat").click()
+    panel.locator("#subtab-helper").click()
+    panel.locator("#question").fill("Describe your robotics experience. Word limit 300")
+    expect(panel.locator("#version")).to_have_text("2 / 3")
+    panel.locator("#tab-chat").click()
+    panel.locator("#subtab-chat").click()
     panel.locator("#chat-input").fill("How can I improve this answer?")
     panel.locator("#chat-input").press("Enter")
     panel.locator("#messages").filter(has_text="Fixture chat reply.").wait_for()
     chat = next(payload for path, _, payload in requests if path == "/ext/chat")
     assert chat["messages"] == [{"role": "user", "text": "How can I improve this answer?"}]
     assert chat["page"]["company"] == "Fixture Company"
-    expect(panel.locator(".bubble.user p")).to_have_text("How can I improve this answer?")
-    expect(panel.locator(".bubble.assistant p")).to_have_text("Fixture chat reply.")
+    assert chat["use_job_description"] is True and "description" in chat["page"]
+    panel.locator("#use-job-description").uncheck()
+    panel.locator("#chat-input").fill("Help without job context")
+    panel.locator("#send").click()
+    expect(panel.locator(".bubble.assistant")).to_have_count(2)
+    disabled_chat = [payload for path, _, payload in requests if path == "/ext/chat"][-1]
+    assert disabled_chat["use_job_description"] is False and "description" not in disabled_chat["page"]
+    expect(panel.locator(".bubble.user p").first).to_have_text("How can I improve this answer?")
+    expect(panel.locator(".bubble.assistant p").first).to_have_text("Fixture chat reply.")
     assert "You:" not in panel.locator("#messages").inner_text()
     assert "AI:" not in panel.locator("#messages").inner_text()
-    assert panel.locator(".bubble time").count() == 2
+    assert panel.locator(".bubble time").count() == 4
     panel.locator("#clear-chat").click()
     assert panel.locator("#messages").inner_text() == ""
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]

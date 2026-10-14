@@ -251,7 +251,7 @@ def resolve_answers(dashboard, payload):
     with dashboard.settings.mutex, dashboard.connection(writable=True) as db:
         app = _application(db, payload)
         _unprotected(app)
-        description = page.get('description', '')
+        description = page.get('description', '')[:6000]
         if 'job_id' in app and len(description) > len(app.get('description') or ''):
             descriptions.store(db, app['job_id'], description)
             app['description'] = description
@@ -370,19 +370,34 @@ def _writing_job(dashboard, payload):
     if not isinstance(page, dict) or any(not isinstance(page.get(k, ''), str)
                                         for k in ('url', 'title', 'company', 'description')):
         raise SettingsRejected('page must contain text values')
-    if payload.get('application_id') is not None:
-        application_id = _id(payload['application_id'])
-        return dashboard._cv_job(application_id), application_id
+    enabled = payload.get('use_job_description', True)
+    if type(enabled) is not bool:
+        raise SettingsRejected('use_job_description must be boolean')
     url = payload.get('url', page.get('url'))
-    if url is not None:
+    application_id = payload.get('application_id')
+    if application_id is not None:
+        application_id = _id(application_id)
+    elif url is not None:
         url = _url(url)
         with dashboard.connection() as db:
             app = _match(db, url)
         if app:
             _unprotected(app)
-            return dashboard._cv_job(app['id']), app['id']
-    return dict(canonical_url=url or '', **{k: page.get(k, '')
-                for k in ('title', 'company', 'description')}), None
+            application_id = app['id']
+    if application_id is not None:
+        job = dashboard._cv_job(application_id)
+        description = page.get('description', '')[:6000]
+        if enabled and len(description) > len(job.get('description') or ''):
+            with dashboard.connection(writable=True) as db:
+                descriptions.store(db, job['job_id'], description)
+            job['description'] = description
+    else:
+        job = dict(canonical_url=url or '', **{k: page.get(k, '')
+                   for k in ('title', 'company', 'description')})
+    job['description'] = (job.get('description') or '')[:6000] if enabled else ''
+    if not enabled:
+        job['canonical_url'] = ''
+    return job, application_id
 
 
 def _text(payload, key, maximum, *, required=False):
@@ -417,10 +432,12 @@ def write(dashboard, payload):
     limits = _limits(question)
     dashboard._writing_settings()
     job, _ = _writing_job(dashboard, payload)
-    dashboard.writing_job(job)
+    if payload.get("use_job_description", True):
+        dashboard.writing_job(job)
+    job["description"] = (job.get("description") or "")[:6000]
     with dashboard.answers.mutex:
         facts = cv.profile_facts(dashboard.config.profile)
-    result = dashboard.run_writing(dict(task='question_answer', profile=facts, job=cv.job_context(job),
+    result = dashboard.run_writing(dict(task='question_answer', profile=facts, job=dict(cv.job_context(job), canonical_url=job.get("canonical_url", "")),
                                        question=question, instruction=instruction, previous=previous, limits=limits))
     answer = _writing_result(result, 'answer')
     response = dict(answer=answer, words=len(answer.split()), chars=len(answer))
@@ -440,10 +457,12 @@ def chat(dashboard, payload):
     history = [dict(role=item['role'], text=item['text'][:2000]) for item in messages[-12:]]
     dashboard._writing_settings()
     job, _ = _writing_job(dashboard, payload)
-    dashboard.writing_job(job)
+    if payload.get("use_job_description", True):
+        dashboard.writing_job(job)
+    job["description"] = (job.get("description") or "")[:6000]
     with dashboard.answers.mutex:
         facts = cv.profile_facts(dashboard.config.profile)
-    result = dashboard.run_writing(dict(task='chat', profile=facts, job=cv.job_context(job), messages=history))
+    result = dashboard.run_writing(dict(task='chat', profile=facts, job=dict(cv.job_context(job), canonical_url=job.get("canonical_url", "")), messages=history))
     return dict(reply=_writing_result(result, 'reply'))
 
 

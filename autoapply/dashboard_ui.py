@@ -35,6 +35,13 @@ main{margin:0;padding:32px max(24px,calc((100% - 1200px)/2)) 80px}.panel{min-hei
 @media(min-width:761px) and (max-width:1000px){.items[data-tab="priority"]:not(.grid) .item{grid-template-columns:18px 24px minmax(170px,1.5fr) minmax(110px,1fr) 240px}.items[data-tab="needs-you"]:not(.grid) .item{grid-template-columns:18px minmax(180px,1.5fr) minmax(110px,1fr) minmax(100px,1fr) 240px}}
 @media(min-width:601px) and (max-width:760px){.items[data-tab="priority"]:not(.grid) .item{grid-template-columns:18px 24px minmax(0,1fr) 240px}.items[data-tab="needs-you"]:not(.grid) .item{grid-template-columns:18px minmax(140px,1fr) 120px 240px}.items[data-tab="needs-you"] .item>.detail{grid-column:2/4;grid-row:2}.items[data-tab="needs-you"] .actions{grid-column:4}}
 @media(max-width:600px){.items[data-tab="priority"]:not(.grid) .item,.items[data-tab="needs-you"]:not(.grid) .item{position:relative;padding-left:42px}.items:not(.grid) .item>.chrome-check{position:absolute;top:12px;left:12px}}
+
+*{scrollbar-width:thin;scrollbar-color:var(--muted) var(--bg)}
+*::-webkit-scrollbar{width:7px;height:7px}
+*::-webkit-scrollbar-track{background:var(--bg)}
+*::-webkit-scrollbar-thumb{background:var(--muted);border:2px solid var(--bg);border-radius:10px}
+*::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+.chrome-run-line{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin:4px 0}.chrome-run-line button{padding:0 6px;min-height:24px}.chrome-last-run{display:inline-block;opacity:.65;font-size:12px;margin:4px 0}.chrome-last-run summary{cursor:pointer}.chrome-last-run ul{list-style:none;padding:0;margin:6px 0}.chrome-last-run li{padding:2px 0}
 </style></head><body>
 <header class="navbar"><div class="nav-inner"><h1 class="brand">AutoApply</h1><nav class="tabs" role="tablist" aria-label="Application dashboard">
 <button id="tab-run" role="tab" aria-selected="true" aria-controls="panel-run" tabindex="0">Run <span id="count-run" class="count">0</span></button>
@@ -44,7 +51,7 @@ main{margin:0;padding:32px max(24px,calc((100% - 1200px)/2)) 80px}.panel{min-hei
 <button id="tab-settings" role="tab" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="icon-label"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg>Settings</span></button>
 </nav><div class="nav-actions"><span id="worker-status" class="status" role="status" aria-label="Worker: Idle"><span id="worker-dot" class="dot" aria-hidden="true"></span><span id="worker-label">Idle</span></span><div class="reload-group"><button id="refresh" class="icon-button" aria-label="Reload data" title="Reload dashboard data: status, Needs you, Failed, Queue and Applied. Does not search for listings."><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5L4 10m1 2a7 7 0 0 0 12 5l3-3"/></svg></button><span id="reload-state" class="reload-state">Loading...</span></div></div></div></header>
 <main><div id="notice" class="notice" hidden><p id="message" role="status" aria-live="polite"></p><button id="dismiss" aria-label="Dismiss notification">Dismiss</button></div>
-<button id="chrome-last-run" type="button" hidden>Last run</button><div id="chrome-run-panel" class="run-controls" hidden><h3>Chrome run</h3><ul id="chrome-run-items"></ul><p id="chrome-run-hint" role="status"></p><button id="chrome-run-cancel" type="button">Cancel run</button></div>
+<div id="chrome-run-panel" class="chrome-run-line" hidden><span id="chrome-run-status" role="status"></span><span id="chrome-run-hint"></span><button id="chrome-run-cancel" type="button" aria-label="Cancel Chrome run" title="Cancel Chrome run">x</button></div><details id="chrome-last-run" class="chrome-last-run" hidden><summary>Last run</summary><ul id="chrome-run-items"></ul></details>
 <section id="panel-run" class="panel" role="tabpanel" aria-labelledby="tab-run" tabindex="0"><div class="toolbar"><div><h2>Run a batch</h2><p>Fill a small batch, then review each application.</p></div><div class="tools" data-tools="run"></div></div>
 <div class="run-controls"><div class="controls"><label for="count">Batch size</label><input id="count" type="number" value="__BATCH_SIZE__" min="1" max="10" step="1" required><button id="start" class="primary" disabled title="Waiting for server" aria-description="Waiting for server">Start</button><button id="pause" disabled title="Waiting for server" aria-description="Waiting for server">Pause</button><button id="resume" disabled title="Waiting for server" aria-description="Waiting for server">Resume</button><button id="stop" class="destructive" disabled title="Waiting for server" aria-description="Waiting for server">Stop</button></div><p>Automatic submission stays off. Semi-auto filling requires Discord and a visible browser. Pause and Stop take effect at a safe point.</p><p id="run-status" role="status">Loading worker status...</p></div><div id="applications" class="items" data-tab="run"></div><div id="pagination-run" class="pagination" aria-label="run pagination"></div></section>
 <section id="panel-priority" class="panel" role="tabpanel" aria-labelledby="tab-priority" tabindex="0" hidden><div class="toolbar"><div><h2>Queue</h2><p>Eligible applications, ordered by priority.</p></div><div class="tools" data-tools="priority"></div></div><div class="queue-actions"><button id="refresh-discovery" class="icon-label" title="Scan job sources for new listings. This can take several minutes."><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6M10 7v6M7 10h6"/></svg><span id="discovery-label">Find new listings</span></button><span id="discovery-state" role="status"></span><p id="sweep" aria-live="polite">No sweep completed yet.</p></div><div id="chrome-selection-priority" class="queue-actions"></div><div id="rows" class="items" data-tab="priority"></div><div id="pagination-priority" class="pagination" aria-label="priority pagination"></div></section>
@@ -230,29 +237,32 @@ function updateChromeSelection(){
  for(const id of ['priority','needs-you']){const button=document.getElementById('chrome-run-'+id);button.textContent='Run in Chrome ('+chromeSelected.size+')';button.disabled=!chromeSelected.size||chromeRunActive||chromeRunStarting;}
 }
 let chromeRunHideTimer, chromeRunFinishedKey="", chromeLastRun;
-document.getElementById("chrome-last-run").onclick=()=>{clearTimeout(chromeRunHideTimer);document.getElementById("chrome-run-panel").hidden=false;};
 function renderChromeRun(data){
  const items=data.items||[];chromeRunActive=items.some(item=>['pending','opened'].includes(item.state));
  chromeLastRun=data;
  const key=items.map(item=>item.run_id+':'+item.application_id+':'+item.state).join('|');
- if(chromeRunActive){clearTimeout(chromeRunHideTimer);chromeRunFinishedKey='';document.getElementById('chrome-run-panel').hidden=false;}
- else if(items.length&&key!==chromeRunFinishedKey){chromeRunFinishedKey=key;clearTimeout(chromeRunHideTimer);document.getElementById('chrome-run-panel').hidden=false;
- chromeRunHideTimer=setTimeout(()=>{document.getElementById('chrome-run-panel').hidden=true;document.getElementById('chrome-last-run').hidden=false;
- const counts={};for(const item of items)counts[item.state]=(counts[item.state]||0)+1;
+ document.getElementById('chrome-run-panel').hidden=!chromeRunActive;
+ if(chromeRunActive){clearTimeout(chromeRunHideTimer);chromeRunFinishedKey='';}
+ else if(items.length&&key!==chromeRunFinishedKey){chromeRunFinishedKey=key;clearTimeout(chromeRunHideTimer);
+ document.getElementById('chrome-last-run').hidden=false;document.getElementById('chrome-last-run').open=false;
+ document.getElementById('chrome-run-items').replaceChildren(...items.map(item=>{const li=node('li','#'+item.application_id+' '+item.company+' - '+item.title+' - '+item.state.replace('_',' '));li.dataset.state=item.state;return li;}));
+ chromeRunHideTimer=setTimeout(()=>{const counts={};for(const item of items)counts[item.state]=(counts[item.state]||0)+1;
  toast('Chrome run finished: '+Object.entries(counts).map(([state,count])=>count+' '+state.replace('_',' ')).join(', '));},1200);}
- else if(!items.length)document.getElementById('chrome-run-panel').hidden=true;
- document.getElementById('chrome-run-items').replaceChildren(...items.map(item=>{const li=node('li','#'+item.application_id+' \u00b7 '+item.company+' \u00b7 '+item.title+' \u2014 '+item.state+(item.detail?' \u00b7 '+item.detail:''));li.dataset.state=item.state;return li;}));
+ const done=items.filter(item=>!['pending','opened'].includes(item.state)).length;
+ const current=items.find(item=>item.state==='opened')||items.find(item=>item.state==='pending')||items.at(-1);
+ document.getElementById('chrome-run-status').textContent=chromeRunActive?'Running '+(items.some(item=>item.state==='opened')?done+1:done)+'/'+items.length+' - '+current.company+': '+current.state.replace('_',' '):'';
  document.getElementById('chrome-run-cancel').disabled=!chromeRunActive;
- document.getElementById('chrome-run-hint').textContent=chromeRunActive&&(data.poll_age_seconds==null||data.poll_age_seconds>=15)?'Open Chrome with the AutoApply extension paired (see Settings)':'';
+ document.getElementById('chrome-run-hint').textContent=chromeRunActive&&(data.poll_age_seconds==null||data.poll_age_seconds>=15)?'Open Chrome with the extension paired':'';
  updateChromeSelection();
 }
 async function loadChromeRun(){if(chromeRunLoading)return;chromeRunLoading=true;try{renderChromeRun(await request('/api/ext-run'));}catch(e){notify('Chrome run: '+e.message,true);}finally{chromeRunLoading=false;}}
-async function startChromeRun(){if(chromeRunStarting||chromeRunActive||!chromeSelected.size)return;chromeRunStarting=true;updateChromeSelection();try{renderChromeRun(await post('ext-run',{application_ids:[...chromeSelected]}));}catch(e){notify(e.message,true);}finally{chromeRunStarting=false;updateChromeSelection();}}
+async function startChromeRun(event){if(event?.currentTarget?.parentElement){event.currentTarget.parentElement.append(document.getElementById('chrome-run-panel'),document.getElementById('chrome-last-run'));}if(chromeRunStarting||chromeRunActive||!chromeSelected.size)return;chromeRunStarting=true;updateChromeSelection();try{renderChromeRun(await post('ext-run',{application_ids:[...chromeSelected]}));}catch(e){notify(e.message,true);}finally{chromeRunStarting=false;updateChromeSelection();}}
 for(const id of ['priority','needs-you']){
  const controls=document.getElementById('chrome-selection-'+id),label=node('label','Select top'),count=node('input'),select=node('button','Select top N'),run=node('button','Run in Chrome (0)','primary');
  count.type='number';count.min=1;count.max=500;count.value='5';count.setAttribute('style','width:72px');count.setAttribute('aria-label','Select top N in '+(id==='priority'?'Queue':'Needs you'));label.append(count);
  select.addEventListener('click',()=>{const n=Number(count.value);if(!Number.isInteger(n)||n<1||n>500)return;for(const item of chromeCandidates(id).slice(0,n))chromeSelected.add(item.application_id);draw('priority');draw('needs-you');});
  run.id='chrome-run-'+id;run.disabled=true;run.addEventListener('click',startChromeRun);controls.append(label,select,run);
+ if(id==='priority')controls.append(document.getElementById('chrome-run-panel'),document.getElementById('chrome-last-run'));
 }
 document.getElementById('chrome-run-cancel').addEventListener('click',async()=>{try{renderChromeRun(await post('ext-run/cancel'));}catch(e){notify(e.message,true);}});
 

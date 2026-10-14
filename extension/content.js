@@ -301,7 +301,7 @@
       url: location.href,
       title: clean(posting?.title) || document.title,
       company: clean(document.querySelector('meta[property="og:site_name"]')?.content) || clean(posting?.hiringOrganization?.name) || document.title.split(/\s[|–-]\s/).pop(),
-      description: (text(description.content) || text(document.querySelector("main,article"))).slice(0, 20000)
+      description: (text(description.content) || text(document.querySelector('[data-automation-id="jobPostingDescription"],.job-description,#job-description,[itemprop="description"]')) || text(document.querySelector("main,article"))).slice(0, 6000)
     };
   }
 

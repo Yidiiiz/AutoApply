@@ -628,3 +628,30 @@ def test_short_desired_start_date_field(http_dashboard, config):
         url='https://jobs.example.test/fixture', fields=[dict(key='start', label='What is your desired start date?',
             kind='text', placeholder='MM/YYYY', max_length=7, required=True)]))
     assert status == 200 and data['answers'][0]['value'] == '05/2027'
+
+
+@pytest.mark.parametrize('path,output', [('/ext/write', {'answer': 'Fixture answer.'}),
+                                       ('/ext/chat', {'reply': 'Fixture reply.'})])
+@pytest.mark.parametrize('matched', [False, True])
+def test_prompt_job_context_toggle_and_cap(http_dashboard, config, db, listing, writing_provider,
+                                           monkeypatch, path, output, matched):
+    writing_provider.result = output
+    app_id = queue(db, config, replace(listing, description=''), 1)[0] if matched else None
+    url = db.application(app_id)['canonical_url'] if matched else 'https://fixture.test/job'
+    description = 'Useful role requirements. ' * 400
+    fetcher = Mock(side_effect=AssertionError('Use scanned context, never fetch'))
+    monkeypatch.setattr('autoapply.descriptions.fetch_description', fetcher)
+    payload = dict(url=url, page=dict(url=url, description=description, company='Fixture', title='Intern'),
+                   question='Why this role?', messages=[dict(role='user', text='Help me.')])
+    if matched:
+        payload['application_id'] = app_id
+    assert ext(http_dashboard, 'POST', path, payload)[0] == 200
+    sent = writing_provider.requests[-1]['job']
+    assert sent['description'] == description[:6000].strip() and sent['canonical_url'] == url
+    if matched:
+        assert db.application(app_id)['description'] == description[:6000]
+    payload['use_job_description'] = False
+    assert ext(http_dashboard, 'POST', path, payload)[0] == 200
+    sent = writing_provider.requests[-1]['job']
+    assert sent['description'] == '' and sent['canonical_url'] == ''
+    fetcher.assert_not_called()

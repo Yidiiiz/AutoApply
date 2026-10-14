@@ -3,10 +3,12 @@ import {api} from "./api.js";
 const element = id => document.getElementById(id);
 const tabId=Number(new URL(location.href).searchParams.get('tabId'))||undefined;
 function selectTab(name){
-  for(const tab of document.querySelectorAll('[role="tab"]')){const selected=tab.id==='tab-'+name;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;element(tab.getAttribute('aria-controls')).hidden=!selected;}
+  for(const tab of document.querySelectorAll('.tabs:not(.subtabs) [role="tab"]')){const selected=tab.id==='tab-'+name;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;element(tab.getAttribute('aria-controls')).hidden=!selected;}
 }
-for(const name of ['fill','answers','ask','chat'])element('tab-'+name).onclick=()=>selectTab(name);
-for(const tab of document.querySelectorAll('[role="tab"]'))tab.onkeydown=event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const tabs=Array.from(document.querySelectorAll('[role="tab"]'));const index=event.key==='Home'?0:event.key==='End'?tabs.length-1:(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;tabs[index].click();tabs[index].focus();};
+for(const name of ['fill','answers','chat'])element('tab-'+name).onclick=()=>selectTab(name);
+function selectChatTab(name){for(const tab of document.querySelectorAll('.subtabs [role="tab"]')){const selected=tab.id==='subtab-'+name;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;element(tab.getAttribute('aria-controls')).hidden=!selected;}}
+for(const name of ['chat','helper'])element('subtab-'+name).onclick=()=>selectChatTab(name);
+for(const tab of document.querySelectorAll('[role="tab"]'))tab.onkeydown=event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const tabs=Array.from(tab.parentElement.querySelectorAll('[role="tab"]'));const index=event.key==='Home'?0:event.key==='End'?tabs.length-1:(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;tabs[index].click();tabs[index].focus();};
 element('close').onclick=()=>send({type:'sidebar-control',state:'closed'});
 element('minimize').onclick=()=>send({type:'sidebar-control',state:'minimized'});
 element('undo-applied').onclick=()=>perform({type:'undo-applied'}).catch(showError);
@@ -14,7 +16,10 @@ let result, source, histories = (await chrome.storage.session.get("answerHistory
 let messages = [], aiBusy = false, chatBusy = false, downloadURL;
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
 const question = () => element("question").value.trim();
-const history = () => histories[question()] || {versions: [], index: 0};
+const applicationKey = () => String(result?.matched?.application_id || result?.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] || tabId || "page");
+const historyKey = () => applicationKey()+":"+question();
+const history = () => histories[historyKey()] || {versions: [], index: 0};
+function openHelper(field){source={...field,tabId:result.tabId,url:result.url};element("question").value=field.label;selectTab("chat");selectChatTab("helper");renderAnswer();element("question").focus();}
 function node(tag, text) { const item = document.createElement(tag); item.textContent = text; return item; }
 function button(text, action) { const item = node("button", text); item.type = "button"; item.onclick = action; return item; }
 async function connection() {
@@ -63,6 +68,7 @@ function prompts() {
       });
       save.disabled = input.disabled;
       actions.append(save);
+      if(field.kind==="textarea" || result?.writing?.some(item=>item.key===field.key))actions.append(button("Ask AI",()=>openHelper(field)));
       if (['select','radio','checkbox','combobox'].includes(field.kind) && !field.options?.length) {
         actions.append(button('Load options', async event => {
           event.target.disabled = true;
@@ -90,7 +96,8 @@ function prompts() {
 }
 function completedAnswers(){
   const container=element('completed-answers');container.replaceChildren();
-  for(const field of result?.completed||[]){
+  const generated=Object.entries(histories).filter(([key])=>key.startsWith(applicationKey()+':')).map(([key,h])=>({key:'ai:'+key,label:key.slice(applicationKey().length+1),kind:'textarea',value:h.versions[h.index]?.answer||'',source:'AI',generated:true}));
+  for(const field of [...(result?.completed||[]),...(result?.aiAnswers||[]).filter(item=>!result?.completed?.some(f=>f.label===item.label&&f.source==='AI')).map(item=>({...item,generated:true,key:'ai:'+applicationKey()+':'+item.label})),...generated.filter(item=>!result?.completed?.some(f=>f.label===item.label&&f.source==='AI')&&!result?.aiAnswers?.some(f=>f.label===item.label))]){
     const card=node('div','');card.className='answer-card';
     const label=node('p',field.label);label.className='field-label';
     const value=node('p',Array.isArray(field.value)?field.value.join(', '):String(field.value??''));value.className='answer-value';
@@ -103,7 +110,7 @@ function completedAnswers(){
       const edit=button('✎',()=>{
         const input=inputFor(field);if(input.multiple){for(const option of input.options)option.selected=(Array.isArray(field.value)?field.value:[field.value]).includes(option.value);}else input.value=String(field.value??'');
         const status=node('p','');
-        const save=button('Save',async()=>{save.disabled=true;try{const value=input.multiple?Array.from(input.selectedOptions,o=>o.value):input.value;await perform({type:'fill-answer',key:field.key,value,remember:field.kind!=='textarea'});}catch(error){status.textContent=error.message;save.disabled=false;}});
+        const save=button('Save',async()=>{save.disabled=true;try{const value=input.multiple?Array.from(input.selectedOptions,o=>o.value):input.value;if(field.generated){const k=field.key.slice(3);const h=histories[k] ||= {versions:[{answer:field.value}],index:0};h.versions[h.index]={...h.versions[h.index],answer:value,words:value.split(/\s+/).filter(Boolean).length,chars:value.length};await chrome.storage.session.set({answerHistory:histories});const stored=result?.aiAnswers?.find(item=>item.label===field.label);if(stored){stored.value=value;const {applicationAnswers={}}=await chrome.storage.session.get("applicationAnswers");applicationAnswers[applicationKey()]=result.aiAnswers;await chrome.storage.session.set({applicationAnswers});}completedAnswers();}else await perform({type:'fill-answer',key:field.key,value,remember:field.kind!=='textarea',source:field.source==='AI'?'AI':'you'});}catch(error){status.textContent=error.message;save.disabled=false;}});
         actions.className='inline-actions';card.classList.add('editing');actions.replaceChildren(save,button('Cancel',completedAnswers));details.replaceChildren(label,input);card.replaceChildren(details,actions,status);input.focus();
       });edit.setAttribute('aria-label','Edit');edit.title='Edit answer';edit.className='edit-answer icon-button';actions.append(edit);card.append(actions);
     }
@@ -137,12 +144,8 @@ function render(value) {
   element("applied-status").hidden=!value.applied;
   element("autofill").textContent=value.busy?"Filling…":"Autofill this page";
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
-  element("needs-writing").replaceChildren(...(value.writing || []).filter(field => field.kind !== "file").map(field => {
-    const item = node("li", ""); item.append(button(field.label, () => {
-      source = {...field, tabId: value.tabId}; element("question").value = field.label;
-      selectTab("ask"); renderAnswer(); element("question").focus();
-    })); return item;
-  }));
+  const writtenFields=[...(value.writing||[]),...(value.fields||[]).filter(field=>field.kind==="textarea"&&!field.section_managed&&!value.writing?.some(item=>item.key===field.key))];
+  element("needs-writing").replaceChildren(...writtenFields.filter(field=>field.kind!=="file" && !value.pending?.some(item=>item.key===field.key)).map(field=>{const item=node("li","");item.append(node("span",field.label),button("Ask AI",()=>openHelper(field)));return item;}));
   // Expose generated PDF without persisting blob URLs across panel instances.
   if (downloadURL) URL.revokeObjectURL(downloadURL);
   element("download").hidden = !value.coverFile;
@@ -159,7 +162,9 @@ async function pageContext() {
     if (scanned.error) throw new Error(scanned.error);
     result = {...scanned, matched: await api("/ext/match", {url: scanned.url})};
   }
-  return {page: result.page, application_id: result.matched?.application_id};
+  const enabled=element("use-job-description").checked;
+  const {description,url,...page}=result.page;
+  return {page:{...page,...(enabled?{description,url}: {})},url:result.url,application_id:result.matched?.application_id,use_job_description:enabled};
 }
 function renderAnswer() {
   const current = history(), answer = current.versions[current.index];
@@ -179,12 +184,13 @@ async function write(refine) {
   const key = question(), current = history(), previous = current.versions[current.index];
   aiBusy = true; renderAnswer(); element("ai-status").textContent = "Writing... This can take up to 3 minutes.";
   try {
-    const answer = await api("/ext/write", {...await pageContext(), question: key,
-      ...(source?.label === key && source.max_length !== null ? {max_length: source.max_length} : {}),
-      instruction: refine ? element("refinement").value : source?.label === key && source.max_length !== null ? `Use at most ${source.max_length} characters.` : "",
+    const requestContext=await pageContext(), appKey=applicationKey();
+    const answer = await api("/ext/write", {...requestContext, question: key,
+      ...(source?.label === key && source.max_length != null ? {max_length: source.max_length} : {}),
+      instruction: refine ? element("refinement").value : source?.label === key && source.max_length != null ? `Use at most ${source.max_length} characters.` : "",
       previous: refine ? previous.answer : ""});
-    current.versions.push(answer); current.index = current.versions.length - 1; histories[key] = current;
-    await chrome.storage.session.set({answerHistory: histories}); element("ai-status").textContent = "Ready.";
+    current.versions.push(answer); current.index = current.versions.length - 1; histories[appKey+":"+key] = current;
+    await chrome.storage.session.set({answerHistory: histories}); element("ai-status").textContent = "Ready."; completedAnswers();
   } catch (error) { element("ai-status").textContent = error.message; }
   finally { aiBusy = false; renderAnswer(); }
 }
@@ -218,10 +224,10 @@ element("generate").onclick = () => write(false);
 element("refine").onclick = () => write(true);
 element("question").oninput = renderAnswer;
 for (const [id, delta] of [["previous", -1], ["next", 1]]) element(id).onclick = async () => {
-  history().index += delta; renderAnswer(); await chrome.storage.session.set({answerHistory: histories});
+  history().index += delta; renderAnswer(); completedAnswers(); await chrome.storage.session.set({answerHistory: histories});
 };
 element("copy").onclick = () => navigator.clipboard.writeText(element("answer").value).then(() => { element("ai-status").textContent = "Copied."; }, showError);
-element("fill-answer").onclick = () => perform({type: "fill-answer", key: source.key, value: element("answer").value}).catch(showError);
+element("fill-answer").onclick = () => perform({type: "fill-answer", key: source.key, value: element("answer").value, source:"AI", url:source.url, label:source.label}).catch(showError);
 element("send").onclick = chat;
 element("chat-input").onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); chat(); } };
 element("clear-chat").onclick = () => { messages = []; renderMessages(); element("chat-status").textContent = ""; };

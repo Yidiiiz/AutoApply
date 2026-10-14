@@ -15,7 +15,13 @@ let reporting = Promise.resolve();
 
 function report(result) {
   reporting = reporting.catch(() => {}).then(async () => {
-  const {tabResults = {}} = await chrome.storage.session.get("tabResults");
+  const {tabResults = {}, applicationAnswers={}} = await chrome.storage.session.get(["tabResults","applicationAnswers"]);
+  if(result.url){
+    const key=String(result.matched?.application_id || result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]);
+    const saved=applicationAnswers[key] || [];
+    for(const answer of result.completed || [])if(answer.source==="AI"){const old=saved.findIndex(item=>item.label===answer.label);if(old>=0)saved.splice(old,1);saved.push({...answer,url:result.url});}
+    result.aiAnswers=saved;applicationAnswers[key]=saved;await chrome.storage.session.set({applicationAnswers});
+  }
   if (result.tabId) tabResults[result.tabId] = result;
   await chrome.storage.session.set({lastResult: result, tabResults});
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
@@ -37,12 +43,19 @@ async function scan(tabId) {
   }
   if (!frames.length) throw new Error("Form scanner is unavailable. Reload the application page and try again.");
   const page = {...(frames.find(frame => frame.frameId === 0) || frames[0]).result.page, url: tab.url};
+  const contextKey=tab.url.replace(/\/apply(?:\/.*)?(?=[?#]|$)/i, "").split(/[?#]/)[0];
+  const {jobContexts={}}=await chrome.storage.session.get("jobContexts");
+  const cached=jobContexts[contextKey];
+  if(cached?.description && (!page.description || /\/apply(?:\/|$)/i.test(tab.url)))page.description=cached.description;
+  page.description=(page.description||"").slice(0,6000);
+  jobContexts[contextKey]={description:page.description,url:tab.url};
+  await chrome.storage.session.set({jobContexts});
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
   return {tabId: tab.id, url: tab.url, page, fields, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
-const context = result => ({page: result.page, application_id: result.matched?.application_id});
+const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
 
 async function fill(result, values, files = {}) {
   if ((await chrome.tabs.get(result.tabId)).url !== result.url) throw new Error("Application page changed. Run autofill again.");
@@ -235,9 +248,9 @@ export async function autofill(tabId, application, advanceCount = 0) {
     activeResults.set(result.tabId, result);
     const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
     const saved = autofillTabs[result.tabId] || {};
-    result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.matched;
+    result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]===result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] ? saved.matched : undefined;
     result.matched ||= await api("/ext/match", {url: result.url});
-    autofillTabs[result.tabId] = {...saved, matched: result.matched};
+    autofillTabs[result.tabId] = {...saved, url: result.url, matched: result.matched};
     await chrome.storage.session.set({autofillTabs});
     if (result.matched.company) result.page.company = result.matched.company;
     if (result.matched.title) result.page.title = result.matched.title;
@@ -333,7 +346,8 @@ async function action(message) {
   } else if (message.type === 'load-options') {
     await loadOptions(result, message.key);
   } else if (message.type === "fill-answer") {
-    await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, source: "you"}]);
+    if(message.url && message.url!==result.url || message.label && !result.fields.some(field=>field.key===message.key && field.label===message.label))throw new Error("Application changed. Open the answer helper again.");
+    await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, source: message.source === "AI" ? "AI" : "you"}]);
     const field = result.fields.find(field => field.key === message.key);
     if (message.remember && field && !["textarea","file"].includes(field.kind)) {
       await api("/ext/remember", {...field, ...context(result), url: result.url, value: message.value});

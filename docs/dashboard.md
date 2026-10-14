@@ -684,3 +684,7 @@ overrides. Standard answers use explicit profile preferences; advertised salary
 ranges take precedence over the configured default (hourly pay is annualized
 at 2,080 hours when requested). Negated commitments and Hispanic/Latino fields
 without a decline option require user input.
+
+Chrome runs show a compact progress line with an icon cancel action. The line closes when the run finishes; Last run is a muted, collapsed disclosure with one line per application.
+
+The extension Chat tab includes Chat and Answer helper. Written fields offer Ask AI, and generated answers stay editable in Answers for that application. Use job description controls whether the saved posting text and link are sent as AI reference context. Scrollbars follow the light or dark theme.
