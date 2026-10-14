@@ -804,3 +804,39 @@ def test_self_identification_profile_payload():
     result = profile_sections(Mock(config=Mock(profile=profile)), {})
     assert result['identity'] == {'full_name': 'Fixture Student'}
     assert result['application_preferences'] == {'disability': 'No'}
+
+
+def test_skill_choice_persists_and_validates_alias(http_dashboard, writing_provider, db):
+    writing_provider.result = {'choice': 'Node.js'}
+    status, value, _ = ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill': 'Node', 'options': ['Node.js', 'JavaScript']})
+    assert status == 200 and value == {'choice': 'Node.js'}
+    assert db.setting('skill_alias:node') == 'Node.js'
+    assert ext(http_dashboard, 'GET', '/ext/skills/aliases')[1]['aliases']['node'] == 'Node.js'
+    count = len(writing_provider.requests)
+    assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'Node', 'options':['Node.js']})[1]['choice'] == 'Node.js'
+    assert len(writing_provider.requests) == count
+    writing_provider.result = {'choice': 'Invented'}
+    assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'Unknown', 'options':['Python']})[1]['choice'] is None
+    writing_provider.result = {'choice': 'NONE'}
+    assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'Unknown', 'options':['Rust']})[1]['choice'] is None
+    assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'C', 'options':['C++','C']})[1]['choice'] == 'C'
+
+
+def test_skill_plan_parsing_and_cache(http_dashboard, config, writing_provider, monkeypatch):
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(dict(config.profile, skills=['Python', 'JavaScript', 'Rust'])), encoding='utf-8')
+    writing_provider.result = {'matched': 'javascript, Python, PYTHON, Invented', 'missing': 'Kubernetes, kubernetes, Rust, Imaginary'}
+    payload = {'page': {'title':'Engineer','company':'Fixture','description':'Python JavaScript Kubernetes Rust'}}
+    status, value, _ = ext(http_dashboard, 'POST', '/ext/skills/plan', payload)
+    assert status == 200 and value == {'matched':['JavaScript','Python'], 'missing':['Kubernetes'], 'other':['Rust']}
+    assert writing_provider.requests[-1]['skills'] == ['Python','JavaScript','Rust']
+    count = len(writing_provider.requests)
+    assert ext(http_dashboard, 'POST', '/ext/skills/plan', payload)[1] == value
+    assert len(writing_provider.requests) == count
+
+
+def test_skill_plan_disabled_fallback(http_dashboard, config, monkeypatch):
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(dict(config.profile, skills=['Python','C++','Rust','Go'])), encoding='utf-8')
+    config.data['ai']['enabled'] = False
+    assert ext(http_dashboard, 'POST', '/ext/skills/plan', {'page':{'description':'Use Python and C++; ongoing work.'}})[1] == {
+        'matched':['Python','C++'], 'missing':[], 'other':['Rust','Go']}
+    assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'Unknown','options':['Python']})[1] == {'choice':None}

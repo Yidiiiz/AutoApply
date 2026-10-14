@@ -23,6 +23,7 @@ RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 def extension_server():
     requests = []
     run = {"items": [], "index": 0}
+    skill_aliases = {"ecmascript": "JavaScript"}
     gates = {name: threading.Event() for name in ("write", "cover", "chat")}
     for gate in gates.values():
         gate.set()
@@ -70,7 +71,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/t046.html": "t046.html", "/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -115,6 +116,15 @@ def extension_server():
                     self.response(200, {"done": True})
             elif self.path in {"/ext/run/result", "/ext/run/status"}:
                 self.response(200, {"ok": True})
+            elif self.path == "/ext/skills/aliases":
+                self.response(200, {"aliases": skill_aliases})
+            elif self.path == "/ext/skills/choose":
+                choice = "Node.js" if payload["skill"] == "Node" else None
+                if choice:
+                    skill_aliases[payload["skill"].lower()] = choice
+                self.response(200, {"choice": choice})
+            elif self.path == "/ext/skills/plan":
+                self.response(200, {"matched": ["TypeScript"], "missing": ["Kubernetes"], "other": ["Python", "Rust"]})
             elif self.path == "/ext/profile-sections":
                 self.response(200, {"experience": [], "projects": [], "education": [], "skills": [], "links": {}})
             elif self.path == "/ext/ping":
@@ -1590,7 +1600,8 @@ def test_t040_real_workday_repeatable_sections(loaded_extension, extension_serve
     assert page.evaluate('dateKeys.length') >= 20
     assert page.locator('[data-automation-id=formField-fieldOfStudy] [data-automation-id=selectedItem]').inner_text() == 'Computer Science'
     assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python', 'JavaScript']
-    assert page.evaluate('searches') == ['Computer Science', 'Python', 'JavaScript', 'Missing Skill', 'Missing Skill']
+    # A settled popup without a matching option is skipped after one search.
+    assert page.evaluate('searches') == ['Computer Science', 'Python', 'JavaScript', 'Missing Skill']
     assert all(',' not in value for value in page.evaluate('searches'))
     assert prepared['skills']['added'] == 2 and prepared['skills']['skipped'] == 1
     assert next(s for s in prepared['sections'] if s['name']=='skills')['message'] == 'Skills: run Autofill skills'
@@ -1806,3 +1817,71 @@ def test_t044_skills_action_buttons_progress_and_cancel(loaded_extension, extens
     assert result['cancelled']['progress'].startswith('Cancelled.')
     assert page.locator('#skills [data-automation-id=selectedItem]').all_text_contents() == ['Python','JavaScript']
     assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+
+
+def test_t046_document_popup_skill_engine(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server, key=KEY))
+    page = context.new_page()
+    page.goto(server + '/t046.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    def fill(skills):
+        return worker.evaluate("""async args=>(await chrome.scripting.executeScript({target:{tabId:args.id},
+            func:skills=>globalThis.autoApplyContent.autofillSkills(skills),args:[args.skills]}))[0].result""", dict(id=tab_id, skills=skills))
+    result = fill(['TypeScript', 'ECMAScript', 'Node', 'Unknown', 'OCaml', 'Linux/Unix'])
+    assert result['added'] == 3 and result['skipped'] == 1
+    assert result['items']['ECMAScript'] == 'alias used'
+    assert result['items']['Node'] == 'AI picked'
+    assert page.evaluate('searches') == ['TypeScript', 'ECMAScript', 'Node', 'Unknown']
+    assert len(page.locator('[data-automation-id=selectedItem]').all_text_contents()) == 8
+    assert page.evaluate('selectionEvents.slice(0,4)') == ['pointerdown','mousedown','pointerup','mouseup']
+    assert not any(path == '/ext/skills/choose' and data['skill'] == 'TypeScript' for path, _, data in requests)
+    page.reload()
+    again = fill(['Node', 'JS/TS'])
+    assert again['items']['Node'] == 'alias used'
+    assert page.evaluate('searches') == ['Node', 'JS/TS', 'JavaScript', 'TypeScript']
+    assert page.locator('[data-automation-id=selectedItem]').all_text_contents()[-3:] == ['Node.js','JavaScript','TypeScript']
+    choices = [data for path, _, data in requests if path == '/ext/skills/choose' and data['skill'] == 'Node']
+    assert len(choices) == 1
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_t046_skill_panel_controls(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, _ = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server,key=KEY))
+    page = context.new_page()
+    page.goto(server + '/t046.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    panel = context.new_page()
+    panel.set_viewport_size(dict(width=360,height=800))
+    panel.emulate_media(color_scheme=theme)
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    expect(panel.locator('#matched-skills')).to_contain_text('TypeScript')
+    panel.get_by_role('button',name='Include Kubernetes',exact=True).click()
+    expect(panel.locator('#matched-skills')).to_contain_text('Kubernetes')
+    panel.get_by_role('button',name='Remove Kubernetes',exact=True).click()
+    panel.locator('#other-skills summary').click()
+    panel.get_by_label('Add all',exact=True).check()
+    expect(panel.locator('#matched-skills')).to_contain_text('Python')
+    expect(panel.locator('#matched-skills')).to_contain_text('Rust')
+    panel.locator('#autofill-skills').click()
+    expect(panel.locator('#skills-progress')).to_contain_text('3 added',timeout=20000)
+    assert set(page.locator('[data-automation-id=selectedItem]').all_text_contents()[-3:]) == {'TypeScript','Python','Rust'}
+    assert panel.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_t046_uncommitted_option_is_skipped_without_retry(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server,key=KEY))
+    page=context.new_page()
+    page.goto(server+'/t046.html')
+    page.evaluate("document.addEventListener('click',event=>{if(event.target.closest('#popup'))event.stopImmediatePropagation();},true)")
+    tab_id=worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id",page.url)
+    result=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},
+        func:()=>globalThis.autoApplyContent.autofillSkills(['TypeScript'])}))[0].result""",tab_id)
+    assert result['added']==0 and result['skipped']==1
+    assert page.evaluate('searches')==['TypeScript']
+    assert page.locator('[data-automation-id=selectedItem]').count()==5

@@ -7,3 +7,22 @@ html,body{height:100%}main{height:100%;display:flex;flex-direction:column}header
 #chat-conversation{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;gap:10px}#ask-section{padding:0}.context-toggle{flex-shrink:0}
 
 .page-navigation{position:sticky;bottom:0;flex-shrink:0;margin-top:auto;padding:10px 16px;background:var(--surface);border-top:1px solid var(--line);gap:6px;font-size:11px}.page-navigation p:empty{display:none}
+
+/* Shared spacing and bounded content for 360–400px sidebars. */
+main{min-width:0;overflow:hidden}header,.primary-action,.tab-panel,.page-navigation{min-width:0}
+h2{font-size:14px}h3{font-size:12px}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.section-heading button{font-size:12px;padding:0 10px;flex-shrink:0}
+#skills-panel{padding:12px;margin-bottom:16px}#skills-panel h3{margin:12px 0 8px;color:var(--muted)}
+#skills-progress{font-size:12px;color:var(--muted);margin-bottom:8px;overflow-wrap:anywhere}
+.skill-chips{display:flex;flex-wrap:wrap;gap:6px}.skill-chips>p,#other-skill-options>p{font-size:12px;color:var(--muted)}
+.skill-chip{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px;border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:12px;max-width:100%;overflow-wrap:anywhere;background:var(--hover)}
+.skill-chip>span{min-width:0}.skill-chip button{border:0;background:transparent;padding:0 3px;min-height:22px}.skill-status{font-size:10px;white-space:nowrap}
+.skill-chip[data-status="added"],.skill-chip[data-status="alias used"],.skill-chip[data-status="AI picked"]{border-color:var(--ready)}
+.skill-chip[data-status="skipped"]{border-color:var(--answers)}#missing-skills button{font-size:12px;min-height:28px;max-width:100%;overflow-wrap:anywhere}
+#other-skills{margin:12px 0 0;padding:8px;background:var(--bg)}#other-skill-options{max-height:180px;overflow-y:auto;margin-top:8px}
+#other-skill-options label{display:flex;align-items:center;gap:8px;margin:0;padding:5px 2px;overflow-wrap:anywhere}
+#other-skill-options input{width:auto;min-height:0;flex-shrink:0}.prompt-actions{flex-wrap:wrap}
+[role="status"],#section-results,#answer-section-results{overflow-wrap:anywhere;white-space:pre-wrap}
+.page-navigation{grid-template-columns:1fr 1fr}.page-navigation label,.page-navigation p,#send-structure,#cancel-form-wait{grid-column:1/-1}
+.page-navigation button{font-size:12px}.page-navigation label{margin:2px 0;font-size:11px}.page-navigation input{min-height:0}
+#next-page{grid-column:1/-1}.tab-panel>h2{margin-top:4px}.prompt,.card,details{border-radius:10px}

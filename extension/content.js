@@ -171,10 +171,10 @@
     const lists = ids.map(id => document.getElementById(id)).filter(Boolean);
     if (!lists.length) {
       lists.push(comboContainer(element));
-      if (element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement) lists.push(...document.querySelectorAll('[role="listbox"]'));
+      if (element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement) lists.push(...document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
     }
-    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="promptOption"]'))))]
-      .filter(option => !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
+    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="promptOption"]')).map(option=>option.closest('[data-automation-id="menuItem"][role="option"]') || option)))]
+      .filter(option => !option.closest('[data-automation-id="selectedItemList"]') && !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
         (text(option) || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
   }
@@ -860,7 +860,7 @@
     const container = comboContainer(element);
     return Array.from(container.querySelectorAll('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"],[class*="multiValueLabel"],[class*="multi-value__label"],[class*="token"],[data-skill]')).map(node=>{const copy=node.cloneNode(true);copy.querySelectorAll('button,[role="button"]').forEach(el=>el.remove());return normal(copy.getAttribute('data-automation-label') || text(copy.querySelector('[data-automation-id="selectedItemLabel"]')) || text(copy));});
   }
-  const skillNormal = value => normal(value).replace(/[^a-z0-9]/g, '');
+  const skillNormal = value => normal(value).replace(/[^a-z0-9+#]/g, '');
   function isSkillsField(element) {
     const container=comboContainer(element);
     return /skills/i.test(label(element)+' '+container.getAttribute('data-automation-id')) &&
@@ -878,46 +878,117 @@
     element.click();
   }
   let skillsCancelled=false, skillsState={busy:false,progress:''};
+  const optionName = option => text(option.querySelector('[data-automation-id="promptOption"]')) ||
+    clean(option.getAttribute('data-automation-label')) || text(option);
+  const skillRequest = async (type, payload={}) => {
+    try {return await chrome.runtime.sendMessage({type,...payload});} catch {return {};}
+  };
+  function splitSkill(skill) {
+    const expanded = {js:'JavaScript',ts:'TypeScript'};
+    return [...new Set(skill.split(/\s*(?:\/|&|,|\band\b)\s*/i).filter(Boolean)
+      .map(part=>expanded[normal(part)] || part.trim()))];
+  }
+  async function skillOptions(element, previousLists) {
+    const end=Date.now()+4000;
+    let signature='', stableSince=Date.now(), popup=false;
+    do {
+      const lists=Array.from(document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]'))
+        .filter(list=>!list.matches('[data-automation-id="selectedItemList"]') && visible(list) &&
+          (list.matches('[data-automation-id="activeListContainer"]') || !previousLists.has(list) ||
+           comboContainer(element).contains(list) ||
+           clean(element.getAttribute('aria-controls') || element.getAttribute('aria-owns')).split(' ').includes(list.id)));
+      popup ||= lists.length>0;
+      const rows=[...new Set(lists.flatMap(list=>Array.from(list.querySelectorAll('[role="option"],[data-automation-id="menuItem"],[data-automation-id="promptOption"],option')).map(row=>row.closest('[data-automation-id="menuItem"][role="option"]') || row)))]
+        .filter(row=>visible(row) && row.getAttribute('aria-disabled')!=='true' && optionName(row) &&
+          !/^(loading\b|no (?:items|options|results)\b)/i.test(optionName(row)));
+      const next=JSON.stringify(rows.map(optionName));
+      if(next!==signature || !rows.length) stableSince=Date.now();
+      else if(Date.now()-stableSince>=250) return {rows,popup};
+      signature=next;
+      await pause(50);
+    } while(Date.now()<end);
+    return {rows:[],popup};
+  }
   async function fillSkills(element, skills, progress=()=>{}, cancelled=()=>false) {
     let added=0, skipped=0;
+    const response=await skillRequest('skill-aliases');
+    const aliases=response?.aliases || {};
     const selected=skill=>selectedSkills(element).some(value=>skillNormal(value)===skillNormal(skill));
-    for (const [index,skill] of skills.entries()) {
-      if(cancelled()) break;
-      if(selected(skill)) {progress(index+1,skill,'already added');continue;}
-      let ok=false;
-      for(let attempt=0;attempt<2 && !ok && !cancelled();attempt++) {
+    async function add(skill,index,split=true) {
+      if(cancelled()) return false;
+      const alias=aliases[skillNormal(skill)];
+      if(selected(skill) || alias && selected(alias)) {progress(index,skill,'already added');return true;}
+      let choice, status='added', ok=false;
+      for(let attempt=0;attempt<2 && !cancelled();attempt++) {
+        let popup=false;
         try {
-          progress(index+1,skill,attempt?'retrying':'searching');
-          await openCombo(element); searchCombo(element,'');
-          let typed='';
-          for(const char of skill) {if(cancelled()) break;searchCombo(element,typed+=char);await pause(35);}
+          progress(index,skill,'pending');
+          const previous=new Set(Array.from(document.querySelectorAll('[role="listbox"]')).filter(visible));
+          comboInput(element)?.focus(); searchCombo(element,''); searchCombo(element,skill);
+          if(isPrompt(element)) promptEnter(comboInput(element)); else keypress(comboInput(element),'ArrowDown');
+          const options=await skillOptions(element,previous); popup=options.popup;
           if(cancelled()) break;
-          if(isPrompt(element)) promptEnter(comboInput(element));
-          await settledComboOptions(element,3000);
-          const option=await promptOption(element,skill);
-          if(cancelled()) break;
-          if(option) {const box=option.querySelector('input[type="checkbox"]:not(:checked)');pointerClick(box && visible(box)?box:option);}
-          else if(!isPrompt(element) && (element.getAttribute('data-allow-create')==='true' || /token|creatable/i.test(comboContainer(element).className))) promptEnter(comboInput(element));
-          ok=Boolean(await waitFor(()=>selected(skill),2000));
-        } catch { ok=false; }
-        finally {searchCombo(element,'');closeCombo(element);}
-        if(!ok && !cancelled()) await pause(200);
+          choice=options.rows.find(row=>skillNormal(optionName(row))===skillNormal(skill));
+          if(!choice && alias) {
+            choice=options.rows.find(row=>skillNormal(optionName(row))===skillNormal(alias));
+            if(choice) status='alias used';
+          }
+          // Keep exact selection of Workday's virtualized prompt lists.
+          if(!choice && isPrompt(element) && options.rows.length) choice=await promptOption(element,skill);
+          if(!choice && options.rows.length) {
+            const result=await skillRequest('skill-choose',{skill,options:options.rows.map(optionName)});
+            choice=options.rows.find(row=>optionName(row)===result?.choice);
+            if(choice) {status='AI picked';aliases[skillNormal(skill)]=optionName(choice);}
+          }
+          if(choice && !cancelled()) {
+            const name=optionName(choice);
+            if(selected(name)) ok=true;
+            else {
+              pointerClick(choice);
+              ok=Boolean(await waitFor(()=>selected(name) || (/ checked$/i.test(choice.getAttribute('aria-label') || '') &&
+                !/ not checked$/i.test(choice.getAttribute('aria-label') || '')),2000));
+              if(ok) added++;
+            }
+          }
+        } catch {ok=false;}
+        finally {closeCombo(element);searchCombo(element,'');}
+        if(ok || popup || cancelled()) break; // Retry only when no results popup appeared.
       }
-      if(cancelled()) break;
-      if(ok) added++; else skipped++;
-      progress(index+1,skill,ok?'added':'skipped');
+      if(cancelled()) return false;
+      if(!ok && split) {
+        let parts=splitSkill(skill);
+        // Some catalogs represent the whole C/C++ skill as C++.
+        if(/^c\s*\/\s*c\+\+$/i.test(skill)) parts=['C++','C'];
+        if(parts.length>1) {
+          let success=false;
+          for(const part of parts) {
+            const partOK=await add(part,index,false);success ||= partOK;
+            if(partOK && /^c\s*\/\s*c\+\+$/i.test(skill) && part==='C++') break;
+          }
+          progress(index,skill,success?'added':'skipped');return success;
+        }
+      }
+      if(!ok) skipped++;
+      progress(index,skill,ok?status:'skipped');
       await pause(180);
+      return ok;
+    }
+    for(const [index,skill] of [...new Set(skills)].entries()) {
+      if(cancelled()) break;
+      await add(skill,index+1);
     }
     return {added,skipped};
   }
   async function autofillSkills(skills) {
     if(skillsState.busy) throw Error('Skills autofill is already running.');
-    skillsCancelled=false;skillsState={busy:true,progress:'Starting skills…'};extensionFilling++;
+    skillsCancelled=false;skillsState={busy:true,progress:'Starting skills…',items:{}};extensionFilling++;
     try {
       const element=skillInputs()[0];
       if(!element) throw Error('No skills tag field found.');
-      const counts=await fillSkills(element,skills,(index,skill,status)=>{skillsState.progress=index+'/'+skills.length+': '+skill+' - '+status;},()=>skillsCancelled);
-      skillsState={...counts,busy:false,progress:(skillsCancelled?'Cancelled. ':'')+counts.added+' added / '+counts.skipped+' skipped'};
+      const counts=await fillSkills(element,skills,(index,skill,status)=>{
+        skillsState.progress=index+'/'+skills.length+': '+skill+' - '+status;skillsState.items[skill]=status;
+      },()=>skillsCancelled);
+      skillsState={...skillsState,...counts,busy:false,progress:(skillsCancelled?'Cancelled. ':'')+counts.added+' added / '+counts.skipped+' skipped'};
       return skillsState;
     } finally {skillsState.busy=false;extensionFilling--;}
   }
@@ -1209,5 +1280,5 @@
     }
     return {host:location.hostname,nodes,truncated};
   }
-  globalThis.autoApplyContent = {skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
+  globalThis.autoApplyContent = {skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
 })();

@@ -73,3 +73,32 @@ async def test_extension_prompt_branches(monkeypatch, task, result, phrases):
     assert await provider.generate_response(dict(task=task)) == result
     assert all(phrase.lower() in prompts[0].lower() for phrase in phrases)
     assert 'Use no tools' in prompts[0] and 'ONLY JSON' in prompts[0]
+
+
+@pytest.mark.parametrize('task,result,phrase', [
+    ('skill_choose', 'Node.js', 'single option name'),
+    ('skill_plan', {'matched':'Python', 'missing':'Rust'}, 'comma-separated list'),
+])
+async def test_skill_prompt_branches(monkeypatch, task, result, phrase):
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
+    provider = CodexWritingProvider(dict(name='test',billing='included'),None,None)
+    monkeypatch.setattr(provider, 'ensure_ready', AsyncMock())
+    prompts = []
+    async def run(args, folder, prompt=None):
+        prompts.append(prompt)
+        Path(args[args.index('-o')+1]).write_text(result if isinstance(result,str) else json.dumps(result),encoding='utf-8')
+    monkeypatch.setattr(provider, 'run', run)
+    response = await provider.generate_response({'task':task})
+    assert response == ({'choice':result} if isinstance(result,str) else result)
+    assert phrase in prompts[0] and 'Use no tools' in prompts[0]
+
+
+async def test_skill_provider_has_short_timeout(monkeypatch):
+    import asyncio
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
+    provider = CodexWritingProvider(dict(name='test',billing='included'),None,None)
+    async def delayed(request):
+        await asyncio.sleep(1)
+    monkeypatch.setattr(provider, '_generate_response', delayed)
+    with pytest.raises(asyncio.TimeoutError):
+        await provider.generate_response({'task':'skill_choose','timeout_seconds':0.01})

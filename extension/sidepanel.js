@@ -12,6 +12,7 @@ for(const tab of document.querySelectorAll('[role="tab"]'))tab.onkeydown=event=>
 element('close').onclick=()=>send({type:'sidebar-control',state:'closed'});
 element('minimize').onclick=()=>send({type:'sidebar-control',state:'minimized'});
 element('undo-applied').onclick=()=>perform({type:'undo-applied'}).catch(showError);
+let skillsBusy=false, skillPlan, skillPlanKey, skillPlanPromise, selectedSkillNames=new Set(), chipStatuses={};
 let result, source, histories = (await chrome.storage.session.get("answerHistory")).answerHistory || {};
 let messages = [], aiBusy = false, chatBusy = false, downloadURL;
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
@@ -266,18 +267,70 @@ chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&chang
 helperRequest((await chrome.storage.session.get('helperRequest')).helperRequest);
 element('send-structure').onclick=async()=>{try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);element('snapshot-status').textContent='Page structure sent.';}catch(error){element('snapshot-status').textContent=error.message;}};
 
-let skillsBusy=false;
-function showSkills(available) {for(const id of ['autofill-skills','footer-autofill-skills']) element(id).hidden=!available;}
-function renderSkills(value) {element('skills-progress').textContent=value.progress || '';}
+
+function showSkills(available) {
+  for(const id of ['skills-panel','autofill-skills','footer-autofill-skills']) element(id).hidden=!available;
+  if(available) loadSkillPlan();
+}
+async function loadSkillPlan() {
+  const key=applicationKey()+JSON.stringify(result?.page || {});
+  if(skillPlanKey===key) return skillPlanPromise;
+  skillPlanKey=key; skillPlan=undefined;
+  element('skills-progress').textContent='Planning skills…';
+  skillPlanPromise=(async()=>{
+    try {
+      const page=result?.page || (await send({type:'skills-available'})).page || {};
+      let plan;
+      try {plan=await api('/ext/skills/plan',{page,...(result?.matched?.application_id?{application_id:result.matched.application_id}:{})});}
+      catch {const profile=await api('/ext/profile-sections');plan={matched:profile.skills || [],missing:[],other:[]};}
+      if(skillPlanKey!==key) return;
+      skillPlan=plan;selectedSkillNames=new Set(plan.matched);chipStatuses={};renderSkillPlan();
+      element('skills-progress').textContent=plan.matched.length+' matched skills ready';
+    } catch(error) {element('skills-progress').textContent=error.message;}
+  })();
+  return skillPlanPromise;
+}
+function renderSkillPlan() {
+  if(!skillPlan) return;
+  const matched=element('matched-skills');matched.replaceChildren();
+  for(const skill of selectedSkillNames) {
+    const chip=node('span','');chip.className='skill-chip';chip.dataset.status=chipStatuses[skill] || 'pending';
+    const status=node('small',chipStatuses[skill] || 'pending');status.className='skill-status';
+    const remove=button('×',()=>{selectedSkillNames.delete(skill);renderSkillPlan();});
+    remove.setAttribute('aria-label','Remove '+skill);remove.disabled=skillsBusy;
+    chip.append(node('span',skill),status,remove);matched.append(chip);
+  }
+  if(!matched.children.length) matched.append(node('p','No skills selected. Include skills below.'));
+  const missing=element('missing-skills');missing.replaceChildren();
+  for(const skill of skillPlan.missing) {
+    const include=button((selectedSkillNames.has(skill)?'✓ ':'+ ')+skill,()=>{selectedSkillNames.add(skill);renderSkillPlan();});
+    include.setAttribute('aria-label','Include '+skill);include.disabled=skillsBusy || selectedSkillNames.has(skill);missing.append(include);
+  }
+  if(!missing.children.length) missing.append(node('p','No missing skills identified.'));
+  const other=element('other-skill-options');other.replaceChildren();
+  function check(name,checked,action) {
+    const label=node('label',''),input=document.createElement('input');input.type='checkbox';input.checked=checked;input.disabled=skillsBusy;input.onchange=()=>action(input.checked);label.append(input,node('span',name));other.append(label);
+  }
+  check('Add all',skillPlan.other.length>0 && skillPlan.other.every(skill=>selectedSkillNames.has(skill)),checked=>{
+    for(const skill of skillPlan.other) {if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);}renderSkillPlan();
+  });
+  for(const skill of skillPlan.other) check(skill,selectedSkillNames.has(skill),checked=>{if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);renderSkillPlan();});
+  if(!skillPlan.other.length) other.append(node('p','All profile skills are in the main list.'));
+}
+function renderSkills(value) {
+  element('skills-progress').textContent=value.progress || '';
+  chipStatuses={...chipStatuses,...value.items};renderSkillPlan();
+}
 async function runSkills() {
   if(skillsBusy) return;
-  skillsBusy=true;
+  await loadSkillPlan();
+  skillsBusy=true;renderSkillPlan();
   for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page']) element(id).disabled=true;
   element('cancel-skills').hidden=false;
   const timer=setInterval(()=>send({type:'skills-status'}).then(renderSkills).catch(showError),250);
-  try {const response=await send({type:'autofill-skills'});if(response.error)throw Error(response.error);renderSkills(response);}
+  try {const response=await send({type:'autofill-skills',...(skillPlan?{skills:[...selectedSkillNames]}:{})});if(response.error)throw Error(response.error);renderSkills(response);}
   catch(error){showError(error);}
-  finally {clearInterval(timer);skillsBusy=false;element('cancel-skills').hidden=true;for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page'])element(id).disabled=false;}
+  finally {clearInterval(timer);skillsBusy=false;renderSkillPlan();element('cancel-skills').hidden=true;for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page'])element(id).disabled=false;}
 }
 for(const id of ['autofill-skills','footer-autofill-skills']) element(id).onclick=runSkills;
 element('cancel-skills').onclick=()=>send({type:'cancel-skills'}).catch(showError);

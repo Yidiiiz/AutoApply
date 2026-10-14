@@ -507,6 +507,89 @@ def write(dashboard, payload):
     return response
 
 
+def _skill_key(value):
+    # Preserve meaningful language punctuation (C, C++ and C# are different skills).
+    return re.sub(r'[^a-z0-9+#]', '', value.casefold())
+
+
+def skill_aliases(dashboard, payload):
+    with dashboard.connection() as db:
+        rows = db.rows("SELECT key,value FROM settings WHERE key LIKE 'skill_alias:%'")
+    return dict(aliases={row['key'].split(':', 1)[1]: json.loads(row['value']) for row in rows})
+
+
+def skill_choose(dashboard, payload):
+    skill = _text(payload, 'skill', 200, required=True).strip()
+    options = payload.get('options')
+    if not isinstance(options, list) or len(options) > 200 or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 300 for item in options):
+        raise SettingsRejected('options must be a list of at most 200 skill names')
+    aliases = skill_aliases(dashboard, {})['aliases']
+    targets = {_skill_key(skill), _skill_key(aliases.get(_skill_key(skill), ''))}
+    choice = next((item for item in options if _skill_key(item) in targets), None)
+    if choice is None and options:
+        try:
+            result = dashboard.run_writing(dict(task='skill_choose', skill=skill, options=options,
+                                                timeout_seconds=8))
+            answer = result.get('choice', '') if isinstance(result, dict) else result
+            if isinstance(answer, str) and answer.strip() in options:
+                choice = answer.strip()
+        except Exception:
+            pass  # Unavailable AI leaves the field unchanged.
+    if choice is not None:
+        with dashboard.settings.mutex, dashboard.connection(writable=True) as db:
+            db.set_setting('skill_alias:' + _skill_key(skill), choice)
+    return dict(choice=choice)
+
+
+def _skill_list(value):
+    if isinstance(value, str):
+        value = value.split(',')
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()] if isinstance(value, list) else []
+
+
+def skill_plan(dashboard, payload):
+    page = payload.get('page', {})
+    if not isinstance(page, dict) or any(not isinstance(page.get(key, ''), str)
+                                        for key in ('title', 'company', 'description')):
+        raise SettingsRejected('page must contain text values')
+    application_id = payload.get('application_id')
+    if application_id is not None:
+        _id(application_id)
+    skills = profile_sections(dashboard, {})['skills']
+    page = {key: page.get(key, '')[:12000] for key in ('title', 'company', 'description')}
+    cache_key = json.dumps([application_id, page, skills], sort_keys=True)
+    with dashboard._ext_mutex:
+        cache = getattr(dashboard, '_ext_skill_plans', {})
+        if cache_key in cache:
+            return {key: list(value) for key, value in cache[cache_key].items()}
+    description = page['description'].casefold()
+    matched = [skill for skill in skills if all(re.search(r'(?<!\w)' + re.escape(word) + r'(?!\w)', description)
+               for word in re.findall(r'[\w+#]+', skill.casefold())) and re.findall(r'[\w+#]+', skill)]
+    missing = []
+    try:
+        result = dashboard.run_writing(dict(task='skill_plan', skills=skills, page=page, timeout_seconds=8))
+        if isinstance(result, dict) and 'matched' in result:
+            profile = {skill.casefold(): skill for skill in skills}
+            matched = list(dict.fromkeys(profile[item.casefold()] for item in _skill_list(result['matched'])
+                                         if item.casefold() in profile))
+            seen = set(profile)
+            for item in _skill_list(result.get('missing', [])):
+                if item.casefold() not in seen and item.casefold() in description:
+                    missing.append(item)
+                    seen.add(item.casefold())
+    except Exception:
+        pass
+    plan = dict(matched=matched, missing=missing, other=[skill for skill in skills if skill not in matched])
+    with dashboard._ext_mutex:
+        cache = getattr(dashboard, '_ext_skill_plans', {})
+        if len(cache) >= 64:
+            cache.clear()
+        cache[cache_key] = plan
+        dashboard._ext_skill_plans = cache
+    return {key: list(value) for key, value in plan.items()}
+
+
 def chat(dashboard, payload):
     messages = payload.get('messages')
     if not isinstance(messages, list) or not messages or any(
@@ -618,7 +701,8 @@ def unapplied(dashboard, payload):
     return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
 
 
-ROUTES = {('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
+ROUTES = {('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
+          ('POST', '/ext/skills/plan'): skill_plan, ('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,

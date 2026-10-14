@@ -334,8 +334,8 @@ async function action(message) {
     if (!tab?.id || !/^https?:\/\//.test(tab.url || '')) return {skills_available:false};
     // Button discovery must not rescan and replace records during autofill.
     const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},
-      func:()=>globalThis.autoApplyContent?.skillsAvailable()});
-    return {skills_available:frames.some(frame=>frame.result)};
+      func:()=>({available:globalThis.autoApplyContent?.skillsAvailable(),page:globalThis.autoApplyContent?.skillsPage()})});
+    return {skills_available:frames.some(frame=>frame.result?.available),page:frames.find(frame=>frame.frameId===0)?.result?.page};
   }
   if(['autofill-skills','cancel-skills','skills-status'].includes(message.type)) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
@@ -347,7 +347,7 @@ async function action(message) {
     if(running || skillsRunning) throw Error('Wait for autofill to finish.');
     skillsRunning=true;
     try {
-      const profile=await api('/ext/profile-sections');
+      const profile=message.skills ? {skills:message.skills} : await api('/ext/profile-sections');
       const scanned=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.scan()});
       const frame=scanned.find(f=>f.result?.skills_available);
       if(!frame) throw Error('No skills tag field found.');
@@ -621,4 +621,13 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(result){result.applied=true;result.progress='Marked as applied';await report(result);}
     }finally{confirmingTabs.delete(tabId);}
   })().then(respond,error=>respond({error:error.message}));return true;
+});
+
+// Content scripts can request only bounded skill catalog operations.
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  if(sender.id!==chrome.runtime.id || !['skill-aliases','skill-choose'].includes(message.type)) return;
+  const request=message.type==='skill-aliases' ? api('/ext/skills/aliases') :
+    api('/ext/skills/choose',{skill:message.skill,options:message.options});
+  request.then(respond,()=>respond({choice:null,aliases:{}}));
+  return true;
 });
