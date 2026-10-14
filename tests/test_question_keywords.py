@@ -550,3 +550,24 @@ def test_resolver_year_only_graduation(config, db):
                             {'id': 1}).value == 'Jan-28'
     assert resolver.resolve(Question('grad', 'Expected graduation date', 'date', True, []),
                             {'id': 1}).value == '2028-01-01'
+
+
+@pytest.mark.parametrize('label', [
+    'Start date month', 'Start date year', 'End date month', 'End date year',
+    'Start month', 'From year', 'To month', 'Month of start date',
+    'Desired start date month', 'Available start year', 'Availability dates month',
+    'Start date', 'Employment start date',
+])
+def test_date_parts_and_unqualified_start_dates_are_not_availability(config, db, label):
+    profile = config.profile
+    profile['application_preferences'] = dict(desired_start_date='05/17/2027', availability_dates='05/17/2027 - 08/20/2027')
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    assert match(label) is None
+    assert canonical_key(label) is None
+    assert AnswerResolver(config, db).resolve(Question('date-part', label, 'text', True), {'id': 1}) is None
+
+
+@pytest.mark.parametrize('label', ['Desired start date', 'Expected start date', 'Earliest start date',
+                                  'Available start date', 'When can you start?'])
+def test_explicit_start_date_wording(label):
+    assert canonical_key(label) == 'start_date'

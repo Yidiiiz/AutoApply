@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/greenhouse-education.html": "greenhouse_education.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -1645,3 +1645,80 @@ def test_t040_waits_verifies_and_handles_prompt_portals(loaded_extension, extens
         assert section['added'] == (0 if mode=='rejected_date' else 1)
         assert page.locator('#work [data-automation-id=dateSectionYear-input]').first.input_value() == ('' if mode=='rejected_date' else '2024')
     assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+
+
+@pytest.mark.parametrize('control,style,commits', [
+    ('combobox', 'full', True), ('combobox', 'short', True),
+    ('combobox', 'number', True), ('combobox', 'padded', True),
+    ('select', 'short', True), ('select', 'number', True),
+    ('workday', 'padded', True), ('combobox', 'full', False),
+])
+def test_greenhouse_education_container_after_phone_legend(loaded_extension, extension_server, control, style, commits):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/greenhouse-education.html')
+    page.evaluate("""({control, style, commits}) => {
+        for (const root of document.querySelectorAll('[data-click-only]')) {
+            const values = JSON.parse(root.dataset.options).map((name, i) =>
+                style === 'short' ? name.slice(0, 3) : style === 'number' ? String(i + 1) :
+                style === 'padded' ? String(i + 1).padStart(2, '0') : name);
+            root.dataset.options = JSON.stringify(values);
+            if (!commits) root.dataset.noCommit = 'true';
+            if (control === 'select') {
+                root.innerHTML = '<label for="' + root.dataset.id + '">' + root.dataset.label + '</label>';
+                const select = document.createElement('select'); select.id = root.dataset.id;
+                select.add(new Option('Month', ''));
+                for (const value of values) select.add(new Option(value, value));
+                root.append(select);
+            } else if (control === 'workday') {
+                root.innerHTML = '';
+                const button = document.createElement('button'); button.type = 'button';
+                button.id = root.dataset.id; button.textContent = 'Select one';
+                button.setAttribute('aria-label', root.dataset.label);
+                button.setAttribute('aria-haspopup', 'listbox'); button.setAttribute('aria-expanded', 'false');
+                root.append(button);
+                button.onclick = () => {
+                    const list = document.createElement('div'); list.setAttribute('role', 'listbox');
+                    for (const value of values) {
+                        const option = document.createElement('div'); option.setAttribute('role', 'option');
+                        option.textContent = value; option.onclick = () => {
+                            button.textContent = value; button.setAttribute('aria-expanded', 'false'); list.remove();
+                        }; list.append(option);
+                    }
+                    button.setAttribute('aria-expanded', 'true'); root.append(list);
+                };
+            }
+        }
+    }""", dict(control=control, style=style, commits=commits))
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    profile = dict(education=[dict(school='Fixture University', degree="Bachelor's Degree",
+                                  major='Computer Science', start_date='2024-01', end_date='2028-05')])
+    prepared = worker.evaluate("""async ({id, profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: p => globalThis.autoApplyContent.prepareSections(p), args:[profile]}))[0].result""",
+        dict(id=tab_id, profile=profile))
+    fields = {f['label']: f for f in prepared['fields']}
+    assert fields['Phone number']['section'] == 'Phone'
+    assert fields['Other question']['section'] == 'Application questions'
+    for label in ('School', 'Degree', 'Discipline', 'Start date month', 'Start date year', 'End date month', 'End date year'):
+        assert fields[label]['section'] == 'Education'
+        assert fields[label]['section_managed'] is True
+        assert fields[label]['answered'] is (commits or 'month' not in label)
+    month_names = {'full': ('January', 'May'), 'short': ('Jan', 'May'),
+                   'number': ('1', '5'), 'padded': ('01', '05')}[style]
+    for name, value in (('school', 'Fixture University'), ('degree', "Bachelor's Degree"),
+                        ('discipline', 'Computer Science'), ('start-month', month_names[0]), ('end-month', month_names[1])):
+        if 'month' in name and control == 'select':
+            assert page.locator(f'#{name}--0').input_value() == value
+        elif 'month' in name and control == 'workday':
+            assert page.locator(f'#{name}--0').inner_text() == value
+        else:
+            expected = value if commits or 'month' not in name else ''
+            assert page.locator(f'[data-id="{name}--0"] .select__single-value').inner_text() == expected
+            assert page.locator(f'[name="{name}--0"]').input_value() == expected
+        if 'month' in name and control == 'combobox':
+            assert page.evaluate('id => monthMenuClicks[id]', name + '--0') > 0
+    assert page.locator('#start-year--0').input_value() == '2024'
+    assert page.locator('#end-year--0').input_value() == '2028'
+    assert next(s for s in prepared['sections'] if s['name'] == 'education')['added'] == int(commits)
+    assert page.evaluate('[submitClicks, submissions]') == [0, 0]

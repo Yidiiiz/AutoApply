@@ -292,13 +292,29 @@
     return [container, ...container.querySelectorAll("*")].some(node => visible(node) &&
       Array.from(node.childNodes).some(child => child.nodeType === Node.TEXT_NODE && clean(child.textContent).includes(filename)));
   }
+  const sectionHeadings = 'h1,h2,h3,h4,h5,h6,[role="heading"],[data-automation-id="sectionTitle"],[class*="section-title"],[class*="section__title"]';
+  function sectionToken(node) {
+    const tokens = sectionNormal([node.id, node.getAttribute('class'), node.getAttribute('data-automation-id')].filter(Boolean).join(' '));
+    const names = [
+      [/\beducation\b/, 'Education'], [/\b(experience|employment|work history)\b/, 'Work experience'],
+      [/\bprojects?\b/, 'Projects'], [/\bskills?\b/, 'Skills'], [/\blanguages?\b/, 'Languages'],
+      [/\bphone\b/, 'Phone'], [/\baddress\b/, 'Address'], [/\beeo\b/, 'EEO'],
+      [/\bdemographics?\b/, 'Demographics'], [/\bself identify\b/, 'Self-identify'], [/\bdisability\b/, 'Disability']
+    ];
+    return names.find(([pattern]) => pattern.test(tokens))?.[1] || '';
+  }
   function sectionHint(element) {
     for (let container = element.parentElement; container && container !== document.body; container = container.parentElement) {
-      const headings = Array.from(container.querySelectorAll('legend,h1,h2,h3,h4,[role="heading"]'))
-        .filter(heading => heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
-      if (headings.length) return text(headings[headings.length - 1]);
+      const hint = sectionToken(container);
+      if (hint) return hint;
     }
-    return "";
+    for (let fieldset = element.closest('fieldset'); fieldset; fieldset = fieldset.parentElement?.closest('fieldset')) {
+      const legend = fieldset.querySelector(':scope > legend');
+      if (text(legend)) return text(legend);
+    }
+    const headings = Array.from(document.querySelectorAll(sectionHeadings)).filter(heading => visible(heading) &&
+      !heading.closest('.visually-hidden,.sr-only') && heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return text(headings[headings.length - 1]);
   }
 
   function pageInfo() {
@@ -491,7 +507,20 @@
     return exact || folded || (clean(value) ? options.find(item => normal(getText(item)).startsWith(normal(value))) ||
       options.find(item => normal(getText(item)).includes(normal(value))) : undefined);
   }
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function monthValues(element, value) {
+    const hint = sectionNormal(label(element) + ' ' + element.getAttribute('data-automation-id'));
+    if (!/month/.test(hint) || !/_date$/.test(sectionField(element))) return null;
+    const index = /^\d{1,2}$/.test(clean(value)) ? Number(value) - 1 :
+      monthNames.findIndex(name => [normal(name), normal(name.slice(0, 3))].includes(normal(value)));
+    if (index < 0 || index >= monthNames.length) return null;
+    const name = monthNames[index];
+    return [name, name.slice(0, 3), String(index + 1), String(index + 1).padStart(2, '0')];
+  }
   function fieldChoice(element, options, value, getText = text) {
+    const months = monthValues(element, value)?.map(normal);
+    if (months) return options.find(option => months.includes(normal(getText(option))) ||
+      element.tagName === 'SELECT' && months.includes(normal(option.value)));
     return best(options, value, getText) || (normal(value) === 'mobile' && /^phone (?:device )?type$/i.test(label(element)) ?
       options.find(option => /^(cell|mobile phone)$/i.test(clean(getText(option)))) : undefined);
   }
@@ -510,7 +539,7 @@
       await openCombo(element);
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
-      const searches = [...new Set([clean(value), prefix])];
+      const searches = [...new Set(monthValues(element, value) || [clean(value), prefix])];
       let option = fieldChoice(element, await settledComboOptions(element, 350), value);
       for (const search of option ? [] : searches) {
         if (!searchCombo(element, search)) break;
@@ -691,8 +720,8 @@
   }
   function resumeSections() {
     const found = new Map();
-    for (const node of document.querySelectorAll('legend,h1,h2,h3,h4,[role="heading"],[aria-label],[data-automation-id]')) {
-      const kind = sectionKind(node.getAttribute('aria-label') || node.getAttribute('data-automation-id') || text(node));
+    for (const node of document.querySelectorAll(sectionHeadings + ',legend,[aria-label],[data-automation-id],[class],[id]')) {
+      const kind = sectionKind(sectionToken(node)) || sectionKind(node.getAttribute('aria-label') || node.getAttribute('data-automation-id') || text(node));
       if (!kind) continue;
       let container = node;
       while (container && !container.matches('form,body') && !container.querySelector('input,select,textarea,button,[role="combobox"]')) container = container.parentElement;
@@ -756,8 +785,10 @@
     const year=match[1], month=match[2] || '01', hint = sectionNormal(label(element)+' '+element.placeholder+' '+element.getAttribute('data-automation-id'));
     if (/year/.test(hint) || element.type==='number' && Number(element.min)>=1900) return year;
     if (/month/.test(hint) && element.type!=='month') {
-      const name = new Date(Number(year),Number(month)-1,1).toLocaleString('en-US',{month:'long'});
-      if (element.tagName==='SELECT') return Array.from(element.options).find(o=>[name.toLowerCase(),name.slice(0,3).toLowerCase(),month,String(Number(month))].includes(normal(o.text)))?.text || name;
+      const name = monthNames[Number(month)-1];
+      if (!name) return '';
+      if (element.tagName==='SELECT') return fieldChoice(element, Array.from(element.options), name, option => option.text)?.text || name;
+      if (element.getAttribute('role') === 'combobox' || element.matches('button[aria-haspopup="listbox"]')) return name;
       return /dateSectionMonth/.test(element.getAttribute('data-automation-id') || '') ? month : String(Number(month));
     }
     if (element.type==='month') return year+'-'+month;

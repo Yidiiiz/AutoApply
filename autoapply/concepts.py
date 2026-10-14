@@ -214,6 +214,6 @@ def canonical_key(label, employer=''):
         return intent
     from .question_keywords import match
     return {'privacy acknowledgement': 'privacy_ack', 'sms recruiting preference': 'sms_recruiting',
-            'technical interests': 'technical_interests', 'technical interest preference': 'technical_interests',
-            'start date': 'start_date'}.get(question_text(label)) or match(label)
+            'technical interests': 'technical_interests',
+            'technical interest preference': 'technical_interests'}.get(question_text(label)) or match(label)
 

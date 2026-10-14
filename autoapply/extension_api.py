@@ -299,7 +299,7 @@ def resolve_answers(dashboard, payload):
         profile = dashboard.config.profile
         result = []
         for q, field in zip(questions, fields):
-            from .question_keywords import unusable_label
+            from .question_keywords import date_part_label, unusable_label
             if unusable_label(q.label):
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
                 continue
@@ -316,12 +316,13 @@ def resolve_answers(dashboard, payload):
                 result.append(dict(key=q.key, value='cover_letter' if 'cover' in q.label.lower() else 'resume',
                                    source='file', status='FILE'))
                 continue
-            resolution = resolver.resolve_result(q, app)
-            answer = resolution.answer
             education_part, education_answer = _education_date_part(q, field, profile)
-            if education_part:
-                answer = education_answer
             repeated, repeated_answer = _repeatable_answer(q, field, profile)
+            if date_part_label(q.label) and not education_part and not repeated:
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
+                continue
+            resolution = resolver.resolve_result(q, app)
+            answer = education_answer if education_part else resolution.answer
             if repeated:
                 answer = repeated_answer
             if (resolution.descriptor.semantic_key == 'start_date'

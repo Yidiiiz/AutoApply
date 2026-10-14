@@ -779,3 +779,19 @@ def test_profile_sections_partial_dates(value, expected):
     for section in ('experience', 'projects', 'education'):
         assert result[section][0]['start_date'] == expected
         assert result[section][0]['end_date'] == expected
+
+
+@pytest.mark.parametrize('label', ['Start date month', 'Start date year', 'End date month',
+                                  'End date year', 'Start month', 'From year', 'To month',
+                                  'Desired start date month', 'Availability dates month'])
+@pytest.mark.parametrize('section', ['', 'Phone'])
+def test_date_part_without_resume_section_needs_input(http_dashboard, config, label, section):
+    profile = config.profile
+    profile['application_preferences'] = dict(desired_start_date='05/17/2027', availability_dates='05/17/2027 - 08/20/2027')
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    status, data, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(
+        url='https://jobs.example.test/fixture', fields=[dict(key='part', label=label, kind='text', section=section)]))
+    assert status == 200
+    assert data['answers'][0]['status'] == 'NEEDS_INPUT'
+    assert data['answers'][0]['value'] is None
+    assert data['answers'][0]['source'] == ''

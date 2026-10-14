@@ -33,6 +33,14 @@ def unusable_label(label):
         or '.' in raw))
 
 
+def date_part_label(label):
+    """Month/year controls describe a date component, never job availability."""
+    text = normalize(label)
+    return bool(re.search(r'\b(?:start|end|from|to|graduation|availability|available)(?: date)? (?:month|year)\b'
+                          r'|\bdate (?:month|year)\b'
+                          r'|\b(?:month|year)(?: of)?(?: the)? (?:start|end|from|to|graduation)(?: date)?\b', text))
+
+
 def contains(text, phrase):
     return (' ' + normalize(phrase) + ' ') in (' ' + text + ' ')
 
@@ -79,7 +87,9 @@ CONCEPTS = [
     dict(key='identity.full_name', any=['signature', 'type your name', 'typed name', 'electronic signature'],
          all=[], exclude=[]),
     dict(key='demographics.hispanic_latino', any=['hispanic', 'latino', 'hispanic latino', 'hispanic or latino'], all=[], exclude=[]),
-    dict(key='start_date', any=['start date', 'when can you start'], all=[], exclude=['education', 'employment history']),
+    dict(key='start_date', any=['desired start date', 'expected start date', 'earliest start date',
+                                'available start date', 'when can you start', 'when are you available to start',
+                                'date available to start'], all=[], exclude=['education', 'employment history']),
     dict(key='education.graduation_date', any=['graduation date', 'when will you graduate', 'when are you expected to graduate'], all=[], exclude=['month', 'year']),
     dict(key='education.gpa', any=['gpa', 'grade point average'], all=[], exclude=[]),
     dict(key='education.school', any=['school', 'university', 'college'], all=[], exclude=['high school', 'degree', 'major', 'gpa', 'graduation', 'year']),
@@ -108,7 +118,7 @@ CONCEPTS = [
 
 def match(text):
     """Return the most specific concept; options are deliberately never inspected."""
-    if unusable_label(text):
+    if unusable_label(text) or date_part_label(text):
         return None
     text = normalize(text)
     long = len(text.split()) > 60
