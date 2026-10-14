@@ -14,6 +14,7 @@ from .dashboard_settings import SettingsRejected
 from .field_mapping import answer_signature
 from .jobs import ats_identity, canonical_url, normalize
 from .models import Answer, Question, now
+from .profile_rules import parse_profile_date
 
 KINDS = {'text', 'textarea', 'select', 'radio', 'checkbox', 'combobox', 'file',
          'date', 'number', 'email', 'tel', 'url'}
@@ -96,10 +97,10 @@ def _education_date_part(q, field, profile):
         return False, None
     path = 'start_date' if part[1] == 'start' else 'graduation_date'
     value = profile.get('education', {}).get(path)
-    match = re.fullmatch(r'(\d{4})(?:-(\d{2})(?:-\d{2})?)?', str(value or ''))
-    if not match or not 1 <= int(match[2] or '01') <= 12:
+    parsed = parse_profile_date(value)
+    if not parsed:
         return True, None
-    year, month = match[1], int(match[2] or '01')
+    year, month = str(parsed.year), parsed.month
     candidates = [year] if part[2] == 'year' else [calendar.month_name[month], str(month), f'{month:02}', calendar.month_abbr[month]]
     selected = next((fitted for candidate in candidates
                      if (fitted := answers.fit_options(candidate, q.options)) is not None), None)
@@ -111,37 +112,44 @@ def _repeatable_answer(q, field, profile):
     section, label = normalize(field.get('section', '')), normalize(q.label).strip(' *')
     work = bool(re.search(r'\b(work experience|employment)\b', section))
     education = bool(re.search(r'\beducation\b', section))
-    if not work and not education:
+    project = bool(re.search(r'\bprojects?\b', section))
+    if not work and not education and not project:
         return False, None
-    entries = profile.get('employment' if work else 'education_history', [])
-    entry = entries[0] if entries and isinstance(entries[0], dict) else {} if work else profile.get('education', {})
+    entries = profile.get('employment' if work else 'projects' if project else 'education_history', [])
+    entry = entries[0] if entries and isinstance(entries[0], dict) else {} if work or project else profile.get('education', {})
     names = ({'job title': 'title', 'company': 'company', 'location': 'location',
               'role description': 'description', 'i currently work here': 'current'} if work else
              {'school or university': 'school', 'school': 'school', 'degree': 'degree', 'field of study': 'major'})
-    date = re.fullmatch(r'(start|end|from|to) date (month|year)', label)
-    key = names.get(label)
+    date = re.fullmatch(r'(start|end|from|to) date(?: (month|year))?', label)
+    key = names.get(label) if not project else None
     if date:
-        key = 'start_date' if date[1] in {'start', 'from'} else 'end_date' if work else 'graduation_date'
+        key = 'start_date' if date[1] in {'start', 'from'} else 'end_date' if work or project else 'graduation_date'
     if not key:
         return False, None
     value = entry.get(key)
     if date:
-        match = re.fullmatch(r'(\d{4})(?:-(\d{2})(?:-\d{2})?)?', str(value or ''))
-        if not match or not 1 <= int(match[2] or '01') <= 12:
+        parsed = parse_profile_date(value)
+        if not parsed:
             return True, None
-        if work and key == 'end_date' and entry.get('current') is True:
+        if (work or project) and key == 'end_date' and entry.get('current') is True:
             return True, None
-        month = int(match[2] or '01')
-        candidates = [match[1]] if date[2] == 'year' else (
-            [str(month)] if q.kind == 'number' or not q.options else
-            [calendar.month_name[month], str(month), f'{month:02}', calendar.month_abbr[month]])
+        month = parsed.month
+        if date[2] is None:
+            hint = str(field.get('placeholder') or '') + ' ' + q.label
+            candidates = [answers.format_start_date(value, q.kind, hint)]
+        elif date[2] == 'year':
+            candidates = [str(parsed.year)]
+        elif q.kind == 'number' or not q.options:
+            candidates = [str(month)]
+        else:
+            candidates = [calendar.month_name[month], str(month), f'{month:02}', calendar.month_abbr[month]]
         value = next((fitted for candidate in candidates
                       if (fitted := answers.fit_options(candidate, q.options)) is not None), None)
     elif value is not None and not isinstance(value, bool):
         value = answers.fit_options(str(value), q.options)
         if education and key == 'degree' and value is None and entry.get('major'):
             value = answers.fit_options(str(entry['major']), q.options)
-    return True, Answer(value, 'profile:' + ('employment.0.' if work else 'education.') + key) if value is not None else None
+    return True, Answer(value, 'profile:' + ('employment.0.' if work else 'projects.0.' if project else 'education.') + key) if value is not None else None
 
 
 def _graduation_answer(q, field, profile):
@@ -151,23 +159,23 @@ def _graduation_answer(q, field, profile):
     if re.search(r'\b(month|year)\b', normalize(q.label)):
         return None
     raw = str(profile.get('education', {}).get('graduation_date') or '')
-    match = re.fullmatch(r'(\d{4})-(0[1-9]|1[0-2])(?:-\d{2})?', raw)
-    if not match:
+    parsed = parse_profile_date(raw)
+    if not parsed:
         return None
-    year, month = match[1], match[2]
+    year, month, day = str(parsed.year), f'{parsed.month:02}', f'{parsed.day:02}'
     short = calendar.month_abbr[int(month)] + '-' + year[2:]
-    candidates = [short, month + '/' + year, month + '/01/' + year,
+    candidates = [short, month + '/' + year, month + '/' + day + '/' + year,
                   calendar.month_name[int(month)] + ' ' + year,
                   calendar.month_abbr[int(month)] + ' ' + year, year + '-' + month,
-                  year + '-' + month + '-01']
+                  parsed.isoformat()]
     if q.options:
         value = next((v for candidate in candidates
                       if (v := answers.fit_options(candidate, q.options)) is not None), None)
     else:
         hint = str(field.get('placeholder') or '') + ' ' + q.label
-        value = (year + '-' + month + '-01' if q.kind == 'date' else
+        value = (parsed.isoformat() if q.kind == 'date' else
                  short if re.search(r'mmm[-/ ]yy\b', hint, re.I) else
-                 month + '/01/' + year if re.search(r'\bdd\b', hint, re.I) else
+                 month + '/' + day + '/' + year if re.search(r'\bdd\b', hint, re.I) else
                  month + '/' + year if re.search(r'\bmm[/ -]yyyy\b', hint, re.I) else
                  short if normalize(q.label) == 'when are you expected to graduate' else month + '/' + year)
     return Answer(value, 'profile:education.graduation_date') if value is not None else None
@@ -179,10 +187,8 @@ def profile_sections(dashboard, payload):
     def boolean(value):
         return value is True or str(value).lower() == 'true'
     def date(value):
-        value = str(value or '')
-        if re.fullmatch(r'\d{4}', value):
-            return value + '-01'
-        return value[:7] if re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])(?:-\d{2})?', value) else ''
+        parsed = parse_profile_date(value)
+        return parsed.isoformat()[:7] if parsed else ''
     def current(entry):
         value = entry.get('current')
         if value is not None and value != '':

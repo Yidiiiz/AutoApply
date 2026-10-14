@@ -519,3 +519,34 @@ def test_t041_empty_address_line_2(config, db, label, required):
     assert result.status in {'RESOLVED', 'OPTIONAL_SKIP'}
     assert result.answer.value == ''
     assert result.answer.source == 'policy:empty_address_line_2'
+
+
+@pytest.mark.parametrize('value,expected', [('2024', '01/01/2024'),
+                                           ('2024-08', '08/01/2024'),
+                                           ('2024-08-20', '08/20/2024')])
+def test_partial_profile_date_format(value, expected):
+    from autoapply.answers import format_start_date
+    assert format_start_date(value) == expected
+    month, day, year = expected.split('/')
+    assert format_start_date(value, 'date') == f'{year}-{month}-{day}'
+    assert format_start_date(value, placeholder='MM/YYYY') == f'{month}/{year}'
+
+
+@pytest.mark.parametrize('value,month', [('2028', 'January'), ('2028-05', 'May'), ('2028-05-17', 'May')])
+def test_profile_rules_partial_graduation(value, month):
+    from autoapply.profile_rules import resolve
+    profile = dict(education=dict(graduation_date=value))
+    assert resolve('End date month', 'combobox', ['January', 'May'], profile) == month
+    assert resolve('End date year', 'text', [], profile) == '2028'
+    assert resolve('Expected graduation date', 'text', [], profile) == f'{month} 2028'
+
+
+def test_resolver_year_only_graduation(config, db):
+    profile = config.profile
+    profile['education']['graduation_date'] = '2028'
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    resolver = AnswerResolver(config, db)
+    assert resolver.resolve(Question('grad', 'When are you expected to graduate?', 'text', True, []),
+                            {'id': 1}).value == 'Jan-28'
+    assert resolver.resolve(Question('grad', 'Expected graduation date', 'date', True, []),
+                            {'id': 1}).value == '2028-01-01'

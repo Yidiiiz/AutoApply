@@ -159,16 +159,17 @@ def test_answers_description_limits(http_dashboard, config, db, listing):
     assert db.rows('SELECT * FROM questions') == []
 
 
-@pytest.mark.parametrize('month_options,expected', [
-    (['August', 'September'], 'August'), (['8', '9'], '8'),
-    (['08', '09'], '08'), (['Aug', 'Sep'], 'Aug'),
+@pytest.mark.parametrize('start_date,month_options,expected', [
+    ('2024-08-20', ['August', 'September'], 'August'), ('2024-08', ['8', '9'], '8'),
+    ('2024-08-20', ['08', '09'], '08'), ('2024-08-20', ['Aug', 'Sep'], 'Aug'),
+    ('2024', ['January', 'February'], 'January'),
 ])
-def test_education_date_parts(http_dashboard, config, month_options, expected):
+def test_education_date_parts(http_dashboard, config, start_date, month_options, expected):
     profile = dict(config.profile)
-    profile['education'] = dict(profile['education'], start_date='2024-08-20')
+    profile['education'] = dict(profile['education'], start_date=start_date)
     (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
     fields = [dict(key='start-month', label='Start date month', kind='combobox', options=month_options),
-              dict(key='start-year', label='Start date year', kind='number'),
+              dict(key='start-year', label='Start date year', kind='text'),
               dict(key='end-month', label='End date month', kind='select', options=['May', 'June']),
               dict(key='end-year', label='End date year', kind='combobox', options=['2027', '2028'])]
     for field in fields:
@@ -727,3 +728,54 @@ def test_t041_rtx_answer_batch(http_dashboard, config, db, listing, rtx_profile)
         'I do not wish to share', 'I do not wish to share (United States of America)',
         'Yes', 'I AM NOT A VETERAN', 'Mobile', '']
     assert [r['status'] for r in result['answers']] == ['RESOLVED'] * 11 + ['OPTIONAL_SKIP']
+
+
+@pytest.mark.parametrize('value,expected', [('2028', '2028-01-01'),
+                                           ('2028-05', '2028-05-01'),
+                                           ('2028-05-17', '2028-05-17')])
+def test_partial_graduation_date(http_dashboard, config, value, expected):
+    profile = config.profile
+    profile['education']['graduation_date'] = value
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    fields = [dict(key='date', label='Expected graduation date', kind='date', required=True),
+              dict(key='month', label='End date month', kind='combobox', section='Education',
+                   options=['January', 'May'], required=True),
+              dict(key='year', label='End date year', kind='text', section='Education', required=True)]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers',
+                            dict(url='https://fixture.test/job', fields=fields))
+    assert status == 200
+    assert [row['value'] for row in result['answers']] == [expected, 'January' if value == '2028' else 'May', '2028']
+    assert all(row['status'] == 'RESOLVED' for row in result['answers'])
+
+
+@pytest.mark.parametrize('section,profile_key,end_key', [
+    ('Education', 'education', 'graduation_date'),
+    ('Work Experience', 'employment', 'end_date'),
+    ('Projects', 'projects', 'end_date'),
+])
+@pytest.mark.parametrize('value,expected', [('2024', '2024-01-01'),
+                                           ('2024-08', '2024-08-01'),
+                                           ('2024-08-20', '2024-08-20')])
+@pytest.mark.parametrize('label,key', [('Start date', 'start_date'), ('End date', 'end')])
+def test_repeatable_full_date(section, profile_key, end_key, value, expected, label, key):
+    from autoapply.extension_api import _repeatable_answer
+    from autoapply.models import Question
+    entry = {end_key if key == 'end' else key: value}
+    profile = {profile_key: entry if profile_key == 'education' else [entry]}
+    matched, answer = _repeatable_answer(Question('date', label, 'date', True, []),
+                                         dict(section=section), profile)
+    assert matched and answer.value == expected
+
+
+@pytest.mark.parametrize('value,expected', [('2019', '2019-01'),
+                                           ('2019-06', '2019-06'),
+                                           ('2019-06-17', '2019-06')])
+def test_profile_sections_partial_dates(value, expected):
+    from autoapply.extension_api import profile_sections
+    profile = dict(employment=[dict(start_date=value, end_date=value)],
+                   projects=[dict(start_date=value, end_date=value)],
+                   education=dict(start_date=value, graduation_date=value))
+    result = profile_sections(Mock(config=Mock(profile=profile)), {})
+    for section in ('experience', 'projects', 'education'):
+        assert result[section][0]['start_date'] == expected
+        assert result[section][0]['end_date'] == expected

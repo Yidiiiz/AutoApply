@@ -8,6 +8,7 @@ from datetime import date, datetime
 from .config import fact
 from .jobs import location_rank, normalize, us_location
 from .models import Answer, AnswerResolution, Question, now
+from .profile_rules import parse_profile_date
 
 from .concepts import LABELS, question_text, concept
 
@@ -61,12 +62,14 @@ def fit_options(value, options):
 
 
 def format_start_date(value, kind='text', placeholder=''):
-    """Fit a configured complete date to HTML date controls or a visible hint."""
+    """Fit a configured profile date to HTML date controls or a visible hint."""
     raw = str(value or '')
-    try:
-        parsed = date.fromisoformat(raw) if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw) else datetime.strptime(raw, '%m/%d/%Y').date()
-    except ValueError:
-        return None
+    parsed = parse_profile_date(raw)
+    if parsed is None:
+        try:
+            parsed = datetime.strptime(raw, '%m/%d/%Y').date()
+        except ValueError:
+            return None
     hint = placeholder.lower()
     if kind == 'date' or 'yyyy-mm-dd' in hint:
         return parsed.isoformat()
@@ -552,10 +555,13 @@ class AnswerResolver:
             first, last = fact(profile, "identity.first_name"), fact(profile, "identity.last_name")
             value = f"{first} {last}" if first and last else None
         text = question_text(q.label)
-        if path == 'education.graduation_date' and text == 'when are you expected to graduate':
-            raw = str(value or '')
-            if re.fullmatch(r'\d{4}-\d{2}(?:-\d{2})?', raw):
-                value = calendar.month_abbr[int(raw[5:7])] + '-' + raw[2:4]
+        if path == 'education.graduation_date':
+            parsed = parse_profile_date(value)
+            if parsed:
+                if q.kind == 'date':
+                    value = parsed.isoformat()
+                elif text == 'when are you expected to graduate':
+                    value = calendar.month_abbr[parsed.month] + '-' + str(parsed.year)[2:]
         if path == "application_preferences.discovery_source" and value is not None and q.options:
             selected = fit_options(str(value), q.options)
             if selected is None and normalize(value) == "job board":

@@ -7,6 +7,7 @@ holds are used; nothing here guesses a value the profile lacks.
 """
 import calendar
 import re
+from datetime import date
 
 SOURCE = 'profile_rule'
 
@@ -72,10 +73,20 @@ def _yes_no(flag, options):
     return fit('Yes' if flag else 'No', options or ['Yes', 'No'])
 
 
+def parse_profile_date(value):
+    """Parse YYYY, YYYY-MM or YYYY-MM-DD, defaulting missing parts to 01."""
+    match = re.fullmatch(r'(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?', str(value or ''))
+    if not match:
+        return None
+    try:
+        return date(int(match[1]), int(match[2] or '01'), int(match[3] or '01'))
+    except ValueError:
+        return None
+
+
 def _graduation(profile):
-    raw = str(_get(profile, 'education.graduation_date') or '')
-    match = re.match(r'(\d{4})-(\d{1,2})', raw)
-    return (int(match[1]), int(match[2])) if match else (None, None)
+    parsed = parse_profile_date(_get(profile, 'education.graduation_date'))
+    return (parsed.year, parsed.month) if parsed else (None, None)
 
 
 def _declines(profile, key):
