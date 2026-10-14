@@ -293,8 +293,12 @@ def resolve_answers(dashboard, payload):
         profile = dashboard.config.profile
         result = []
         for q, field in zip(questions, fields):
+            from .question_keywords import unusable_label
+            if unusable_label(q.label):
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
+                continue
             if secondary_address(q.label):
-                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'))
+                result.append(dict(key=q.key, value='', source='policy:empty_address_line_2', status='OPTIONAL_SKIP'))
                 continue
             if re.fullmatch(r'phone (?:device )?type', normalize(q.label).strip(' *')):
                 preferred = str(profile.get('contact', {}).get('phone_device_type') or 'Mobile')

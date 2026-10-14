@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from autoapply.dashboard import Dashboard
+from test_question_keywords import rtx_profile, RTX_LABELS
 from test_dashboard import (dashboard, http_dashboard, queue, request, protected_queue,
                             writing_provider, offline_descriptions)
 
@@ -657,13 +658,14 @@ def test_prompt_job_context_toggle_and_cap(http_dashboard, config, db, listing, 
     fetcher.assert_not_called()
 
 
-@pytest.mark.parametrize('label', ['Address line 2', 'Address 2', 'Address line2', 'Apt', 'Suite', 'Unit'])
+@pytest.mark.parametrize('label', ['Address Line 2', 'Address 2', 'Address line2', 'Apartment, suite, etc.', 'Apt/Suite', 'Apt', 'Suite', 'Unit'])
 def test_t039_secondary_address(http_dashboard, label):
     fields=[dict(key='optional', label=label), dict(key='required', label=label, required=True)]
     status, result, _=ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://fixture.test/job',fields=fields))
     assert status == 200
-    assert [row['status'] for row in result['answers']] == ['OPTIONAL_SKIP','NEEDS_INPUT']
-    assert all(row['value'] is None for row in result['answers'])
+    assert [row['status'] for row in result['answers']] == ['OPTIONAL_SKIP', 'OPTIONAL_SKIP']
+    assert all(row['value'] == '' and row['source'] == 'policy:empty_address_line_2'
+               for row in result['answers'])
 
 
 @pytest.mark.parametrize('label,options,expected', [
@@ -688,3 +690,40 @@ def test_t039_snapshot_paired_sanitized(http_dashboard, config):
     assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,host='../escape'))[0] == 400
     assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,nodes=[{}]))[0] == 400
     assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,nodes=[],extra='x'*1048576))[0] == 400
+
+
+@pytest.mark.parametrize('required', [False, True])
+def test_t041_boilerplate_needs_input(http_dashboard, required):
+    fields = [dict(key=str(i), label=label, kind='select', required=required,
+                   semantic_key='education.currently_enrolled', options=['Yes', 'No'])
+              for i, label in enumerate(['Select One Required', 'Required', 'Please select',
+                                        '*', 'Search', 'formField-degree', 'question_123'])]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers',
+        dict(url='https://fixture.test/job', fields=fields))
+    assert status == 200
+    assert all(row['status'] == 'NEEDS_INPUT' and row['value'] is None for row in result['answers'])
+
+
+def test_t041_rtx_answer_batch(http_dashboard, config, db, listing, rtx_profile):
+    app_id = queue(db, config, listing, 1)[0]
+    labels = RTX_LABELS + ['How many credit hours towards your degree do you anticipate having completed by the time you would start this position?*',
+                          'What is your cumulative GPA?', 'What is your Sex?*',
+                          'What is your race / ethnicity?*',
+                          'Yes, I have read and consent to the terms and conditions*',
+                          'Are you a protected veteran? (Veteran status definitions can be found in the instructions above)*',
+                          'Phone Device Type*', 'Address line 2']
+    choices = [['Select One', 'Yes', 'No']] * 4 + [[], ['3.0 - 3.49', '3.5 or higher'],
+        ['Male', 'Female', 'I do not wish to share'],
+        ['White (United States of America)', 'I do not wish to share (United States of America)'], [],
+        ['IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN', 'I AM NOT A VETERAN'],
+        ['Landline', 'Mobile'], []]
+    fields = [dict(key=str(i), label=label, required=i != 11,
+                   kind='checkbox' if i == 8 else 'number' if i == 4 else 'select' if choices[i] else 'text',
+                   options=choices[i]) for i, label in enumerate(labels)]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers',
+        dict(application_id=app_id, url=db.application(app_id)['canonical_url'], fields=fields))
+    assert status == 200
+    assert [r['value'] for r in result['answers']] == ['No'] * 4 + ['142', '3.5 or higher',
+        'I do not wish to share', 'I do not wish to share (United States of America)',
+        'Yes', 'I AM NOT A VETERAN', 'Mobile', '']
+    assert [r['status'] for r in result['answers']] == ['RESOLVED'] * 11 + ['OPTIONAL_SKIP']

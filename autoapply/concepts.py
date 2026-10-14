@@ -31,8 +31,9 @@ def question_text(label):
 
 
 def concept(label):
-    if '.' in label and (label in REGISTRY or label in ALIASES):
-        return ALIASES.get(label, label)
+    from .question_keywords import unusable_label
+    if unusable_label(label):
+        return None
     text = question_text(label)
     link = re.fullmatch(r"(?:please )?(?:(?:include|provide|enter|share) (?:your )?|(?:what is )?your )?(linkedin|github|portfolio|personal website)(?: profile)?(?: url| link)?", text)
     if link:
@@ -129,8 +130,8 @@ def equivalent_answer(value):
         return 'yes' if value else 'no'
     if not isinstance(value, str):
         return value
-    text = re.sub(r'[^a-z0-9]+', ' ', value.casefold()).strip()
-    if re.fullmatch(r'(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
+    text = re.sub(r'[^a-z0-9]+', ' ', re.sub(r'\s*\([^)]*\)\s*$', '', value).casefold()).strip()
+    if re.fullmatch(r'(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose|share)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
         return 'decline'
     return text if text in {'yes', 'no'} else value
 
@@ -141,6 +142,11 @@ def demographic_value(profile, path):
     source = (profile.get('fact_sources') or {}).get(path, {})
     if source.get('basis') == 'Dashboard edit' and values and values[0]['path'] == path:
         return equivalent_answer(values[0]['value'])
+    if path == 'demographics.veteran_status' and values:
+        negative = {re.sub(r'^i am ', '', str(v['value']).strip().casefold()) for v in values}
+        # A plain non-veteran preference is compatible with an older protected-status denial.
+        if negative <= {'not a veteran', 'not a protected veteran'}:
+            return 'not a veteran' if 'not a veteran' in negative else 'not a protected veteran'
     if len({str(equivalent_answer(v['value'])).strip().casefold() for v in values}) > 1:
         return None
     return equivalent_answer(values[0]['value']) if values else None
@@ -149,7 +155,8 @@ for path in set(LABELS.values()) | {
     'work_authorization.us_authorized', 'work_authorization.sponsorship_now',
     'work_authorization.sponsorship_future', 'citizenship.us_citizen',
     'citizenship.citizen_since_birth', 'education.currently_enrolled',
-    'education.good_academic_standing', 'qualifications.age_18_or_older',
+    'education.good_academic_standing', 'education.credit_hours_by_start',
+    'contact.phone_device_type', 'contact.permanent_address', 'qualifications.age_18_or_older',
     'application_preferences.discovery_source', 'application_preferences.office_five_days',
     'application_preferences.willing_to_work_any_location', 'locations.willing_to_relocate',
     'demographics.gender', 'demographics.gender_identity', 'demographics.race',
@@ -167,7 +174,8 @@ for path in set(LABELS.values()) | {
                             path.split('.')[0], answer_type='boolean' if boolean else 'text')
 for key in ('sponsorship_combined', 'prior_employment', 'conflict_of_interest',
             'government_connections', 'privacy_ack', 'sms_recruiting', 'technical_interests',
-            'start_date', 'military_service', 'required_demographic_processing_consent'):
+            'start_date', 'government_employment', 'independent_auditor_employment',
+            'military_service', 'required_demographic_processing_consent'):
     REGISTRY[key] = Concept(key, (), None, 'policy', scopes=('application', 'employer'),
                             factual_fallback=False, special_policy=True)
 
@@ -194,6 +202,9 @@ for key in ('application_preferences.discovery_source', 'application_preferences
 
 
 def canonical_key(label, employer=''):
+    from .question_keywords import unusable_label
+    if unusable_label(label):
+        return None
     path = concept(label)
     if path:
         return ALIASES.get(path, path)

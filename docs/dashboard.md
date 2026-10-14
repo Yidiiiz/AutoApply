@@ -685,6 +685,18 @@ ranges take precedence over the configured default (hourly pay is annualized
 at 2,080 hours when requested). Negated commitments and Hispanic/Latino fields
 without a decline option require user input.
 
+Control boilerplate such as "Select One Required" and machine identifiers always
+return Needs input, even with saved answers or supplied concept metadata. RTX-style
+prior employment uses the explicit previous-employer default; federal government
+and independent-auditor employment questions follow the No policy. Credit hours
+come from the education credit-hours fact, GPA choices use the range containing
+the profile GPA, and conditional major/permanent-address fields use profile facts.
+Sex and race/ethnicity decline choices accept equivalent wording and country
+suffixes. Terms consent uses the terms acknowledgement preference. A "not a
+veteran" preference selects the plain nonveteran choice before falling back to
+"not a protected veteran". Phone device type uses the contact preference, and
+optional address line 2 remains empty.
+
 Chrome runs show a compact progress line with an icon cancel action. The line closes when the run finishes; Last run is a muted, collapsed disclosure with one line per application.
 
 The extension Chat tab includes Chat and Answer helper. Written fields offer Ask AI, and generated answers stay editable in Answers for that application. Use job description controls whether the saved posting text and link are sent as AI reference context. Scrollbars follow the light or dark theme.

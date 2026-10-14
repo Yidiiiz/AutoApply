@@ -20,6 +20,19 @@ def normalize(text):
     return ' '.join(stem(word) for word in words)
 
 
+def unusable_label(label):
+    """Control boilerplate and machine identifiers are never applicant questions."""
+    raw = str(label or '').strip()
+    text = normalize(raw)
+    boilerplate = set('select one required optional please choose a an option search type here value enter selection answer item'.split())
+    if not text or set(text.split()) <= boilerplate:
+        return True
+    return bool(re.fullmatch(r'[\w.-]+', raw) and (
+        re.search(r'[_\d]|[a-z][A-Z]', raw)
+        or re.match(r'(?:formField|input|field|prompt|question)[.-]', raw, re.I)
+        or '.' in raw))
+
+
 def contains(text, phrase):
     return (' ' + normalize(phrase) + ' ') in (' ' + text + ' ')
 
@@ -59,7 +72,7 @@ CONCEPTS = [
          all=['schedule'], exclude=[]),
     dict(key='application_preferences.schedule_commitment', any=['are you able', 'are you available'],
          all=['program', 'hours'], exclude=[]),
-    dict(key='application_preferences.terms_acknowledgement', any=['agree', 'acknowledge', 'certify'],
+    dict(key='application_preferences.terms_acknowledgement', any=['agree', 'acknowledge', 'certify', 'consent'],
          all=['term', 'condition'], exclude=['signature', 'sign', 'name', 'not', 'no', 'cannot']),
     dict(key='application_preferences.terms_acknowledgement', any=['acknowledge', 'certify', 'agree'],
          all=['read', 'understand'], exclude=['signature', 'sign', 'name', 'not', 'no', 'cannot']),
@@ -70,16 +83,22 @@ CONCEPTS = [
     dict(key='education.graduation_date', any=['graduation date', 'when will you graduate', 'when are you expected to graduate'], all=[], exclude=['month', 'year']),
     dict(key='education.gpa', any=['gpa', 'grade point average'], all=[], exclude=[]),
     dict(key='education.school', any=['school', 'university', 'college'], all=[], exclude=['high school', 'degree', 'major', 'gpa', 'graduation', 'year']),
+    dict(key='education.credit_hours_by_start', any=['credit hours', 'credits completed', 'completed credits'], all=[], exclude=[]),
+    dict(key='education.credit_hours_by_start', any=['credits'], all=['completed'], exclude=[]),
+    dict(key='contact.phone_device_type', any=['phone device type', 'phone type'], all=[], exclude=[]),
+    dict(key='contact.permanent_address', any=['permanent address'], all=[], exclude=[]),
+    dict(key='government_employment', any=['federal government'], all=['employee'], exclude=[]),
+    dict(key='independent_auditor_employment', any=['independent auditor'], all=['employee'], exclude=[]),
     dict(key='education.degree', any=['degree', 'degree level'], all=[], exclude=['enrolled', 'pursuing', 'major', 'graduation']),
     dict(key='education.major', any=['major', 'field of study', 'discipline'], all=[], exclude=[]),
     dict(key='application_preferences.discovery_source', any=['how did you hear', 'how did you learn', 'how did you find', 'where did you hear'], all=[], exclude=[]),
-    dict(key='prior_employment', any=['previously worked', 'previously employed', 'ever worked', 'former employee', 'worked here before'], all=[], exclude=[]),
+    dict(key='prior_employment', any=['previously work', 'previously worked', 'previously employed', 'ever worked', 'former employee', 'worked here before'], all=[], exclude=[]),
     dict(key='qualifications.age_18_or_older', any=['over 18', 'at least 18', '18 years or older', '18 years of age or older'], all=[], exclude=['under', 'not']),
     dict(key='links.linkedin', any=['linkedin'], all=[], exclude=[]),
     dict(key='links.github', any=['github'], all=[], exclude=[]),
     dict(key='links.portfolio', any=['website', 'portfolio'], all=[], exclude=[]),
     dict(key='demographics.pronouns', any=['pronouns'], all=[], exclude=[]),
-    dict(key='demographics.gender', any=['gender', 'gender identity'], all=[], exclude=[]),
+    dict(key='demographics.gender', any=['gender', 'gender identity', 'sex'], all=[], exclude=[]),
     dict(key='demographics.race', any=['race', 'ethnicity', 'racial ethnic background'], all=[], exclude=[]),
     dict(key='demographics.veteran_status', any=['veteran'], all=['protected'], exclude=[]),
     dict(key='demographics.veteran_status', any=['veteran', 'veteran status'], all=[], exclude=[]),
@@ -89,6 +108,8 @@ CONCEPTS = [
 
 def match(text):
     """Return the most specific concept; options are deliberately never inspected."""
+    if unusable_label(text):
+        return None
     text = normalize(text)
     long = len(text.split()) > 60
     matches = []
@@ -114,6 +135,8 @@ STOPWORDS = set('a an the are is was were you your our their i me my do does did
 
 def similarity(left, right):
     """Jaccard content overlap; preserve negation, timeframes and numeric qualifiers."""
+    if unusable_label(left) or unusable_label(right):
+        return 0.0
     a, b = normalize(left).split(), normalize(right).split()
     qualifiers = {'not', 'no', 'never', 'without', 'now', 'future', 'temporary'}
     if set(a) & qualifiers != set(b) & qualifiers:

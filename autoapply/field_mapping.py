@@ -30,6 +30,9 @@ def normalize(value):
 
 @lru_cache(maxsize=2048)
 def semantic_key(label):
+    from .question_keywords import unusable_label
+    if unusable_label(label):
+        return None
     text = normalize(label)
     if text in DEMOGRAPHICS:
         return 'demographics.' + DEMOGRAPHICS[text]
@@ -89,6 +92,9 @@ def describe(q, app, profile=None):
     employer = normalize(app.get('company', '')) if scoped else ''
     requisition = str(app.get('canonical_url') or app.get('id', '')) if scoped else ''
     policy = (q.policy or field_policy({}, mapped, q.kind)) if profile is None else field_policy(profile, mapped, q.kind)
+    from .question_keywords import unusable_label
+    if unusable_label(q.label):
+        mapped, policy = UNKNOWN_FIELD, 'REQUIRE_USER'
     if mapped == 'eligibility_confirmation':
         policy = 'REQUIRE_USER'
     return _descriptor(q.label, mapped, q.kind, tuple(q.options), q.required, q.max_length, q.min_selections, q.max_selections, scope,
@@ -137,6 +143,9 @@ class FieldMapper:
         return result
 
     async def _map(self, item):
+        from .question_keywords import unusable_label
+        if unusable_label(item.get('label', '')):
+            return dict(semantic_key=UNKNOWN_FIELD, mapping_source='generic_rule', confidence=0)
         scores = {}
         for signal, weight in [('label', .99), ('aria_label', .98), ('placeholder', .85),
                                ('name', .65), ('id', .60)]:

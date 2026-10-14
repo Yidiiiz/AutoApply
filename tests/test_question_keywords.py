@@ -344,3 +344,178 @@ def test_salary_memory_stays_with_its_application(config, db, listing, standard_
     q = Question('salary', 'Desired annual salary', 'text', True)
     answer = AnswerResolver(config, db).resolve(q, {'id': 2, 'description': '$25 - $35 per hour'})
     assert answer.value == '$52,000 - $72,800'
+
+
+RTX_LABELS = [
+    'Did you previously work for RTX (including its predecessors or any of its businesses) in any capacity?*',
+    'Are you a CURRENT U.S. federal government civilian or military (active duty or reserves) employee?*',
+    'Are you a FORMER U.S. federal government civilian or military (active duty or reserves) employee?*',
+    "Are you a CURRENT or FORMER employee of RTX's Independent Auditor, PriceWaterhouseCoopers (PwC)?*",
+]
+
+
+@pytest.fixture
+def rtx_profile(config):
+    path = config.private / 'profile.yaml'
+    profile = yaml.safe_load(path.read_text(encoding='utf-8'))
+    profile['contact'].update(phone_device_type='Mobile', permanent_address='9383 Penrose St.',
+        permanent_city='Frederick', permanent_state='Maryland', permanent_postal_code='21704',
+        permanent_country='United States', address='Fallback St.', city='Fallback City',
+        state='Virginia', postal_code='12345', country='United States')
+    profile['education'].update(credit_hours_by_start=142, gpa=3.5)
+    profile['application_preferences'] = dict(previous_employer_work_default=False,
+        terms_acknowledgement=True, gender='decline', race='decline', veteran='not a veteran')
+    path.write_text(yaml.safe_dump(profile), encoding='utf-8')
+    return profile
+
+
+@pytest.mark.parametrize('label', RTX_LABELS)
+def test_rtx_employment_answers(config, db, rtx_profile, label):
+    answer = AnswerResolver(config, db).resolve(Question('q', label, 'select', True,
+        ['Select One', 'Yes', 'No']), {'id': 1, 'company': 'RTX'})
+    assert answer and answer.value == 'No'
+
+
+@pytest.mark.parametrize('label,kind,options,expected', [
+    ('How many credit hours towards your degree do you anticipate having completed by the time you would start this position?*', 'number', [], '142'),
+    ('How many credits completed by the start of the position?', 'text', [], '142'),
+    ('What is your cumulative GPA?', 'text', [], '3.5'),
+    ('What is your cumulative GPA?', 'select', ['Select One', 'Below 3.0', '3.0 - 3.49', '3.5 - 4.0'], '3.5 - 4.0'),
+    ('What is your cumulative GPA?', 'select', ['3.0 - 3.49', '3.5 or higher'], '3.5 or higher'),
+    ('What is your cumulative GPA?', 'select', ['3.0 - 3.49', '3.5+'], '3.5+'),
+    ('What is your cumulative GPA?', 'select', ['3.0 - 3.49', 'Above 3.5'], 'Above 3.5'),
+    ('If you answered "Yes" to question 1, please provide your major. If you did not answer "Yes", please enter "N/A".*', 'text', [], 'Computer Science'),
+    ('If you answered "Yes" to question 1, please provide your permanent address. If you did not answer "Yes", please enter "N/A".*', 'text', [], '9383 Penrose St., Frederick, Maryland 21704, United States'),
+    ('What is your Sex?*', 'select', ['Male', 'Female', 'I do not wish to share'], 'I do not wish to share'),
+    ('What is your race / ethnicity?*', 'select', ['White (United States of America)', 'Asian (United States of America)', 'I do not wish to share (United States of America)'], 'I do not wish to share (United States of America)'),
+    ('Yes, I have read and consent to the terms and conditions*', 'checkbox', [], 'Yes'),
+    ('Yes, I have read and consent to the terms and conditions*', 'checkbox', ['Yes, I have read and consent to the terms and conditions*'], 'Yes, I have read and consent to the terms and conditions*'),
+    ('Are you a protected veteran? (Veteran status definitions can be found in the instructions above)*', 'select', ['I AM A PROTECTED VETERAN', 'IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN', 'I AM NOT A VETERAN', 'I DO NOT WISH TO ANSWER'], 'I AM NOT A VETERAN'),
+    ('Phone Device Type*', 'select', ['Select One', 'Landline', 'Mobile'], 'Mobile'),
+    ('Address line 2', 'text', [], ''),
+])
+def test_rtx_reported_wordings(config, db, rtx_profile, label, kind, options, expected):
+    q = Question('q', label, kind, label != 'Address line 2', options)
+    answer = AnswerResolver(config, db).resolve(q, {'id': 1, 'company': 'RTX'})
+    assert answer and answer.value == expected
+
+
+@pytest.mark.parametrize('choice', ['I do not wish to share', "I don't wish to answer",
+    'Decline to self identify', 'Prefer not to say', 'I do not wish to self-identify'])
+@pytest.mark.parametrize('suffix', ['', ' (United States of America)'])
+def test_decline_equivalence(choice, suffix):
+    from autoapply.concepts import equivalent_answer
+    option = choice + suffix
+    assert equivalent_answer(option) == 'decline'
+    assert fit_options('decline', ['Male', 'Female', option]) == option
+    assert fit_options(option, ['Male', 'Female', 'Prefer not to say']) == 'Prefer not to say'
+
+
+def test_permanent_address_falls_back_to_contact(rtx_profile):
+    from autoapply.answers import permanent_address
+    rtx_profile['contact'] = {k: v for k, v in rtx_profile['contact'].items() if not k.startswith('permanent_')}
+    assert permanent_address(rtx_profile) == 'Fallback St., Fallback City, Virginia 12345, United States'
+
+
+def test_plain_nonveteran_preferred_over_protected_only():
+    options = ['I am not a protected veteran', 'I AM NOT A VETERAN',
+        'IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN']
+    assert fit_options('not a veteran', options) == 'I AM NOT A VETERAN'
+    assert fit_options('not a veteran', options[:1]) == options[0]
+    assert fit_options('not a veteran', options[2:]) is None
+
+
+def test_gpa_ambiguous_or_unavailable_ranges_abstain(config, db, rtx_profile):
+    resolver = AnswerResolver(config, db)
+    for options in [['3.0 - 3.49', '3.6 - 4.0'], ['3.0 - 3.5', '3.5 - 4.0']]:
+        assert resolver.resolve(Question('gpa', 'Cumulative GPA', 'select', True, options), {'id': 1}) is None
+
+
+BAD_LABELS = ['Select One Required', 'Required', 'Please select', 'Choose', '*', 'Search',
+    'Select One', 'Please choose an option', 'formField-degree', 'question_123',
+    'input-42', 'fieldOfStudy', 'education.gpa']
+
+
+@pytest.mark.parametrize('label', BAD_LABELS)
+@pytest.mark.parametrize('explicit', [False, True])
+def test_boilerplate_never_reuses_memory_or_metadata(config, db, listing, rtx_profile, label, explicit):
+    from autoapply.question_keywords import similarity
+    assert canonical_key(label) is None
+    assert match(label) is None
+    assert similarity(label, label) == 0
+    app = save(db, config, listing, label, 'Yes', 'select', ['Yes', 'No'])
+    q = Question('q', label, 'select', True, ['Yes', 'No'],
+        semantic_key='education.currently_enrolled' if explicit else '')
+    result = AnswerResolver(config, db).resolve_result(q, app)
+    assert result.answer is None
+    assert result.status == 'USER_INPUT_REQUIRED'
+    assert result.descriptor.policy == 'REQUIRE_USER'
+
+
+@pytest.mark.asyncio
+async def test_boilerplate_does_not_use_mapping_fallback():
+    from autoapply.field_mapping import FieldMapper
+    async def forbidden(_):
+        pytest.fail('Boilerplate must never reach semantic fallback')
+    mapper = FieldMapper('workday', fallback=forbidden, allowed_keys=['education.degree'])
+    for label in BAD_LABELS:
+        result = await mapper.map(dict(label=label, kind='select', id='degree', options=['Yes', 'No']))
+        assert result['semantic_key'] == 'UNKNOWN_FIELD'
+
+
+@pytest.mark.parametrize('label', ['How many credits will you have completed by the start of this position?',
+    'How many completed credits towards your degree will you have?'])
+def test_credit_wording_variants(config, db, rtx_profile, label):
+    assert canonical_key(label) == 'education.credit_hours_by_start'
+    answer = AnswerResolver(config, db).resolve(Question('credits', label, 'number', True), {'id': 1})
+    assert answer.value == '142'
+
+
+def test_boilerplate_fuzzy_memory_abstains(config, db, listing):
+    app = save(db, config, listing, 'Please Select One Required', 'Yes', 'select', ['Yes', 'No'])
+    q = Question('q', 'Select One Required', 'select', True, ['Yes', 'No'])
+    assert AnswerResolver(config, db).resolve(q, app) is None
+
+
+RTX_VETERAN_LABEL = 'Are you a protected veteran? (Veteran status definitions can be found in the instructions above)'
+RTX_VETERAN_OPTIONS = [
+    'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN',
+    'IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN',
+    'I AM NOT A VETERAN',
+    'I DO NOT WISH TO SELF-IDENTIFY',
+]
+INSULET_VETERAN_OPTIONS = [
+    'I am a protected veteran', 'I am not a protected veteran', 'Prefer not to say',
+]
+
+
+@pytest.mark.parametrize('preference,options,expected', [
+    ('not a veteran', RTX_VETERAN_OPTIONS, 'I AM NOT A VETERAN'),
+    ('not a protected veteran', RTX_VETERAN_OPTIONS, 'I AM NOT A VETERAN'),
+    ('not a veteran', INSULET_VETERAN_OPTIONS, 'I am not a protected veteran'),
+    ('not a protected veteran', INSULET_VETERAN_OPTIONS, 'I am not a protected veteran'),
+    ('NOT A VETERAN', [o.lower() for o in RTX_VETERAN_OPTIONS], 'i am not a veteran'),
+    ('NOT A PROTECTED VETERAN', [o.upper() for o in INSULET_VETERAN_OPTIONS], 'I AM NOT A PROTECTED VETERAN'),
+])
+@pytest.mark.parametrize('legacy_status', [None, 'not a protected veteran'])
+def test_t041_veteran_preferences(config, db, preference, options, expected, legacy_status):
+    path = config.private / 'profile.yaml'
+    profile = yaml.safe_load(path.read_text(encoding='utf-8'))
+    profile['application_preferences'] = {'veteran': preference}
+    if legacy_status:
+        profile['demographics'] = {'veteran_status': legacy_status}
+    path.write_text(yaml.safe_dump(profile), encoding='utf-8')
+    q = Question('veteran', RTX_VETERAN_LABEL, 'select', True, options)
+    result = AnswerResolver(config, db).resolve_result(q, {'id': 1, 'company': 'Fixture'})
+    assert result.status == 'RESOLVED'
+    assert result.answer.value == expected
+
+
+@pytest.mark.parametrize('label', ['Address Line 2', 'Address 2', 'Apartment, suite, etc.', 'Apt/Suite'])
+@pytest.mark.parametrize('required', [False, True])
+def test_t041_empty_address_line_2(config, db, label, required):
+    q = Question('address2', label, 'text', required, [])
+    result = AnswerResolver(config, db).resolve_result(q, {'id': 1, 'company': 'Fixture'})
+    assert result.status in {'RESOLVED', 'OPTIONAL_SKIP'}
+    assert result.answer.value == ''
+    assert result.answer.source == 'policy:empty_address_line_2'

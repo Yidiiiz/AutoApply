@@ -95,9 +95,9 @@ def _decline(options):
 def _veteran(options, profile):
     from .concepts import demographic_value
     value = demographic_value(profile, 'demographics.veteran_status')
-    if value and re.search(r'not a protected veteran', str(value), re.I):
-        hits = [o for o in options or [] if re.search(r'\bnot a protected veteran\b|\bam not a veteran\b', o, re.I)]
-        return hits[0] if len(hits) == 1 else None
+    if value and re.search(r'not a (?:protected )?veteran', str(value), re.I):
+        from .answers import fit_options
+        return fit_options(value, options or [])
     return _decline(options) if _declines(profile, 'veteran') else None
 
 

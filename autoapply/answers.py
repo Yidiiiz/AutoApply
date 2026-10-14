@@ -42,8 +42,16 @@ def fit_options(value, options):
             return preferred[0]
         return matches[0] if len(matches) == 1 else None
     veteran = re.sub(r'^i am (?:a )?', '', expected)
+    if veteran == 'not a veteran':
+        plain = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
+        if plain:
+            return plain[0] if len(plain) == 1 else None
+        fallback = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a protected veteran']
+        return fallback[0] if len(fallback) == 1 else None
     if veteran in {'protected veteran', 'not a protected veteran'}:
         matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]
+        if not matches and veteran == 'not a protected veteran':
+            matches = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
         return matches[0] if len(matches) == 1 else None
     if expected == "decline":
         matches = [option for option in options if equivalent_answer(option) == 'decline'
@@ -93,11 +101,43 @@ def salary_range(label, description, fallback):
     return fallback
 
 
+def gpa_option(value, options):
+    """Select a unique GPA band containing the configured value."""
+    if not options:
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    hits = []
+    for option in options:
+        text = option.lower().strip()
+        band = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:\.\d+)?)', text)
+        lower = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(?:\+|or (?:higher|above|more)|and (?:above|higher))', text)
+        above = re.fullmatch(r'(?:above|at least)\s+(\d+(?:\.\d+)?)', text)
+        if (band and float(band[1]) <= number <= float(band[2])
+                or (lower or above) and number >= float((lower or above)[1])
+                or text == str(value)):
+            hits.append(option)
+    return hits[0] if len(hits) == 1 else None
+
+
+def permanent_address(profile):
+    parts = [fact(profile, 'contact.permanent_' + key) or fact(profile, 'contact.' + key)
+             for key in ('address', 'city', 'state', 'postal_code', 'country')]
+    address, city, state, postal, country = parts
+    region = ' '.join(str(v) for v in (state, postal) if v)
+    return ', '.join(str(v) for v in (address, city, region, country) if v) or None
+
+
 def standard_answer(q, app, profile):
     from .concepts import canonical_key, demographic_value
     key = canonical_key(q.label)
-    paths = {'start_date': 'application_preferences.desired_start_date'}
-    supported = {'start_date', 'application_preferences.availability_dates',
+    paths = {'start_date': 'application_preferences.desired_start_date',
+             'prior_employment': 'application_preferences.previous_employer_work_default'}
+    supported = {'start_date', 'prior_employment', 'government_employment', 'independent_auditor_employment',
+                 'education.credit_hours_by_start', 'education.gpa', 'contact.permanent_address',
+                 'contact.phone_device_type', 'application_preferences.availability_dates',
                  'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
                  'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
                  'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino'}
@@ -105,7 +145,13 @@ def standard_answer(q, app, profile):
         return None
     path = paths.get(key, key)
     value = fact(profile, path)
-    if key == 'start_date':
+    if key in {'government_employment', 'independent_auditor_employment'}:
+        value = False
+    elif key == 'contact.permanent_address':
+        value = permanent_address(profile)
+    elif key == 'education.gpa' and value is not None:
+        value = gpa_option(value, q.options)
+    elif key == 'start_date':
         value = format_start_date(value, q.kind, q.label)
     elif key == 'application_preferences.default_salary_range':
         value = salary_range(q.label, app.get('description', ''), value or fact(profile, 'application_preferences.compensation_text'))
@@ -128,7 +174,8 @@ def standard_answer(q, app, profile):
         validate_answer(q, value)
     except (ValueError, TypeError):
         return None
-    return Answer(value, 'profile:' + path, evidence=[path])
+    source = ('policy:' if key in {'government_employment', 'independent_auditor_employment'} else 'profile:') + path
+    return Answer(value, source, evidence=[path])
 
 
 def validate_answer(q, value):
@@ -325,6 +372,11 @@ class AnswerResolver:
     def _resolve(self, q, app, descriptor, profile):
         from .field_mapping import REJECTED_FIELD
         mapped_key, policy = descriptor.semantic_key, descriptor.policy
+        from .question_keywords import unusable_label
+        if unusable_label(q.label):
+            return None
+        if re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', normalize(q.label)):
+            return Answer('', 'policy:empty_address_line_2') if not q.options else None
         # Negated ability/requirement wording must not reach affirmative fallbacks.
         if re.search(r"\bnot (?:able|willing|authorized|eligible|require|need|agree|commit|have)\b|\b(?:unable|cannot)\b|\bcan t\b", normalize(q.label)):
             return None
@@ -404,7 +456,9 @@ class AnswerResolver:
         if mapped_key in {'start_date', 'application_preferences.availability_dates',
                           'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
                           'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
-                          'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino'}:
+                          'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino',
+                          'education.gpa', 'education.credit_hours_by_start', 'contact.permanent_address',
+                          'contact.phone_device_type', 'government_employment', 'independent_auditor_employment'}:
             return None
         if row is None and mapped_key != REJECTED_FIELD:
             fuzzy = self._fuzzy_answer(q, app, descriptor, stored)
