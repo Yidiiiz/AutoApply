@@ -877,11 +877,16 @@
           const current=Boolean(entry.current || entry.start_date && !entry.end_date);
           const skipEnd=current && ['experience','projects'].includes(kind);
           const elements=Array.from(group.querySelectorAll('input,textarea,select,[role="combobox"],button[aria-haspopup="listbox"]')).filter(visible);
-          // Preserve an entire entry already containing user facts.
-          const occupiedGroup=elements.some(el=>!['hidden','button'].includes(el.type) && sectionField(el)!=='current' && occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.getAttribute('role')==='combobox'?'combobox':el.type||'text'}}));
+          const isOccupied=el=>occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.matches('[role="combobox"],button[aria-haspopup="listbox"]')?'combobox':el.type||'text'}});
+          const occupiedGroup=elements.some(el=>el.type!=='hidden' && (el.type!=='button' || el.matches('button[aria-haspopup="listbox"]')) && sectionField(el)!=='current' && isOccupied(el));
+          const anchorKey=kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title';
+          const anchor=elements.find(el=>sectionField(el)===anchorKey);
+          const anchorValue=anchor?.matches('[role="combobox"],button[aria-haspopup="listbox"]')?comboSelection(anchor) || comboInput(anchor)?.value:anchor?.value;
+          const matchesEntry=Boolean(entry[anchorKey] && normal(anchorValue)===normal(entry[anchorKey]));
           for (const el of elements) {
             managed.add(el);
-            if(occupiedGroup) continue;
+            // Only complete a partially filled entry when its anchor matches the profile.
+            if((occupiedGroup && !matchesEntry) || isOccupied(el)) continue;
             const key=sectionField(el); if(!key && kind!=='languages') continue;
             let value=entry[key];
             if(kind==='languages' && key!=='language' && key!=='fluent' && (el.tagName==='SELECT' || el.getAttribute('role')==='combobox' || el.matches('button[aria-haspopup="listbox"]'))) value=entry.proficiency;
@@ -896,15 +901,12 @@
             if(key==='technologies') value=(entry.technologies||[]).join(', ');
             if(key==='current') value=current;
             if(key==='fluent') value=Boolean(entry.fluent);
+            if(occupiedGroup && el.type==='checkbox' && value===el.checked) continue;
             if(key==='end_date' && skipEnd) value='';
             else if(/_date$/.test(key)) value=dateValue(el,value);
             if(value!==undefined && value!=='') supplied.set(el,{value:trimSection(value,el.maxLength>=0?el.maxLength:null),boolean:key==='current'||key==='fluent'});
           }
-          if (occupiedGroup) {
-            const anchor=elements.find(el=>sectionField(el)===(kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title'));
-            if (anchor && normal(anchor.value || comboSelection(anchor))===normal(entry[kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title'])) added++;
-          }
-          if(!occupiedGroup) {
+          if(!occupiedGroup || matchesEntry) {
             // Commit this entry before clicking Add for the next one.
             await scan();
             const entryAnswers=[];
@@ -918,7 +920,7 @@
             const endInputs=elements.filter(el=>sectionField(el)==='end_date');
             const currentBox=elements.find(el=>sectionField(el)==='current' && el.type==='checkbox');
             const currentVerified=!current || !currentBox || await waitFor(()=>currentBox.checked && (!skipEnd || endInputs.every(el=>!visible(el))),1000);
-            if (!filled.pending.length && !filled.errors.length && filled.filled && currentVerified) added++;
+            if (!filled.pending.length && !filled.errors.length && (filled.filled || matchesEntry) && currentVerified) added++;
             else break;
           }
         }

@@ -1047,6 +1047,56 @@ def test_repeatable_profile_sections(loaded_extension, extension_server, date_co
     assert page.evaluate('clicks') == dict(next=0, submit=0, submissions=0)
 
 
+@pytest.mark.parametrize("matching_school", [True, False])
+@pytest.mark.parametrize("anchor_control", ["combobox", "text"])
+def test_greenhouse_partial_education_entry(loaded_extension, extension_server, matching_school, anchor_control):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + "/greenhouse.html")
+    school = "  UNIVERSITY OF MARYLAND - COLLEGE PARK  " if matching_school else "User University"
+    page.evaluate("""({school, anchor_control}) => {
+        const section=document.querySelector('section'), entry=document.createElement('div');
+        for(const child of Array.from(section.children)) if(child.tagName!=='H2') entry.append(child);
+        section.append(entry);
+        for (const [id, value] of [['school', school], ['degree', "Bachelor's Degree"], ['discipline', 'Computer Science']]) {
+            const root=document.querySelector('[data-id="'+id+'"]');
+            root.querySelector('.select__single-value').textContent=value;
+            root.querySelector('[type=hidden]').value=value;
+        }
+        if(anchor_control==='text') {
+            document.querySelector('[data-id=school]').innerHTML='<label for="school">School</label><input id="school">';
+            document.querySelector('#school').value=school;
+        }
+        document.querySelector('#start-month').add(new Option('January', '01'));
+        document.querySelector('#end-month').value='05';
+        document.querySelector('#end-year').value='2028';
+    }""", dict(school=school, anchor_control=anchor_control))
+    snapshot = "e => [Array.from(e.querySelectorAll('input,select'), n => [n.value, n.checked]), Array.from(e.querySelectorAll('.select__single-value'), n => n.textContent)]"
+    before = page.locator('section').first.evaluate(snapshot)
+    profile = dict(education=[dict(school="University of Maryland - College Park", degree="Master's Degree",
+                                  major="Mechanical Engineering", start_date="2024-01", end_date="2029-06")])
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    prepared = worker.evaluate("""async ({id, profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: p => globalThis.autoApplyContent.prepareSections(p), args:[profile]}))[0].result""", dict(id=tab_id, profile=profile))
+    assert page.locator('#start-month').input_value() == ('01' if matching_school else '')
+    assert page.locator('#start-month option:checked').inner_text() == ('January' if matching_school else 'Month')
+    assert page.locator('#start-year').input_value() == ('2024' if matching_school else '')
+    assert page.locator('#end-month').input_value() == '05'
+    assert page.locator('#end-year').input_value() == '2028'
+    assert page.locator('[data-id=degree] .select__single-value').inner_text() == "Bachelor's Degree"
+    assert page.locator('[data-id=discipline] .select__single-value').inner_text() == 'Computer Science'
+    assert next(s for s in prepared['sections'] if s['name']=='education')['added'] == int(matching_school)
+    assert [(f['label'], f['value']) for f in prepared['completed']] == (
+        [('Start date month', 'January'), ('Start date year', '2024')] if matching_school else [])
+    if matching_school:
+        assert all(f['answered'] for f in prepared['fields'] if f['label'].startswith('Start date'))
+        assert page.locator('#school').evaluate("e => e.value || e.closest('.select').querySelector('[type=hidden]').value") == school
+    else:
+        assert page.locator('section').first.evaluate(snapshot) == before
+    assert page.evaluate('[submitClicks, submissions]') == [0, 0]
+
+
 def test_saved_source_labels(loaded_extension):
     context, worker, extension_id = loaded_extension
     panel = context.new_page()
