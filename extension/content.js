@@ -15,7 +15,17 @@
       const frame = document.createElement('iframe'); frame.src = chrome.runtime.getURL('sidepanel.html')+(tabId?'?tabId='+tabId:''); frame.title = 'AutoApply application assistant';
       panel.append(frame);
       const restore = document.createElement('button'); restore.className='restore'; restore.textContent='AutoApply'; restore.setAttribute('aria-label','Restore AutoApply sidebar');
-      restore.onclick=()=>{sidebar('open');chrome.runtime.sendMessage({type:'sidebar-state',state:'open'}).catch(()=>{});};
+      const positionKey = 'flagPosition:' + location.hostname;
+      const clamp = top => Math.max(0, Math.min(innerHeight - restore.offsetHeight, top));
+      let drag, dragged = false;
+      chrome.storage.local.get(positionKey).then(saved => { if (Number.isFinite(saved[positionKey])) restore.style.top = clamp(saved[positionKey]) + 'px'; });
+      restore.style.touchAction = 'none';
+      restore.onpointerdown = event => { drag = {y:event.clientY, top:restore.getBoundingClientRect().top}; dragged=false; restore.setPointerCapture(event.pointerId); };
+      restore.onpointermove = event => { if (!drag) return; if (Math.abs(event.clientY-drag.y)>3) dragged=true; if (dragged) restore.style.top=clamp(drag.top+event.clientY-drag.y)+'px'; };
+      restore.onpointerup = () => { if (dragged) chrome.storage.local.set({[positionKey]:clamp(restore.getBoundingClientRect().top)}); drag=null; };
+      restore.onpointercancel = () => { drag=null; };
+      window.addEventListener('resize', () => { if (restore.style.top) restore.style.top=clamp(parseFloat(restore.style.top))+'px'; });
+      restore.onclick=()=>{if(dragged){dragged=false;return;}sidebar('open');chrome.runtime.sendMessage({type:'sidebar-state',state:'open'}).catch(()=>{});};
       shadow.append(style,panel,restore); document.documentElement.append(sidebarHost);
       sidebarHost.dataset.state='closed';
     }
@@ -83,25 +93,34 @@
   }
 
   function usableLabel(value) {
-    value = clean(value);
-    if (!value || !/\s/.test(value) && (/--|_/.test(value) || /[a-f0-9]{16,}/i.test(value))) return '';
+    value = clean(value).replace(/(?:\s*\*|\s+(?:required|optional))+$|^(?:required|optional)$/ig, '').trim();
+    const tokens = normal(value).replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!tokens || /^(?:(?:select|one|choose|please|required|optional|search)\s*)+$/.test(tokens)) return '';
+    if (!/\s/.test(value) && (/--|_|^(?:formField|input|field|question)[-:]|[a-f0-9]{16,}|^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value))) return '';
     return value;
   }
+  function questionText(element) {
+    if (!element) return '';
+    const copy=element.cloneNode(true);
+    copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"]').forEach(node=>node.remove());
+    return text(copy);
+  }
   function label(element) {
-    const sources = [Array.from(element.labels || []).map(text).join(' '), text(element.closest('label')),
-      element.getAttribute('aria-label'), referencedLabel(element, 'aria-labelledby')];
+    const sources = [Array.from(element.labels || []).map(questionText).join(' '), questionText(element.closest('label')),
+      referencedLabel(element, 'aria-labelledby')];
     const container = element.closest('[data-automation-id^="formField"],fieldset,[role="group"]');
     if (container) {
       sources.push(referencedLabel(container, 'aria-labelledby'));
-      sources.push(...Array.from(container.querySelectorAll('legend,label,[data-automation-id="richText"]'))
+      sources.push(...Array.from(container.querySelectorAll('legend,label,[data-automation-id="formLabel"],[data-automation-id="richText"]'))
         .filter(node => !node.contains(element) && visible(node) &&
-          Boolean(node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)).map(text));
+          Boolean(node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)).map(questionText));
     }
+    sources.push(element.getAttribute('aria-label'));
     // Walk nearby preceding text before considering a placeholder; never expose control IDs.
     for (let node = element, depth = 0; node && node !== document.body && depth < 5; node = node.parentElement, depth++) {
       for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
         if (sibling.matches('input,select,textarea,button') || sibling.querySelector('input,select,textarea,button')) break;
-        if (visible(sibling)) sources.push(text(sibling));
+        if (visible(sibling)) sources.push(questionText(sibling));
       }
       if (node === container) break;
     }
@@ -110,7 +129,7 @@
   }
 
   function groupLabel(container, fallback) {
-    return [text(container?.querySelector('legend')), container?.getAttribute('aria-label'),
+    return [...Array.from(container?.querySelectorAll('legend,[data-automation-id="formLabel"],[data-automation-id="richText"]') || []).map(questionText), container?.getAttribute('aria-label'),
       container ? referencedLabel(container, 'aria-labelledby') : '',
       text(container?.querySelector('h1,h2,h3,h4,[role="heading"]')), fallback].map(usableLabel).find(Boolean) || 'Unlabelled field';
   }
@@ -214,7 +233,7 @@
   }
   function referencedLabel(element, attribute) {
     return (element.getAttribute(attribute) || "").split(/\s+/)
-      .map(id => text(document.getElementById(id))).filter(Boolean).join(" ");
+      .map(id => questionText(document.getElementById(id))).filter(Boolean).join(" ");
   }
   function usableFileLabel(value) {
     value = usableLabel(value);
@@ -371,7 +390,7 @@
       keys.add(key);
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
-      fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
+      fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
         options, multiple: element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
         section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
@@ -472,6 +491,10 @@
     return exact || folded || (clean(value) ? options.find(item => normal(getText(item)).startsWith(normal(value))) ||
       options.find(item => normal(getText(item)).includes(normal(value))) : undefined);
   }
+  function fieldChoice(element, options, value, getText = text) {
+    return best(options, value, getText) || (normal(value) === 'mobile' && /^phone (?:device )?type$/i.test(label(element)) ?
+      options.find(option => /^(cell|mobile phone)$/i.test(clean(getText(option)))) : undefined);
+  }
   function mark(record, color) {
     for (const element of record.members) {
       const target = record.field.kind === "file" && !visible(element) ? fileContainer(element) : element;
@@ -487,11 +510,11 @@
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
       const searches = [...new Set([clean(value), prefix])];
-      let option = best(await settledComboOptions(element, 350), value, text);
+      let option = fieldChoice(element, await settledComboOptions(element, 350), value);
       for (const search of option ? [] : searches) {
         if (!searchCombo(element, search)) break;
         // Keep waiting for a match even when an unrelated first page stays rendered.
-        option = await waitFor(() => best(comboOptions(element), value, text), 2500);
+        option = await waitFor(() => fieldChoice(element, comboOptions(element), value), 2500);
         if (option) break;
       }
       if (!option) return false;
@@ -559,6 +582,11 @@
       const record = records.get(answer.key);
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) { summary.skipped++; continue; }
       const {element, members, field} = record;
+      if (/\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b/i.test(field.label)) {
+        if (field.required) {summary.needs_input.push(field.label);summary.pending.push({...field});}
+        else summary.skipped++;
+        continue;
+      }
       if (field.kind === "file" && occupied(record)) {summary.skipped++;continue;}
       if (["combobox","select","radio"].includes(field.kind) && !field.options.length && occupied(record)) { summary.skipped++; continue; }
       const unresolved = writing => {
@@ -611,7 +639,7 @@
           }
           if (!ok) { unresolved(false); continue; }
         } else if (field.kind === "select") {
-          const option = best(Array.from(element.options).filter(option => !option.disabled && option.value !== ""), answer.value, option => option.text);
+          const option = fieldChoice(element, Array.from(element.options).filter(option => !option.disabled && option.value !== ""), answer.value, option => option.text);
           if (!option) { unresolved(false); continue; }
           nativeSet(element, "value", option.value);
           events(element);
@@ -912,7 +940,7 @@
   }
   async function nextPage(requireComplete = false) {
     const errors = validationErrors();
-    if (errors.length) return {clicked: false, errors};
+    if (requireComplete && errors.length) return {clicked: false, errors};
     if (signInPage()) return {clicked: false, errors: ['Sign in before continuing.']};
     if (requireComplete && (await scan()).fields.some(field => field.required && !field.answered)) return {clicked: false, errors: []};
     const button = Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"],[role="button"]'))
@@ -921,10 +949,59 @@
         const identity = [caption, node.getAttribute('aria-label'), node.getAttribute('data-automation-id')].join(' ');
         return visible(node) && !/submit|apply/i.test(identity) && /^(next|save and continue|continue)$/i.test(caption);
       });
-    if (!button) return {clicked: false, errors: []};
+    if (!button) {
+      const final = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]')).some(node =>
+        visible(node) && /submit|apply/i.test([node.textContent, node.value, node.getAttribute('aria-label')].join(' ')));
+      return {clicked: false, errors: [], message: final ? 'Final submit is yours' : 'No Next page button found.'};
+    }
     button.click();
     await pause(1000);
     return {clicked: true, errors: validationErrors()};
   }
-  globalThis.autoApplyContent = {scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
+  const writingButtons = new Map();
+  function syncWritingButtons() {
+    for (const [field, host] of writingButtons) if (!field.isConnected || !visible(field)) { host.remove(); writingButtons.delete(field); }
+    for (const field of document.querySelectorAll('textarea,[contenteditable="true"],input[type="text"],input:not([type])')) {
+      if (!visible(field) || writingButtons.has(field)) continue;
+      if (field.tagName === 'INPUT' && !(field.size >= 50 || field.getBoundingClientRect().height >= 60)) continue;
+      const host = document.createElement('span'); host.className='autoapply-ask-ai';
+      host.style.cssText='display:block; margin:4px 0 8px;';
+      const shadow=host.attachShadow({mode:'open'}), style=document.createElement('style'), button=document.createElement('button');
+      style.textContent='button{font:11px system-ui;padding:3px 8px;border:1px solid #aaa;border-radius:5px;background:#fff;color:#444;cursor:pointer}';
+      button.textContent='Ask AI'; button.type='button';
+      button.onclick=async () => {
+        await scan();
+        const record=Array.from(records.values()).find(record=>record.element===field);
+        if (record) chrome.runtime.sendMessage({type:'ask-ai',key:record.field.key}).catch(()=>{});
+      };
+      shadow.append(style,button); field.after(host); writingButtons.set(field,host);
+    }
+  }
+  let writingButtonTimer;
+  new MutationObserver(() => { clearTimeout(writingButtonTimer); writingButtonTimer=setTimeout(syncWritingButtons,80); })
+    .observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden','style','class']});
+  setTimeout(syncWritingButtons,80);
+
+  function pageStructure() {
+    const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
+    const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,[role],[data-automation-id],[contenteditable="true"]';
+    for (const element of document.querySelectorAll(selector)) {
+      if (element.closest('#autoapply-sidebar,.autoapply-ask-ai')) continue;
+      const row={tag:element.tagName.toLowerCase(), visible:Boolean(element.getClientRects().length && getComputedStyle(element).visibility!=='hidden')};
+      for (const attr of ['role','type','id','name','data-automation-id','aria-label']) {
+        const value=element.getAttribute(attr); if(value) row[attr]=value.slice(0,2000);
+      }
+      const labelledby=referencedLabel(element,'aria-labelledby'); if(labelledby)row.labelledby=labelledby.slice(0,2000);
+      if (element.matches('input,textarea,select,button,[role="combobox"]')) row.label=label(element).slice(0,2000);
+      if (element.matches('label,legend,h1,h2,h3,h4,h5,h6,option,button,[role="heading"],[role="option"],[data-automation-id="richText"],[data-automation-id="formLabel"]')) {
+        const copy=element.cloneNode(true);
+        copy.querySelectorAll('input,textarea,[contenteditable],script,style,[data-automation-id="selectedItem"]').forEach(node=>node.remove());
+        if (!element.isContentEditable) row.text=text(copy).slice(0,2000);
+      }
+      const bytes=encoder.encode(JSON.stringify(row)).length;
+      if (nodes.length >= 10000 || size+bytes>950000) {truncated=true;break;} size+=bytes;nodes.push(row);
+    }
+    return {host:location.hostname,nodes,truncated};
+  }
+  globalThis.autoApplyContent = {pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
 })();

@@ -240,6 +240,40 @@ def match(dashboard, payload):
             if app else dict(application_id=None))
 
 
+
+def secondary_address(label):
+    label = re.sub(r'[^a-z0-9]+', ' ', normalize(label)).strip()
+    return bool(re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', label))
+
+
+def snapshot(dashboard, payload):
+    """Save only the documented structural attributes, never field values."""
+    host, nodes = payload.get('host'), payload.get('nodes')
+    if not isinstance(host, str) or not re.fullmatch(r'[a-zA-Z0-9.-]{1,253}', host):
+        raise SettingsRejected('Invalid snapshot host')
+    if not isinstance(nodes, list) or len(nodes) > 10000:
+        raise SettingsRejected('Snapshot nodes must be a list of at most 10000 items')
+    attributes = {'tag', 'role', 'type', 'id', 'name', 'data-automation-id', 'aria-label', 'labelledby', 'label', 'text'}
+    sanitized = []
+    text_tags = {'label', 'legend', 'option', 'button', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get('tag'), str):
+            raise SettingsRejected('Invalid snapshot node')
+        row = {key: value[:2000] for key, value in node.items() if key in attributes and isinstance(value, str)}
+        if row.get('tag') not in text_tags and row.get('role') not in {'heading', 'option'} and row.get('data-automation-id') not in {'richText', 'formLabel'}:
+            row.pop('text', None)
+        row['visible'] = node.get('visible') is True
+        sanitized.append(row)
+    data = json.dumps(dict(host=host, nodes=sanitized, truncated=payload.get('truncated') is True), ensure_ascii=False)
+    if len(data.encode('utf-8')) > 1024 * 1024:
+        raise SettingsRejected('Snapshot exceeds 1 MB')
+    directory = dashboard.config.private / 'snapshots'
+    directory.mkdir(parents=True, exist_ok=True)
+    filename = host.lower() + '-' + str(time.time_ns()) + '.json'
+    (directory / filename).write_text(data, encoding='utf-8')
+    return dict(ok=True, filename=filename)
+
+
 def resolve_answers(dashboard, payload):
     fields = payload.get('fields')
     if not isinstance(fields, list) or len(fields) > 500:
@@ -259,6 +293,15 @@ def resolve_answers(dashboard, payload):
         profile = dashboard.config.profile
         result = []
         for q, field in zip(questions, fields):
+            if secondary_address(q.label):
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'))
+                continue
+            if re.fullmatch(r'phone (?:device )?type', normalize(q.label).strip(' *')):
+                preferred = str(profile.get('contact', {}).get('phone_device_type') or 'Mobile')
+                value = next((option for option in q.options if normalize(option) in {'mobile', 'cell', 'mobile phone', normalize(preferred)}), None) if q.options else preferred
+                result.append(dict(key=q.key, value=value, source='profile:contact.phone_device_type' if value else '',
+                                   status='RESOLVED' if value else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'))
+                continue
             if q.kind == 'file':
                 result.append(dict(key=q.key, value='cover_letter' if 'cover' in q.label.lower() else 'resume',
                                    source='file', status='FILE'))
@@ -559,7 +602,7 @@ def unapplied(dashboard, payload):
     return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
 
 
-ROUTES = {('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
+ROUTES = {('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,

@@ -655,3 +655,36 @@ def test_prompt_job_context_toggle_and_cap(http_dashboard, config, db, listing, 
     sent = writing_provider.requests[-1]['job']
     assert sent['description'] == '' and sent['canonical_url'] == ''
     fetcher.assert_not_called()
+
+
+@pytest.mark.parametrize('label', ['Address line 2', 'Address 2', 'Address line2', 'Apt', 'Suite', 'Unit'])
+def test_t039_secondary_address(http_dashboard, label):
+    fields=[dict(key='optional', label=label), dict(key='required', label=label, required=True)]
+    status, result, _=ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://fixture.test/job',fields=fields))
+    assert status == 200
+    assert [row['status'] for row in result['answers']] == ['OPTIONAL_SKIP','NEEDS_INPUT']
+    assert all(row['value'] is None for row in result['answers'])
+
+
+@pytest.mark.parametrize('label,options,expected', [
+    ('Phone Device Type', [], 'Mobile'), ('Phone Type', ['Home','Mobile'], 'Mobile'),
+    ('Phone Device Type', ['Home','Cell'], 'Cell'), ('Phone Type', ['Mobile Phone','Other'], 'Mobile Phone')])
+def test_t039_phone_type(http_dashboard, label, options, expected):
+    status, result, _=ext(http_dashboard,'POST','/ext/answers',dict(url='https://fixture.test/job',fields=[dict(key='phone',label=label,kind='select',options=options)]))
+    assert status == 200 and result['answers'][0]['value'] == expected
+
+
+def test_t039_snapshot_paired_sanitized(http_dashboard, config):
+    server, _ = http_dashboard
+    payload=dict(host='fixture.test', nodes=[dict(tag='input',type='text',id='name',value='SECRET',text='SECRET',visible=True),dict(tag='label',text='Full name',visible=True)],file_contents='SECRET')
+    assert request(server,'POST','/ext/snapshot',{},json.dumps(payload))[0] == 403
+    status, result, _=ext(http_dashboard,'POST','/ext/snapshot',payload)
+    assert status == 200 and result['ok']
+    paths=list((config.private/'snapshots').glob('fixture.test-*.json'))
+    assert len(paths) == 1
+    saved=paths[0].read_text(encoding='utf-8')
+    assert 'SECRET' not in saved and 'Full name' in saved
+    assert json.loads(saved)['nodes'][0] == dict(tag='input',type='text',id='name',visible=True)
+    assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,host='../escape'))[0] == 400
+    assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,nodes=[{}]))[0] == 400
+    assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,nodes=[],extra='x'*1048576))[0] == 400

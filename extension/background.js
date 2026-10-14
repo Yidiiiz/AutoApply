@@ -138,7 +138,7 @@ async function clickNext(result, automatic = false) {
   const [frame] = await chrome.scripting.executeScript({target:{tabId:result.tabId},
     func: automatic => globalThis.autoApplyContent.nextPage(automatic), args:[automatic]});
   if (frame.result.errors.length) { result.summary.errors.push(...frame.result.errors); result.progress = 'Fix the page validation errors before continuing.'; await report(result); return false; }
-  if (!frame.result.clicked) { if (!automatic) { result.progress = 'No Next page button is available. Review and submit on the page yourself.'; await report(result); } return false; }
+  if (!frame.result.clicked) { if (!automatic) { result.progress = frame.result.message || 'No Next page button found.'; await report(result); } return false; }
   const after = await scan(result.tabId);
   // An unchanged form means navigation did not succeed; never repeatedly click it.
   return after.url !== scanned.url || after.workday_step !== scanned.workday_step ||
@@ -335,15 +335,25 @@ async function action(message) {
     const id = message.tabId || lastResult?.tabId; cancelWait(id);
     const result = activeResults.get(id); if (result) {result.waiting=false;result.progress='Form waiting cancelled.';return report(result);} return {};
   }
+  if (message.type === 'page-snapshot') {
+    const scanned=await scan(message.tabId);
+    const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId},func:()=>globalThis.autoApplyContent.pageStructure()});
+    return api('/ext/snapshot',frame.result);
+  }
+  if (message.type === 'next-page') {
+    const scanned=await scan(message.tabId);
+    const {tabResults={}}=await chrome.storage.session.get('tabResults');
+    const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId]||{...scanned,pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]}};
+    if(await clickNext(current) && !running)return autofill(current.tabId,current.matched);
+    return current;
+  }
   if (running) throw new Error("Wait for autofill to finish.");
   const {lastResult, tabResults={}} = await chrome.storage.session.get(['lastResult','tabResults']);
   const stored=message.tabId?tabResults[message.tabId]:lastResult;
   const result=activeResults.get(stored?.tabId) || stored;
   if (result?.tabId) activeResults.set(result.tabId, result);
   if (!result?.page) throw new Error("Run autofill on an application first.");
-  if (message.type === 'next-page') {
-    if (await clickNext(result)) {pendingSteps.delete(result.tabId);return autofill(result.tabId,result.matched);}
-  } else if (message.type === 'load-options') {
+  if (message.type === 'load-options') {
     await loadOptions(result, message.key);
   } else if (message.type === "fill-answer") {
     if(message.url && message.url!==result.url || message.label && !result.fields.some(field=>field.key===message.key && field.label===message.label))throw new Error("Application changed. Open the answer helper again.");
@@ -399,7 +409,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait"].includes(message.type)) return;
+  if (!["autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });
@@ -541,9 +551,18 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
   const tabId=sender.tab.id;
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
-  if(!['sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
+  if(!['ask-ai','sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
   (async()=>{
     const {autofillTabs={},tabResults={},sidebarTabs={}}=await chrome.storage.session.get(['autofillTabs','tabResults','sidebarTabs']);
+    if(message.type==='ask-ai') {
+      const scanned=await scan(tabId), key=sender.frameId+':'+message.key;
+      const field=scanned.fields.find(field=>field.key===key); if(!field)return;
+      const result=activeResults.get(tabId)||tabResults[tabId]||{...scanned,pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,errors:[]}};
+      result.fields=scanned.fields;
+      activeResults.set(tabId,result);await report(result);
+      await showSidebar(tabId,'open');
+      await chrome.storage.session.set({helperRequest:{tabId,field,result}}); return;
+    }
     if(message.type==='sidebar-ready'){if(sidebarTabs[tabId])await showSidebar(tabId,sidebarTabs[tabId]);return;}
     if(message.type==='sidebar-state'){sidebarTabs[tabId]=message.state;await chrome.storage.session.set({sidebarTabs});return;}
     const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];

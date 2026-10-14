@@ -5,3 +5,5 @@ html,body{height:100%}main{height:100%;display:flex;flex-direction:column}header
 .page-navigation{display:grid;gap:12px;margin-top:18px}.page-navigation label{display:flex;align-items:flex-start;gap:8px}.page-navigation input{width:auto;flex:none}
 
 #chat-conversation{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;gap:10px}#ask-section{padding:0}.context-toggle{flex-shrink:0}
+
+.page-navigation{position:sticky;bottom:0;flex-shrink:0;margin-top:auto;padding:10px 16px;background:var(--surface);border-top:1px solid var(--line);gap:6px;font-size:11px}.page-navigation p:empty{display:none}

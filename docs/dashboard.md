@@ -688,3 +688,5 @@ without a decline option require user input.
 Chrome runs show a compact progress line with an icon cancel action. The line closes when the run finishes; Last run is a muted, collapsed disclosure with one line per application.
 
 The extension Chat tab includes Chat and Answer helper. Written fields offer Ask AI, and generated answers stay editable in Answers for that application. Use job description controls whether the saved posting text and link are sent as AI reference context. Scrollbars follow the light or dark theme.
+
+The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Send page structure in the footer sends only form metadata (no input values or file contents) through the paired `POST /ext/snapshot` endpoint. Snapshots are capped at 1 MB and saved under `data/private/snapshots/<host>-<timestamp>.json` on demand for markup debugging.

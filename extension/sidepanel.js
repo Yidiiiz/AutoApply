@@ -68,7 +68,7 @@ function prompts() {
       });
       save.disabled = input.disabled;
       actions.append(save);
-      if(field.kind==="textarea" || result?.writing?.some(item=>item.key===field.key))actions.append(button("Ask AI",()=>openHelper(field)));
+
       if (['select','radio','checkbox','combobox'].includes(field.kind) && !field.options?.length) {
         actions.append(button('Load options', async event => {
           event.target.disabled = true;
@@ -127,7 +127,7 @@ function render(value) {
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
   element("progress").textContent = value.progress || "";
   element("autofill").disabled = Boolean(value.busy);
-  element('next-page').disabled = Boolean(value.busy || value.waiting);
+  element('next-page').disabled = false;
   element('cancel-form-wait').hidden = !value.waiting;
   element("cover-letter").disabled = Boolean(value.busy || value.coverBusy);
   element("cover-progress").textContent = value.coverProgress || "";
@@ -144,8 +144,7 @@ function render(value) {
   element("applied-status").hidden=!value.applied;
   element("autofill").textContent=value.busy?"Filling…":"Autofill this page";
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
-  const writtenFields=[...(value.writing||[]),...(value.fields||[]).filter(field=>field.kind==="textarea"&&!field.section_managed&&!value.writing?.some(item=>item.key===field.key))];
-  element("needs-writing").replaceChildren(...writtenFields.filter(field=>field.kind!=="file" && !value.pending?.some(item=>item.key===field.key)).map(field=>{const item=node("li","");item.append(node("span",field.label),button("Ask AI",()=>openHelper(field)));return item;}));
+  element("needs-writing").replaceChildren();
   // Expose generated PDF without persisting blob URLs across panel instances.
   if (downloadURL) URL.revokeObjectURL(downloadURL);
   element("download").hidden = !value.coverFile;
@@ -260,3 +259,8 @@ element('next-page').onclick=()=>perform({type:'next-page'}).catch(showError);
 element('cancel-form-wait').onclick=()=>perform({type:'cancel-form-wait'}).catch(showError);
 element('auto-advance').onchange=()=>send({type:'auto-advance-preference',enabled:element('auto-advance').checked}).then(value=>{if(value.error)throw Error(value.error);}).catch(showError);
 send({type:'auto-advance-preference'}).then(value=>{element('auto-advance').checked=Boolean(value.enabled);}).catch(showError);
+
+function helperRequest(request) { if (request && (!tabId || request.tabId===tabId)) {result=request.result;openHelper(request.field);} }
+chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.helperRequest)helperRequest(changes.helperRequest.newValue);});
+helperRequest((await chrome.storage.session.get('helperRequest')).helperRequest);
+element('send-structure').onclick=async()=>{try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);element('snapshot-status').textContent='Page structure sent.';}catch(error){element('snapshot-status').textContent=error.message;}};

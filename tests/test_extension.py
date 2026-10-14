@@ -27,17 +27,17 @@ def extension_server():
     for gate in gates.values():
         gate.set()
     canned = {
-        "Full name *": "Fixture Student", "Email": "student@example.test",
+        "Full name": "Fixture Student", "Email": "student@example.test",
         "Phone": "2025550100", "About you": "I build local tools.",
-        "Country *": "united states", "Country": "United States", "Work authorization *": "Yes",
+        "Country": "united states", "Country": "United States", "Work authorization": "Yes",
         "Skills": ["Python", "JavaScript"], "Contact consent": True,
-        "Existing answer *": "Do not overwrite", "Short answer *": "Too long",
+        "Existing answer": "Do not overwrite", "Short answer": "Too long",
         "Additional information": "Plain editable text", "City": "Boston",
-        "Website": "https://example.test/", "Frame name *": "Embedded Student",
+        "Website": "https://example.test/", "Frame name": "Embedded Student",
         "School": "University of Maryland - College Park", "Degree": "bachelor",
         "Discipline": "computer science", "Existing selection": "Other",
         "Are you interested in a Spring Co-Op, Summer Internship, or Both?": "Summer Internship",
-        "Nonmatching choice *": "Yes", "Uncommitted choice *": "Computer Science",
+        "Nonmatching choice": "Yes", "Uncommitted choice": "Computer Science",
         "Start date month": "August", "Start date year": "2024",
         "End date month": "5", "End date year": "2028",
         "Job Title": "Fixture Engineer", "Company": "Fixture Employer",
@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -127,7 +127,7 @@ def extension_server():
                 gates["write"].wait(15)
                 answer = "Refined fixture answer." if payload.get("previous") else "I enjoy building useful local tools."
                 self.response(200, {"answer": answer, "words": len(answer.split()), "chars": len(answer)})
-            elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember"}:
+            elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember", "/ext/snapshot"}:
                 self.response(200, {"ok": True})
             elif self.path == "/ext/chat":
                 gates["chat"].wait(15)
@@ -144,8 +144,10 @@ def extension_server():
                     label = field["label"]
                     if field["kind"] == "file":
                         status, value = "FILE", "cover_letter" if "Cover" in label else "resume"
-                    elif label == "Why this role? *":
+                    elif label == "Why this role?":
                         status, value = "NEEDS_WRITING", None
+                    elif payload.get('url', '').endswith('/needs_input.html') and label in {'Start date month', 'Are you interested in a Spring Co-Op, Summer Internship, or Both?'}:
+                        status, value = 'NEEDS_INPUT', None
                     elif label in canned:
                         status, value = "RESOLVED", canned[label]
                         if label == "Country":
@@ -201,7 +203,7 @@ def loaded_extension(tmp_path):
                     pytest.fail(f"Chromium launches, but loading the extension failed: {error}")
             pytest.skip("Chromium cannot launch at all: " + "\n".join(launch_errors))
         try:
-            context.route("**/*", lambda route: route.continue_() if urlsplit(route.request.url).hostname in {"127.0.0.1", "localhost"} or route.request.url.startswith("chrome-extension://") else route.abort())
+            context.route("**/", lambda route: route.continue_() if urlsplit(route.request.url).hostname in {"127.0.0.1", "localhost"} or route.request.url.startswith("chrome-extension://") else route.abort())
             worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker", timeout=15000)
             # A missing worker/invalid manifest is a failure, never a skip.
             assert worker.evaluate("""async () => {
@@ -230,8 +232,8 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     summary = result["summary"]
     assert summary["filled"] == 13
     assert not result["busy"]
-    assert set(summary["needs_input"]) == {"Unresolved required *", "Short answer *"}
-    assert set(summary["needs_writing"]) == {"Cover letter *", "Why this role? *"}
+    assert set(summary["needs_input"]) == {"Unresolved", "Short answer"}
+    assert set(summary["needs_writing"]) == {"Cover letter", "Why this role?"}
     assert summary["skipped"] == 2
     for selector, value in {"#name": "Fixture Student", "#email": "student@example.test", "#phone": "2025550100", "#about": "I build local tools.", "#country": "us", "#city": "Boston", "#website": "https://example.test/", "#existing": "User supplied"}.items():
         assert page.locator(selector).input_value() == value
@@ -270,7 +272,7 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert panel.locator("#company").inner_text() == "Fixture Company"
     assert panel.locator("#job").inner_text() == "Fixture Intern"
     expect(panel.locator("#filled")).to_have_text("Filled 14")
-    assert "Unresolved required *" in panel.locator("#needs-input").inner_text()
+    assert "Unresolved" in panel.locator("#needs-input").inner_text()
     expect(panel.locator("#cover-questions")).to_contain_text("Which project")
     # Refill through the actual runtime message path, with the fixture tab active.
     page.bring_to_front()
@@ -318,7 +320,7 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
     assert "error" not in result, result
     assert result["summary"]["filled"] == 9
-    assert set(result["summary"]["needs_input"]) == {"Nonmatching choice *", "Uncommitted choice *"}
+    assert set(result["summary"]["needs_input"]) == {"Nonmatching choice", "Uncommitted choice"}
     assert result["summary"]["needs_writing"] == ["Cover Letter"]
     for name, value in {"school": "University of Maryland - College Park", "degree": "Bachelor's Degree", "discipline": "Computer Science", "interest": "Summer Internship", "existing": "User supplied"}.items():
         root = page.locator(f'.select[data-id="{name}"]')
@@ -347,7 +349,7 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == []
     assert all(field['options'] == [] for field in payload['fields'] if field['kind'] == 'combobox')
     assert all(fields[label]['section'] == 'Education' for label in ('Start date month', 'Start date year', 'End date month', 'End date year'))
-    assert fields['Resume/CV *']['kind'] == fields['Cover Letter']['kind'] == 'file'
+    assert fields['Resume/CV']['kind'] == fields['Cover Letter']['kind'] == 'file'
     assert not any(field['label'] == 'Attach' for field in payload['fields'])
     assert 'University of Maryland - College Park' in page.evaluate('schoolSearches')
     second = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
@@ -448,7 +450,7 @@ def test_upload_field_labels_ignore_generic_buttons(loaded_extension, extension_
     assert page.locator('[type=file]').first.evaluate('e => e.files[0].name') == 'fixture-resume.pdf'
     assert page.locator('#other').evaluate('e => e.files.length') == 0
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
-    assert [field['label'] for field in payload['fields']] == ['Resume/CV *' if resume_label else 'Resume/CV', 'Cover Letter']
+    assert [field['label'] for field in payload['fields']] == ['Resume/CV' if resume_label else 'Resume/CV', 'Cover Letter']
     assert [event[1] for event in page.evaluate('uploadEvents')] == ['input', 'change']
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
@@ -466,7 +468,8 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     page.locator("#autoapply-sidebar iframe").wait_for()
     panel = next(frame for frame in page.frames if frame.url.startswith(f"chrome-extension://{extension_id}/sidepanel.html"))
     assert panel.locator("#tab-ask").count() == 0
-    panel.locator(".prompt").filter(has_text="Written open question").get_by_role("button", name="Ask AI", exact=True).click()
+    assert panel.locator('#fill-section').get_by_role('button', name='Ask AI', exact=True).count() == 0
+    page.locator('#helper-field + .autoapply-ask-ai').get_by_role('button', name='Ask AI', exact=True).click()
     expect(panel.locator("#question")).to_have_value("Written open question")
     panel.locator("#generate").click()
     expect(panel.locator("#version")).to_have_text("1 / 1")
@@ -475,12 +478,12 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     panel.locator("#tab-answers").click()
     expect(panel.locator(".answer-card").filter(has_text="Written open question").locator(".source-pill")).to_have_text("AI")
     panel.locator("#tab-fill").click()
-    panel.get_by_label("Unresolved required *", exact=True).fill("User fixture answer")
-    panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
+    panel.get_by_label("Unresolved", exact=True).fill("User fixture answer")
+    panel.locator(".prompt").filter(has_text="Unresolved").get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#missing")).to_have_value("User fixture answer")
-    panel.get_by_label("Unresolved required *", exact=True).wait_for(state="detached")
+    panel.get_by_label("Unresolved", exact=True).wait_for(state="detached")
     remembered = next(payload for path, _, payload in requests if path == "/ext/remember")
-    assert remembered["label"] == "Unresolved required *"
+    assert remembered["label"] == "Unresolved"
     assert remembered["value"] == "User fixture answer"
     assert remembered["application_id"] == 42
     panel.get_by_label("Which project should the letter highlight?", exact=True).fill("A fixture robotics project")
@@ -556,11 +559,11 @@ def test_needs_input_choices_and_compact_actions(loaded_extension, extension_ser
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
     result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
     assert 'error' not in result, result
-    interest = 'Are you interested in a Spring Co-Op, Summer Internship, or Both? *'
-    assert set(result['summary']['needs_input']) == {'Start date month*', interest, 'Schedule *', 'Areas *'}
+    interest = 'Are you interested in a Spring Co-Op, Summer Internship, or Both?'
+    assert set(result['summary']['needs_input']) == {'Start date month', interest, 'Schedule', 'Areas'}
     assert result['summary']['skipped'] == 3
     fields = {field['label']: field for field in result['fields']}
-    assert all(fields[label]['answered'] for label in ('Country *', 'Preselected select *', 'Preselected input *'))
+    assert all(fields[label]['answered'] for label in ('Country', 'Preselected select', 'Preselected input'))
     assert page.get_by_role('listbox').count() == 0
 
     panel = context.new_page()
@@ -569,18 +572,18 @@ def test_needs_input_choices_and_compact_actions(loaded_extension, extension_ser
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
     expect(panel.locator('#needs-input .prompt')).to_have_count(4)
     assert panel.locator('#needs-input input, #needs-input textarea').count() == 0
-    assert 'Country *' not in panel.locator('#needs-input').inner_text()
+    assert 'Country' not in panel.locator('#needs-input').inner_text()
     choices = [
-        ('Start date month*', ['January', 'August'], 'August', '#month', '08'),
+        ('Start date month', ['January', 'August'], 'August', '#month', '08'),
         (interest, ['Spring Co-Op', 'Summer Internship', 'Both'], 'Both', '[name=interest]', 'Both'),
-        ('Schedule *', ['Full time', 'Part time'], 'Part time', '#part-time', None),
-        ('Areas *', ['Hardware', 'Software'], ['Hardware', 'Software'], '#hardware', None),
+        ('Schedule', ['Full time', 'Part time'], 'Part time', '#part-time', None),
+        ('Areas', ['Hardware', 'Software'], ['Hardware', 'Software'], '#hardware', None),
     ]
     for label, options, chosen, selector, expected in choices:
         prompt = panel.locator('.prompt').filter(has=panel.get_by_label(label, exact=True))
         control = prompt.get_by_label(label, exact=True)
         assert control.evaluate('e => e.tagName') == 'SELECT'
-        assert control.locator('option').all_text_contents() == (options if label == 'Areas *' else ['Choose an answer', *options])
+        assert control.locator('option').all_text_contents() == (options if label == 'Areas' else ['Choose an answer', *options])
         save = prompt.get_by_role('button', name='Save', exact=True)
         skip = prompt.get_by_role('button', name='Skip', exact=True)
         save_box, skip_box = save.bounding_box(), skip.bounding_box()
@@ -627,7 +630,7 @@ def test_preselected_country_and_replaced_upload(loaded_extension, extension_ser
     tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id", page.url)
     result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
     assert "error" not in result
-    assert "Phone country *" not in result["summary"]["needs_input"]
+    assert "Phone country" not in result["summary"]["needs_input"]
     assert result["summary"]["skipped"] >= 1
     assert result["summary"]["errors"] == []
     replaced_upload = page.locator('.upload').filter(has=page.get_by_role("button", name="Remove", exact=True))
@@ -668,7 +671,7 @@ def test_chrome_run_opens_fills_and_keeps_two_tabs(loaded_extension, extension_s
         assert page.evaluate('[submitClicks, submissions]') == [0, 0]
     answers = [payload for path, _, payload in requests if path == '/ext/answers']
     assert [payload['application_id'] for payload in answers] == [1, 2]
-    assert all(next(field for field in payload['fields'] if field['label'] == 'Phone country *')['answered'] for payload in answers)
+    assert all(next(field for field in payload['fields'] if field['label'] == 'Phone country')['answered'] for payload in answers)
     panel.locator('#run-pause').click()
     expect(panel.locator('#chrome-run-status')).to_contain_text('(paused)')
 
@@ -970,8 +973,8 @@ def test_autofill_returns_before_delayed_writing_and_cover(loaded_extension, ext
         expect(panel.locator("#writing-progress")).to_contain_text("Writing:")
         assert page.locator("#writing").input_value() == ""
         # Review and save a deterministic answer while the fake AI call is held.
-        panel.get_by_label("Unresolved required *", exact=True).fill("Reviewed while writing")
-        panel.locator(".prompt").filter(has_text="Unresolved required *").get_by_role("button", name="Save", exact=True).click()
+        panel.get_by_label("Unresolved", exact=True).fill("Reviewed while writing")
+        panel.locator(".prompt").filter(has_text="Unresolved").get_by_role("button", name="Save", exact=True).click()
         expect(page.locator("#missing")).to_have_value("Reviewed while writing")
         fixture_delay(worker, release=["write"])
         expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
@@ -1181,7 +1184,7 @@ def test_workday_real_labels_conditional_options_and_attached_resume(loaded_exte
     assert not result.get('error'), result
     expect(page.locator('input[aria-labelledby=real-question]')).to_have_value('Fixture Student')
     expect(page.locator('#email')).to_have_value('student@example.test')
-    choice = next(f for f in result['pending'] if f['label']=='Lazy choice *')
+    choice = next(f for f in result['pending'] if f['label']=='Lazy choice')
     assert choice['options'] == ['Yes', 'No']
     assert not any('secondaryQuestionnaire--' in f['label'] for f in result['fields'])
     assert any(f['value']=='existing-resume.pdf' for f in result['completed'])
@@ -1200,7 +1203,7 @@ def test_workday_load_options_retry(loaded_extension, extension_server):
     context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
     page.evaluate('optionsEnabled=false')
     result = worker.evaluate("id=>globalThis.autoApplyAutofill(id)", tab_id)
-    assert next(f for f in result['pending'] if f['label']=='Lazy choice *')['options'] == []
+    assert next(f for f in result['pending'] if f['label']=='Lazy choice')['options'] == []
     panel = context.new_page()
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
     page.evaluate('optionsEnabled=true')
@@ -1293,7 +1296,7 @@ def test_workday_preceding_text_replaces_identifier_label(loaded_extension, exte
         document.querySelector('#real-question').removeAttribute('data-automation-id');
     }""")
     response=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>globalThis.autoApplyContent.scan()}))[0].result""",tab_id)
-    assert response['fields'][0]['label'] == 'Full name *'
+    assert response['fields'][0]['label'] == 'Full name'
 
 
 def test_greenhouse_filename_and_remove_skip_resume(loaded_extension, extension_server):
@@ -1387,3 +1390,79 @@ def test_workday_degree_discipline_and_word_proficiency(loaded_extension, extens
         assert summary and summary.get('filled') == 1, summary
         assert page.get_by_label('Degree', exact=True).input_value() == option
     assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+
+
+def test_t039_labels_rules_navigation_and_snapshot(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    worker.evaluate("config=>chrome.storage.local.set(config)", {"server":server,"key":KEY})
+    page.goto(server + '/t039.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    response = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        const api=globalThis.autoApplyContent, scanned=await api.scan();
+        const filled=await api.fill(scanned.fields.filter(f=>f.label.includes('Address')||f.label==='Suite'||f.label==='Phone Type').map(f=>({key:f.key,status:'RESOLVED',value:f.label==='Phone Type'?'Mobile':'Never insert'})));
+        return {scanned,filled,snapshot:api.pageStructure(),next:await api.nextPage()};
+    }}))[0].result""", tab_id)
+    labels = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+        const variants=['Select One Required','select','Choose','Please Select','Required','Optional','*','Search','-- select --'];
+        const result=[];
+        for(const value of variants){
+            document.querySelector('[aria-haspopup=listbox]').setAttribute('aria-label',value);
+            document.querySelector('#major').setAttribute('aria-label',value);
+            document.querySelector('fieldset').setAttribute('aria-label',value);
+            result.push((await globalThis.autoApplyContent.scan()).fields.map(f=>f.label));
+        }
+        return result;
+    }}))[0].result""", tab_id)
+    assert all('Phone Device Type' in rows and 'Your major' in rows and 'Previously employed?' in rows for rows in labels)
+    fields = {f['label']: f for f in response['scanned']['fields']}
+    assert {'Phone Device Type', 'Previously employed?', 'Tell us why', 'Address line2', 'Suite', 'Address 2', 'Your major'} <= fields.keys()
+    assert fields['Phone Device Type']['required']
+    assert fields['Previously employed?']['options'] == ['Yes', 'No']
+    assert response['filled']['needs_input'] == ['Address 2']
+    assert page.locator('#address').input_value() == ''
+    assert page.locator('#suite').input_value() == ''
+    assert page.locator('#phone-type').input_value() == 'Cell'
+    assert response['next']['clicked'] and page.evaluate('nextClicks') == 1
+    serialized = json.dumps(response['snapshot'])
+    assert 'SECRET_VALUE' not in serialized and 'SECRET_FILE' not in serialized
+    assert 'Phone Device Type' in serialized and 'formField-phoneType' in serialized
+    final = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:()=>globalThis.autoApplyContent.nextPage()}))[0].result""", tab_id)
+    assert final['message'] == 'Final submit is yours'
+    assert page.evaluate('submitClicks') == 0
+    panel = context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Page structure sent.')
+    worker.evaluate("""async id=>chrome.storage.session.set({tabResults:{[id]:{tabId:id,busy:true,waiting:true,fields:[],pending:[],writing:[],page:{},summary:{filled:0,skipped:0,errors:[]}}}})""", tab_id)
+    expect(panel.locator('#autofill')).to_be_disabled()
+    for name in ('fill','answers','chat'):
+        panel.locator('#tab-'+name).click()
+        expect(panel.locator('#next-page')).to_be_visible()
+        expect(panel.locator('#next-page')).to_be_enabled()
+        assert panel.locator('#next-page').bounding_box()['y'] < panel.viewport_size['height']
+    panel.locator('#next-page').click()
+    expect(panel.locator('#progress')).to_have_text('Final submit is yours')
+    page.locator('#submit').evaluate('e=>e.remove()')
+    panel.locator('#next-page').click()
+    expect(panel.locator('#progress')).to_have_text('No Next page button found.')
+    assert page.evaluate('submitClicks') == 0
+    worker.evaluate("id=>globalThis.autoApplySidebar(id,'minimized')",tab_id)
+    flag = page.locator('#autoapply-sidebar').get_by_role('button',name='Restore AutoApply sidebar')
+    box=flag.bounding_box()
+    page.mouse.move(box['x']+5,box['y']+5)
+    page.mouse.down()
+    page.mouse.move(box['x']+5,box['y']+105,steps=5)
+    page.mouse.up()
+    assert flag.bounding_box()['y'] > box['y']+50
+    saved=worker.evaluate("async()=> (await chrome.storage.local.get('flagPosition:127.0.0.1'))['flagPosition:127.0.0.1']")
+    assert saved >= 0
+    page.reload()
+    expect(flag).to_be_visible()
+    assert abs(flag.bounding_box()['y']-saved) < 2
+    expect(page.locator('#large + .autoapply-ask-ai')).to_have_count(1)
+    writing = page.locator('#essay + .autoapply-ask-ai')
+    expect(writing).to_have_count(1)
+    page.locator('#essay').evaluate('e=>e.remove()')
+    expect(writing).to_have_count(0)
