@@ -70,7 +70,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -1202,6 +1202,30 @@ def test_delayed_form_poll_and_cancellation(loaded_extension, extension_server, 
         expect(page.locator('#delayed')).to_have_value('Fixture Student',timeout=12000)
 
 
+def test_delayed_form_poll_recovers_after_scanner_transition(loaded_extension, extension_server):
+    context, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate("""() => {
+        const main = document.querySelector('#main');
+        main.innerHTML = '';
+        setTimeout(() => {main.innerHTML = '<form><label>Full name *<input id="delayed" required></label></form>';}, 2500);
+    }""")
+    worker.evaluate("""async id => chrome.scripting.executeScript({target:{tabId:id}, func:() => {
+        const api = globalThis.autoApplyContent;
+        delete globalThis.autoApplyContent;
+        setTimeout(() => {globalThis.autoApplyContent = api;}, 500);
+    }})""", tab_id)
+    result = worker.evaluate("id => globalThis.autoApplyAutofill(id)", tab_id)
+    assert not result.get('error'), result
+    assert result['waiting'] and not result['busy']
+    worker.evaluate("""async id => chrome.scripting.executeScript({target:{tabId:id}, func:() => {
+        const api = globalThis.autoApplyContent, scan = api.scan;
+        api.scan = () => {throw Error('Temporary document transition');};
+        setTimeout(() => {api.scan = scan;}, 3500);
+    }})""", tab_id)
+    expect(page.locator('#delayed')).to_have_value('Fixture Student', timeout=12000)
+    assert page.evaluate('clicks.submit') == 0
+
+
 @pytest.mark.parametrize('validation', [False, True])
 def test_auto_advance_stops_at_submit_or_validation(loaded_extension, extension_server, validation):
     context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
@@ -1255,3 +1279,82 @@ def test_greenhouse_filename_and_remove_skip_resume(loaded_extension, extension_
         return {field,filled};}}))[0].result""",tab_id)
     assert response['field']['answered'] is True
     assert page.evaluate('clicks.uploads') == 0
+
+
+def test_workday_experience_education_and_languages(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/workday-experience.html')
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    profile = dict(experience=[dict(title='Freelancer', company='Self', start_date='2019', current=True),
+                               dict(title='Crew', company='Moge Tee', start_date='2026-06', end_date='2026-08', current=False)],
+                   education=[dict(school='Fixture University', degree="Bachelor's", major='Computer Science',
+                                   start_date='2024-08', end_date='2028-05', gpa='3.8')],
+                   languages=[dict(language='English', fluent=True, proficiency='highest')])
+    invoke = """async ({id,profile}) => (await chrome.scripting.executeScript({target:{tabId:id},
+        func: async p => {const api=globalThis.autoApplyContent;const result=await api.prepareSections(p);
+                         await api.fill(result.answers);return result;},args:[profile]}))[0].result"""
+    prepared = worker.evaluate(invoke, dict(id=tab_id, profile=profile))
+    work = page.locator('#work .entry')
+    assert work.count() == 2
+    assert work.first.locator('[data-automation-id=dateSectionMonth-input]').first.input_value() == '01'
+    assert work.first.locator('[data-automation-id=dateSectionYear-input]').first.input_value() == '2019'
+    assert work.first.locator('[type=checkbox]').is_checked()
+    assert work.first.locator('.end input').first.input_value() == ''
+    assert not work.first.locator('.end').is_visible()
+    assert work.last.locator('[data-automation-id=dateSectionMonth-input]').first.input_value() == '06'
+    assert work.last.locator('[data-automation-id=dateSectionMonth-input]').last.input_value() == '08'
+    assert not work.last.locator('[type=checkbox]').is_checked()
+    order = page.evaluate('order')
+    adds = [i for i, event in enumerate(order) if event == 'add:work']
+    assert any(event == 'fill:work' for event in order[adds[0]+1:adds[1]])
+    assert '2019' in page.evaluate('commits')
+    assert page.locator('#education .entry').count() == 1
+    assert page.get_by_label('Degree', exact=True).input_value() == "Bachelor's Degree"
+    assert page.get_by_label('Field of Study', exact=True).input_value() == 'Computer Science'
+    assert page.get_by_label('To', exact=True).input_value() == '05/2028'
+    assert page.get_by_label('GPA', exact=True).input_value() == '3.8'
+    assert page.locator('#languages .entry').count() == 1
+    assert page.get_by_label('Language', exact=True).input_value() == 'English'
+    assert page.get_by_label('I am fluent in this language', exact=True).is_checked()
+    for name in ('Comprehension', 'Overall', 'Reading', 'Speaking', 'Writing', 'Listening'):
+        assert page.get_by_label(name, exact=True).input_value() == '5 - Fluent'
+    assert next(f for f in prepared['fields'] if f['label']=='When are you expected to graduate?')['placeholder'] == 'MMM-YY'
+    assert prepared['completed']
+    before = page.evaluate('order.length')
+    worker.evaluate(invoke, dict(id=tab_id, profile=profile))
+    assert page.evaluate('order.length') == before
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)
+
+
+def test_workday_degree_discipline_and_word_proficiency(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, _ = extension_server
+    page = context.new_page()
+    page.goto(server + '/workday-experience.html')
+    page.locator('#education button').click()
+    page.locator('#languages button').click()
+    page.evaluate("""() => {
+        const degree=document.querySelector('#education select');
+        degree.innerHTML='<option value="">Select one</option><option>Computer Science</option><option>Math</option>';
+        for(const select of document.querySelectorAll('#languages select')) if(select.getAttribute('aria-label')!=='Language')
+            select.innerHTML='<option value="">Select one</option><option>Basic</option><option>Advanced</option><option>Fluent</option><option>Native</option>';
+    }""")
+    tab_id = worker.evaluate("async url => (await chrome.tabs.query({})).find(t => t.url === url).id", page.url)
+    worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:async () => {
+        await globalThis.autoApplyContent.prepareSections({education:[{school:'Fixture',degree:"Bachelor's",major:'Computer Science'}],
+            languages:[{language:'English',fluent:true,proficiency:'highest'}]});
+    }}))[0].result""", tab_id)
+    assert page.get_by_label('Degree', exact=True).input_value() == 'Computer Science'
+    for name in ('Comprehension', 'Overall', 'Reading', 'Speaking', 'Writing', 'Listening'):
+        assert page.get_by_label(name, exact=True).input_value() == 'Native'
+    for option in ('Bachelors', 'BS', 'B.S.', 'Bachelor of Science'):
+        page.get_by_label('Degree', exact=True).evaluate("(e,option)=>{e.innerHTML='<option value="">Select one</option>';const o=new Option(option,option);e.add(o);}", option)
+        summary = worker.evaluate("""async id => (await chrome.scripting.executeScript({target:{tabId:id},func:async () => {
+            const api=globalThis.autoApplyContent;const field=(await api.scan()).fields.find(f=>f.label.startsWith('Degree') && f.kind==='select');
+            return api.fill([{key:field.key,status:'RESOLVED',value:"Bachelor's"}]);
+        }}))[0].result""", tab_id)
+        assert summary and summary.get('filled') == 1, summary
+        assert page.get_by_label('Degree', exact=True).input_value() == option
+    assert page.evaluate('clicks') == dict(submit=0, submissions=0)

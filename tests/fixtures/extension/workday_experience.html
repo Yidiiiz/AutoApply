@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><style>label{display:block}input{min-height:20px}</style>
+<form><section id="work" data-automation-id="workExperienceSection"><h2>Work Experience</h2><div class="entries"></div><button type="button">Add</button></section>
+<section id="education"><h2>Education</h2><div class="entries"></div><button type="button">Add</button></section>
+<section id="languages"><h2>Languages</h2><div class="entries"></div><button type="button">Add</button></section>
+<label>When are you expected to graduate?<input id="graduate" placeholder="MMM-YY"></label>
+<button type="submit" id="submit">Submit</button></form>
+<script>
+window.clicks={submit:0,submissions:0};window.order=[];window.commits=[];
+document.querySelector('form').onsubmit=e=>{e.preventDefault();clicks.submissions++};submit.onclick=()=>clicks.submit++;
+const field=(name,type='text')=>'<label>'+name+'<input type="'+type+'" aria-label="'+name+'"></label>';
+const select=(name,options)=>'<label>'+name+'<select aria-label="'+name+'"><option value="">Select one</option>'+options.map(o=>'<option>'+o+'</option>').join('')+'</select></label>';
+const dates=(name,id)=>'<div data-automation-id="formField-'+id+'"><label>'+name+'</label><div data-automation-id="dateInputWrapper"><input type="text" aria-label="Month" data-automation-id="dateSectionMonth-input" placeholder="MM"><input type="text" aria-label="Year" data-automation-id="dateSectionYear-input" placeholder="YYYY"></div></div>';
+for(const section of document.querySelectorAll('section')) section.querySelector('button').onclick=()=>{
+ const prior=section.querySelector('.entry:last-child');
+ if(prior && !prior.querySelector('input,select').value) throw Error('Previous entry must be filled first');
+ order.push('add:'+section.id);const entry=document.createElement('div');entry.className='entry';
+ if(section.id==='work') entry.innerHTML=field('Job Title')+field('Company')+field('I currently work here','checkbox')+dates('From','startDate')+'<div class="end">'+dates('To','endDate')+'</div>'+field('Role Description');
+ if(section.id==='education') entry.innerHTML=field('School')+select('Degree',["Bachelor's Degree",'Bachelor of Science','Masters'])+select('Field of Study',['Computer Science','Math'])+dates('From','startDate')+field('To')+field('GPA');
+ if(section.id==='languages') entry.innerHTML=select('Language',['English','Spanish'])+field('I am fluent in this language','checkbox')+['Comprehension','Overall','Reading','Speaking','Writing','Listening'].map(n=>select(n,['1 - Beginner','3 - Advanced','5 - Fluent'])).join('');
+ section.querySelector('.entries').append(entry);
+ const current=entry.querySelector('[type=checkbox]');if(current && section.id==='work')current.onchange=()=>entry.querySelector('.end').hidden=current.checked;
+ for(const input of entry.querySelectorAll('[data-automation-id$="-input"]')) {
+   input.addEventListener('input',()=>{if(document.activeElement!==input)input.value='';});
+   input.addEventListener('blur',()=>{if(input.value)commits.push(input.value);});
+ }
+ for(const input of entry.querySelectorAll('input,select'))input.addEventListener('change',()=>order.push('fill:'+section.id));
+};
+</script>

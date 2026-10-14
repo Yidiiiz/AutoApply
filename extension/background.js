@@ -27,8 +27,14 @@ function report(result) {
 async function scan(tabId) {
   const tab = tabId === undefined ? (await chrome.tabs.query({active: true, currentWindow: true}))[0] : await chrome.tabs.get(tabId);
   if (!tab?.id || !/^https?:\/\//.test(tab.url || "")) throw new Error("Open an HTTP or HTTPS application form first.");
-  const frames = (await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: "ISOLATED",
-    func: () => globalThis.autoApplyContent?.scan()})).filter(frame => frame.result);
+  let frames = [];
+  // Navigation can finish before the content script has initialized.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    frames = (await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: "ISOLATED",
+      func: () => globalThis.autoApplyContent?.scan()})).filter(frame => frame.result);
+    if (frames.length) break;
+    await delay(100);
+  }
   if (!frames.length) throw new Error("Form scanner is unavailable. Reload the application page and try again.");
   const page = {...(frames.find(frame => frame.frameId === 0) || frames[0]).result.page, url: tab.url};
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
@@ -96,9 +102,12 @@ function pollForForm(result) {
       if (!scanned.sign_in && scanned.fields.length) {
         formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
       }
-      if (Date.now() < end) formWaits.set(result.tabId, setTimeout(tick, 1000));
-      else { formWaits.delete(result.tabId); result.waiting = false; result.progress = 'No form appeared. Press Autofill to try again.'; await report(result); }
-    } catch { formWaits.delete(result.tabId); }
+    } catch {
+      // A document transition can temporarily make the scanner unavailable.
+    }
+    if (cancelledTabs.has(result.tabId)) return;
+    if (Date.now() < end) formWaits.set(result.tabId, setTimeout(tick, 1000));
+    else { formWaits.delete(result.tabId); result.waiting = false; result.progress = 'No form appeared. Press Autofill to try again.'; await report(result); }
   }
   formWaits.set(result.tabId, setTimeout(tick, 1000));
 }
@@ -133,6 +142,13 @@ async function matchAndFill(result, prepare = false) {
       const prefix=frame.frameId+':';
       sectionAnswers.push(...frame.result.answers.map(answer=>({...answer,key:prefix+answer.key})));
       result.sections.push(...frame.result.sections);
+      const completed=(frame.result.completed || []).map(answer=>({...answer,key:prefix+answer.key}));
+      result.completed ||= [];
+      for(const answer of completed) {
+        result.completed=result.completed.filter(old=>old.key!==answer.key);
+        result.completed.push(answer);
+      }
+      result.summary.filled += completed.length;
       return frame.result.fields.map(field=>({...field,key:prefix+field.key}));
     });
     }
@@ -233,8 +249,9 @@ export async function autofill(tabId, application, advanceCount = 0) {
       result.state = "needs_input";
       result.detail = result.progress = result.sign_in ? "Sign in to Workday in this tab. Autofill will resume automatically." : 'Waiting for the application form...';
       result.waiting = true;
+      result.busy = false;
       pollForForm(result);
-      return await report({...result, busy: false});
+      return await report(result);
     }
     if (result.workday_step || wasWaiting) {
       for (let tick = 0; tick < 3; tick++) { await delay(1000); Object.assign(result, await scan(result.tabId)); }

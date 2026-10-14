@@ -199,3 +199,15 @@ def test_fit_options_preserves_exact_and_other_matching():
     assert fit_options('I am a protected veteran', ['Protected veteran']) == 'Protected veteran'
     assert fit_options('decline', ['Prefer not to say']) == 'Prefer not to say'
     assert fit_options('US', []) == 'US'
+
+
+@pytest.mark.parametrize('option', ["Bachelor's Degree", 'Bachelors', 'BS', 'B.S.', 'Bachelor of Science'])
+def test_bachelor_degree_aliases(option):
+    assert fit_options("Bachelor's", [option, 'Masters']) == option
+
+
+def test_bachelor_degree_prefers_full_degree_and_preserves_other_answers():
+    assert fit_options("Bachelor's", ['BS', "Bachelor's Degree", 'Bachelor of Science']) == "Bachelor's Degree"
+    assert fit_options('Master', ["Bachelor's Degree"]) is None
+    assert fit_options("Bachelor's", ['Bachelor of Science', 'BS']) is None
+    assert fit_options('Computer Science', ['Computer Science', 'Math']) == 'Computer Science'

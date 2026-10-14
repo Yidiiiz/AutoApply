@@ -352,15 +352,14 @@
       let fieldLabel = kind === "file" ? fileLabel(element) : label(element);
       const section = sectionHint(element);
       const datePart = element.getAttribute('data-automation-id');
-      if (/^dateSection(Month|Year)$/.test(datePart || '')) {
-        const date = element.closest('[data-automation-id="dateInputWrapper"],[data-automation-id^="formField"]');
-        const heading = text(date?.querySelector('label')) || clean(date?.getAttribute('aria-label')) || fieldLabel;
-        fieldLabel = heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date') + ' ' + (datePart.endsWith('Month') ? 'month' : 'year');
+      if (/^dateSection(Month|Year)(?:-input)?$/.test(datePart || '')) {
+        const heading = dateHeading(element);
+        fieldLabel = heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date') + ' ' + (datePart.includes('Month') ? 'month' : 'year');
       }
       let container;
       if (["radio", "checkbox"].includes(kind)) {
         container = element.closest(kind === "radio" ? '[role="radiogroup"],fieldset' : 'fieldset,[role="group"]');
-        members = controls.filter(other => (sectionField(element) !== "current" || other===element) && other.type === kind && other.form === element.form &&
+        members = controls.filter(other => (!['current','fluent'].includes(sectionField(element)) || other===element) && other.type === kind && other.form === element.form &&
           (kind === "checkbox" && container ? container.contains(other) : element.name ? other.name === element.name : container && container.contains(other)));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
@@ -375,7 +374,7 @@
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || fieldLabel.includes("*"),
         options, multiple: element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
-        section, max_length: element.maxLength >= 0 ? element.maxLength : null});
+        section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
       if (kind === 'file' && fields[fields.length - 1].answered) fields[fields.length - 1].attached_file = valueOf(records.get(key));
@@ -456,6 +455,18 @@
     for (const type of ["input", "change", "blur"]) element.dispatchEvent(new Event(type, {bubbles: true}));
   }
   function best(options, value, getText = item => item) {
+    if (value === 'highest') {
+      const numeric = options.filter(item => /^\s*\d+/.test(getText(item)));
+      if (numeric.length) return numeric.reduce((a,b) => parseInt(getText(b),10)>parseInt(getText(a),10)?b:a);
+      const rank = item => {const name=normal(getText(item));return /native/.test(name)?5:/fluent|expert/.test(name)?4:/advanced/.test(name)?3:/intermediate/.test(name)?2:/basic|beginner/.test(name)?1:0;};
+      return options.filter(item=>rank(item)>0).sort((a,b)=>rank(b)-rank(a))[0];
+    }
+    const degree = name => /^(bachelor'?s?( degree)?|bachelor of science|b\.?s\.?)$/.test(normal(name));
+    if (degree(value)) {
+      const choices=options.filter(item=>degree(getText(item)));
+      const preferred=choices.find(item=>normal(getText(item))==="bachelor's degree");
+      if (preferred || choices.length===1) return preferred || choices[0];
+    }
     const exact = options.find(item => clean(getText(item)) === clean(value));
     const folded = options.find(item => normal(getText(item)) === normal(value));
     return exact || folded || (clean(value) ? options.find(item => normal(getText(item)).startsWith(normal(value))) ||
@@ -567,8 +578,9 @@
             if (occupied({element:date,members:[date],field:{kind:date.tagName==='SELECT'?'select':date.type||'text'}})) continue;
             const value=dateValue(date,String(answer.value));
             if(date.tagName==='SELECT') {const option=best(Array.from(date.options),value,o=>o.text);if(!option)continue;nativeSet(date,'value',option.value);}
-            else nativeSet(date,'value',value);
-            events(date);
+            else {date.focus();nativeSet(date,'value',value);}
+            events(date);date.blur?.();
+            if (Number(date.value)!==Number(value) && date.value!==value) throw Error('Date did not commit');
           }
         } else if (field.kind === "file") {
           const file = files[answer.value];
@@ -617,8 +629,14 @@
           const value = String(await phoneValue(element, answer.value ?? "", field));
           if (field.max_length !== null && value.length > field.max_length) { unresolved(false); continue; }
           if (element.isContentEditable || !("value" in element)) element.textContent = value;
-          else nativeSet(element, "value", value);
+          else {
+            element.focus();
+            nativeSet(element, "value", value);
+          }
           events(element);
+          element.blur?.();
+          if (/_date$/.test(sectionField(element)) && element.value !== value &&
+              (!/^\d+$/.test(value) || Number(element.value) !== Number(value))) { unresolved(false); continue; }
         }
         mark(record, "#68a879");
         summary.filled++;
@@ -635,7 +653,7 @@
   const sectionNames = {
     experience: ['work experience','employment','employment history','work history','professional experience','experience','internships'],
     projects: ['projects','relevant experience','personal projects','technical projects','research','research experience','extracurricular','activities','portfolio'],
-    education: ['education'], skills: ['skills'], links: ['websites','website','links','web links','social network urls']
+    education: ['education'], languages: ['languages','language'], skills: ['skills'], links: ['websites','website','links','web links','social network urls']
   };
   function sectionKind(value) {
     value = sectionNormal(value).replace(/ section$/, '');
@@ -652,12 +670,19 @@
     }
     return [...found].filter(([container,kind],i,all) => !all.some(([other,k]) => k===kind && other!==container && other.contains(container)));
   }
+  function dateHeading(element) {
+    const field=element.closest('[data-automation-id^="formField"]');
+    const wrapper=element.closest('[data-automation-id="dateInputWrapper"]') || field;
+    const heading=text(field?.querySelector('label')) || text(wrapper?.querySelector('label')) || wrapper?.getAttribute('aria-label');
+    if(heading) return heading;
+    const id=field?.getAttribute('data-automation-id') || '';
+    return /startDate/.test(id)?'From':/endDate/.test(id)?'To':label(element);
+  }
   function sectionField(element) {
     let value = sectionNormal(label(element)).replace(/ star$/, '');
     const part = element.getAttribute('data-automation-id') || '';
     if (/dateSection(Month|Year)/.test(part)) {
-      const wrapper = element.closest('[data-automation-id="dateInputWrapper"],[data-automation-id^="formField"]');
-      value = sectionNormal(text(wrapper?.querySelector('label')) || wrapper?.getAttribute('aria-label') || value) + ' ' + (part.endsWith('Month') ? 'month' : 'year');
+      value = sectionNormal(dateHeading(element)) + ' ' + (part.includes('Month') ? 'month' : 'year');
     }
     if (/^(current|currently work here|i currently work here|present|still working|current role|current employer|i currently attend|currently enrolled)\b/.test(value)) return 'current';
     if (/^(from|start|start date)\b/.test(value)) return 'start_date';
@@ -665,6 +690,8 @@
     if (/^(job title|title|position|role|project name|name)($| )/.test(value) && !/description/.test(value)) return 'title';
     if (/^(company|employer|organization|organisation)\b/.test(value)) return 'company';
     if (/^(school|school or university|institution|university)\b/.test(value) && !/location/.test(value)) return 'school';
+    if (/^(language)($| )/.test(value)) return 'language';
+    if (/fluent in this language/.test(value)) return 'fluent';
     if (/^(degree)\b/.test(value)) return 'degree';
     if (/^(discipline|major|field of study)\b/.test(value)) return 'major';
     if (/gpa|overall result/.test(value)) return 'gpa';
@@ -676,7 +703,7 @@
   }
   function entryGroups(container, kind) {
     const anchors = Array.from(container.querySelectorAll('input,textarea,select,[role="combobox"],button[aria-haspopup="listbox"]'))
-      .filter(el => sectionField(el) === (kind==='education'?'school':kind==='links'?'url':'title'));
+      .filter(el => sectionField(el) === (kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title'));
     return [...new Set(anchors.map(anchor => {
       let group = anchor.parentElement;
       while (group.parentElement && group.parentElement !== container &&
@@ -691,17 +718,18 @@
     return cut.slice(0, boundary>0?boundary:cut.lastIndexOf(' ')>0?cut.lastIndexOf(' '):maximum).trim();
   }
   function dateValue(element, value) {
-    const match = /^(\d{4})-(\d{2})/.exec(value || '');
+    const match = /^(\d{4})(?:-(\d{2}))?/.exec(value || '');
     if (!match) return '';
-    const [,year,month] = match, hint = sectionNormal(label(element)+' '+element.placeholder+' '+element.getAttribute('data-automation-id'));
+    const year=match[1], month=match[2] || '01', hint = sectionNormal(label(element)+' '+element.placeholder+' '+element.getAttribute('data-automation-id'));
     if (/year/.test(hint) || element.type==='number' && Number(element.min)>=1900) return year;
     if (/month/.test(hint) && element.type!=='month') {
       const name = new Date(Number(year),Number(month)-1,1).toLocaleString('en-US',{month:'long'});
       if (element.tagName==='SELECT') return Array.from(element.options).find(o=>[name.toLowerCase(),name.slice(0,3).toLowerCase(),month,String(Number(month))].includes(normal(o.text)))?.text || name;
-      return String(Number(month));
+      return /dateSectionMonth/.test(element.getAttribute('data-automation-id') || '') ? month : String(Number(month));
     }
     if (element.type==='month') return year+'-'+month;
     if (element.type==='date') return year+'-'+month+'-01';
+    if (/mmm[-/ ]yy\b/i.test(element.placeholder || '')) return new Date(Number(year),Number(month)-1,1).toLocaleString('en-US',{month:'short'})+'-'+year.slice(2);
     if (/yyyy/.test(normal(element.placeholder)) && !/mm|dd/.test(normal(element.placeholder))) return year;
     if (/mm[/-]yyyy/i.test(element.placeholder||'') && !/dd/i.test(element.placeholder||'')) return month+'/'+year;
     if (/mm.*yyyy|mm.*dd|date/.test(hint)) return month+'/01/'+year;
@@ -732,45 +760,64 @@
     return {added,skipped};
   }
   async function prepareSections(profile) {
-    const sections=[], supplied=new Map(), managed=new Set();
+    const sections=[], supplied=new Map(), managed=new Set(), completed=[];
     const containers=resumeSections();
     extensionFilling++;
     try {
       for (const [container,kind] of containers) {
         const entries = kind==='links'?Object.entries(profile.links||{}).filter(([,url])=>url).map(([title,url])=>({title,url})):profile[kind] || [];
         if (kind==='skills') continue;
-        const cap = {experience:6,projects:6,education:3,links:6}[kind];
+        const cap = {experience:6,projects:6,education:3,languages:6,links:6}[kind];
         let groups=entryGroups(container,kind);
         const add = Array.from(container.querySelectorAll('button,a,[role="button"],input[type="button"]')).find(el=>visible(el) &&
-          el.type!=='submit' && /^(add(?: another)?(?: (?:work experience|experience|employment|project|education|website|link))?|\+)$/.test(sectionNormal(el.getAttribute('aria-label') || text(el) || el.value) || text(el)) &&
+          el.type!=='submit' && /^(add(?: another)?(?: (?:work experience|experience|employment|project|education|language|website|link))?|\+)$/.test(sectionNormal(el.getAttribute('aria-label') || text(el) || el.value) || text(el)) &&
           (el.tagName!=='A' || !el.getAttribute('href') || el.getAttribute('href')==='#'));
-        if (add) while (groups.length<Math.min(entries.length,cap)) {
-          const before=groups.length; add.click();
-          if (!await waitFor(()=>entryGroups(container,kind).length>before,1500)) break;
-          groups=entryGroups(container,kind);
-        }
-        if (!groups.length) continue;
         let added=0;
-        for (const [index,group] of groups.slice(0,cap).entries()) {
-          const entry=entries[index]; if(!entry) break;
+        for (let index=0; index<Math.min(entries.length,cap); index++) {
+          if (index>=groups.length) {
+            if (!add) break;
+            const before=groups.length; add.click();
+            if (!await waitFor(()=>entryGroups(container,kind).length>before,1500)) break;
+            groups=entryGroups(container,kind);
+          }
+          const group=groups[index], entry=entries[index];
           const elements=Array.from(group.querySelectorAll('input,textarea,select,[role="combobox"],button[aria-haspopup="listbox"]')).filter(visible);
           // Preserve an entire entry already containing user facts.
           const occupiedGroup=elements.some(el=>!['hidden','button'].includes(el.type) && sectionField(el)!=='current' && occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.getAttribute('role')==='combobox'?'combobox':el.type||'text'}}));
           for (const el of elements) {
             managed.add(el);
             if(occupiedGroup) continue;
-            const key=sectionField(el); if(!key) continue;
+            const key=sectionField(el); if(!key && kind!=='languages') continue;
             let value=entry[key];
+            if(kind==='languages' && key!=='language' && key!=='fluent' && (el.tagName==='SELECT' || el.getAttribute('role')==='combobox' || el.matches('button[aria-haspopup="listbox"]'))) value=entry.proficiency;
+            if(kind==='education' && key==='degree' && (el.tagName==='SELECT' || el.getAttribute('role')==='combobox' || el.matches('button[aria-haspopup="listbox"]'))) {
+              const options=el.tagName==='SELECT'?Array.from(el.options).filter(o=>o.value && !o.disabled):await (openCombo(el),settledComboOptions(el,350));
+              if(!best(options,value,el.tagName==='SELECT'?o=>o.text:text) && best(options,entry.major,el.tagName==='SELECT'?o=>o.text:text)) value=entry.major;
+              if(el.tagName!=='SELECT') closeCombo(el);
+            }
             if(key==='company') value=entry.company || entry.organization;
             if(kind==='links' && key==='url') {const named=Object.keys(profile.links||{}).find(name=>sectionNormal(label(el)).includes(sectionNormal(name)));if(named)value=profile.links[named];}
             if(key==='title' && /^(role|position)$/.test(sectionNormal(label(el))) && kind==='projects') value=entry.organization || entry.title;
             if(key==='technologies') value=(entry.technologies||[]).join(', ');
             if(key==='current') value=Boolean(entry.current);
-            if(key==='end_date' && entry.current) value=el.required && el.type==='text' && !/month|year/.test(sectionNormal(label(el)))?'Present':'';
+            if(key==='fluent') value=Boolean(entry.fluent);
+            if(key==='end_date' && entry.current) value='';
             else if(/_date$/.test(key)) value=dateValue(el,value);
-            if(value!==undefined && value!=='') supplied.set(el,{value:trimSection(value,el.maxLength>=0?el.maxLength:null),boolean:key==='current'});
+            if(value!==undefined && value!=='') supplied.set(el,{value:trimSection(value,el.maxLength>=0?el.maxLength:null),boolean:key==='current'||key==='fluent'});
           }
-          if(!occupiedGroup) added++;
+          if(!occupiedGroup) {
+            // Commit this entry before clicking Add for the next one.
+            await scan();
+            const entryAnswers=[];
+            for(const record of records.values()) {
+              const chosen=supplied.get(record.element);
+              if(group.contains(record.element) && chosen) entryAnswers.push({key:record.field.key,status:'RESOLVED',value:chosen.boolean?chosen.value==='true':chosen.value,source:'profile:sections'});
+            }
+            entryAnswers.sort((a,b)=>Number(records.get(b.key)?.field.kind==='checkbox')-Number(records.get(a.key)?.field.kind==='checkbox'));
+            const filled=await fill(entryAnswers);
+            completed.push(...filled.completed);
+            added++;
+          }
         }
         sections.push({name:kind,added,skipped:0});
       }
@@ -820,7 +867,7 @@
           answers.push({key:record.field.key,status:chosen?'RESOLVED':'OPTIONAL_SKIP',value:chosen?.boolean?chosen.value==='true':chosen?.value,source:'profile:sections'});
         }
       }
-      return {fields:Array.from(records.values(),r=>({...r.field,answered:occupied(r)})),answers,sections};
+      return {fields:Array.from(records.values(),r=>({...r.field,answered:occupied(r)})),answers,sections,completed};
     } finally { extensionFilling--; }
   }
 

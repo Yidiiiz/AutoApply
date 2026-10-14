@@ -32,6 +32,14 @@ def fit_options(value, options):
                 matches.append(option)
         if matches:
             return matches[0] if len(matches) == 1 else None
+    bachelor = {'bachelor', 'bachelors', 'bachelor s', 'bachelor degree', 'bachelors degree',
+                'bachelor s degree', 'bs', 'b s', 'bachelor of science'}
+    if expected in bachelor:
+        matches = [option for option in options if normalize(option) in bachelor]
+        preferred = [option for option in matches if normalize(option) == 'bachelor s degree']
+        if len(preferred) == 1:
+            return preferred[0]
+        return matches[0] if len(matches) == 1 else None
     veteran = re.sub(r'^i am (?:a )?', '', expected)
     if veteran in {'protected veteran', 'not a protected veteran'}:
         matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]

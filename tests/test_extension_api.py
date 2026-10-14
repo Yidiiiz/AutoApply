@@ -553,3 +553,44 @@ def test_profile_sections_infer_ongoing_only_when_current_unset(section, dates, 
     result = profile_sections(Mock(config=Mock(profile=profile)), {})[section][0]
     assert result['current'] is expected
     assert isinstance(result['current'], bool)
+
+
+@pytest.mark.parametrize('kind,placeholder,options,expected', [
+    ('text', 'MMM-YY', [], 'May-28'),
+    ('text', 'MM/YYYY', [], '05/2028'),
+    ('text', 'MM/DD/YYYY', [], '05/01/2028'),
+    ('date', '', [], '2028-05-01'),
+    ('select', '', ['May-27', 'May-28'], 'May-28'),
+    ('combobox', '', ['May 2028', 'June 2028'], 'May 2028'),
+])
+def test_expected_graduation_formats(http_dashboard, kind, placeholder, options, expected):
+    field = dict(key='graduation', label='When are you expected to graduate?', kind=kind,
+                 placeholder=placeholder, options=options, required=True)
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://fixture.test/job', fields=[field]))
+    assert status == 200
+    assert result['answers'][0]['value'] == expected
+    assert result['answers'][0]['status'] == 'RESOLVED'
+
+
+def test_profile_sections_year_only_and_languages():
+    from types import SimpleNamespace
+    from autoapply.extension_api import profile_sections
+    dashboard = SimpleNamespace(config=SimpleNamespace(profile=dict(
+        employment=[dict(title='Freelancer', start_date='2019', current=True),
+                    dict(title='Crew', start_date='2026-06', end_date='2026-08')],
+        languages=[dict(language='English', fluent=True, proficiency='highest')])))
+    result = profile_sections(dashboard, {})
+    assert result['experience'][0]['start_date'] == '2019-01'
+    assert result['experience'][0]['current'] is True
+    assert result['experience'][1]['end_date'] == '2026-08'
+    assert result['languages'] == [dict(language='English', fluent=True, proficiency='highest')]
+
+
+@pytest.mark.parametrize('label,expected', [('From date month', '1'), ('From date year', '2019')])
+def test_work_year_only_date_parts(label, expected):
+    from autoapply.extension_api import _repeatable_answer
+    from autoapply.models import Question
+    question = Question('date', label, 'number', True, [])
+    matched, answer = _repeatable_answer(question, dict(section='Work Experience'),
+                                         dict(employment=[dict(start_date='2019', current=True)]))
+    assert matched and answer.value == expected
