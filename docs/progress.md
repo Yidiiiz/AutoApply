@@ -632,3 +632,19 @@ Integrate combined preserved draft in codex-work, fast-forward chrome-extension,
 restart dashboard hidden with .venv Python and --no-browser; verify local APIs
 against user-supplied facts and read-only rendered dashboard. Real employer
 appearance/fill acceptance remains for user's extension reload and fresh run.
+
+Integration complete: commit049cece in codex-work fast-forwarded chrome-extension.
+Dashboard restarted as hidden background .venv Python process with --no-browser.
+HTTP200 serves newfavicon/CSP. Readonly local paired answer verification checked
+restrictionYes, exactLinkedIn, No preference cohort, universityUnitedStates,
+all six role choices, English-only otherlanguageNone, termscheckbox, full permanent
+address includingCollegePark and orderedSanFrancisco/SanJose/NewYork. The manual
+probe initially omitted multiple=true on checkboxgroups; rerun with actual
+extensionmetadata resolved them correctly. No employer form was touched.
+First startupqueue request exceeded45s; later freshrebuild0.583s andcached0.004s.
+Do not claim initialcoldstartup is alwaysfast. Integratedreadonlybrowser checked
+1440/500px,50rows,nooverflow,visiblegear,decodedfavicon,zeroJS/CSPerrors; screenshot
+.tmp/review/t054-integrated/queue-1440-dark.png visuallyinspected. Main/worktree
+clean aftercommit; privateprofile/factchanges remainignored, binaryicons included.
+User must reloadextension and refreshapplicationtabs forliveacceptance. No push
+or livefinalsubmission.
