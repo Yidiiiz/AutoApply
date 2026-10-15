@@ -71,7 +71,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/t046.html": "t046.html", "/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/t047.html": "t047.html", "/t046.html": "t046.html", "/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -114,8 +114,8 @@ def extension_server():
                     self.response(200, item)
                 else:
                     self.response(200, {"done": True})
-            elif self.path in {"/ext/run/result", "/ext/run/status"}:
-                self.response(200, {"ok": True})
+            elif self.path in {"/ext/trace", "/ext/run/result", "/ext/run/status"}:
+                self.response(200, {"ok": True, "filename": "fixture-trace.json"})
             elif self.path == "/ext/skills/aliases":
                 self.response(200, {"aliases": skill_aliases})
             elif self.path == "/ext/skills/choose":
@@ -273,7 +273,11 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert next(field for field in fields if field["label"] == "About you")["max_length"] == 200
     assert sum(path == "/ext/resume" for path, _, _ in requests) == 1
     assert all(key == KEY for _, key, _ in requests)
-    assert all(path in {"/ext/profile-sections", "/ext/ping", "/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
+    assert all(path in {"/ext/trace", "/ext/profile-sections", "/ext/ping", "/ext/match", "/ext/answers", "/ext/resume", "/ext/write", "/ext/cover-letter", "/ext/run/status", "/ext/run/next"} for path, _, _ in requests)
+    traces = [payload for path, _, payload in requests if path == '/ext/trace']
+    assert any(trace['kind'] == 'autofill' for trace in traces)
+    assert 'User supplied' not in json.dumps(traces)
+    assert RESUME.decode() not in json.dumps(traces)
     expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
 
     panel = context.new_page()
@@ -1885,3 +1889,32 @@ def test_t046_uncommitted_option_is_skipped_without_retry(loaded_extension, exte
     assert result['added']==0 and result['skipped']==1
     assert page.evaluate('searches')==['TypeScript']
     assert page.locator('[data-automation-id=selectedItem]').count()==5
+
+
+def test_t047_virtual_skills_education_and_trace(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server, key=KEY))
+    page = context.new_page()
+    page.goto(server + '/t047.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    profile = dict(education=[dict(school='University of Maryland - College Park', degree="Bachelor's",
+                                  major='Computer Science', gpa='3.5', start_date='2024', end_date='2028')])
+    result = worker.evaluate("""async ({id,profile})=>(await chrome.scripting.executeScript({target:{tabId:id},
+        func:async profile=>{const api=globalThis.autoApplyContent;await api.prepareSections(profile);
+            return api.autofillSkills(['Java']);},args:[profile]}))[0].result""", dict(id=tab_id, profile=profile))
+    assert result['added'] == 1 and result['skipped'] == 0
+    assert page.locator('[data-automation-id=formField-schoolName] input').input_value() == profile['education'][0]['school']
+    assert page.locator('#education-8--degree').inner_text() in ['Bachelors', "Bachelor's Degree"]
+    assert page.locator('[data-automation-id=formField-fieldOfStudy] [data-automation-id=selectedItem]').inner_text() == 'Computer Science'
+    assert page.locator('[name=gradeAverage]').input_value() == '3.5'
+    assert page.locator('[data-automation-id=formField-firstYearAttended] input').input_value() == '2024'
+    assert page.locator('[data-automation-id=formField-lastYearAttended] input').input_value() == '2028'
+    assert page.locator('[data-automation-id=formField-skills] [data-automation-id=selectedItem]').inner_text() == 'Java'
+    assert max(page.evaluate('scrolls')) > 2500
+    traces = [data for path, _, data in requests if path == '/ext/trace']
+    assert {'skills', 'section', 'fill'} <= {trace['kind'] for trace in traces}
+    steps = [step for trace in traces for step in trace['entries']]
+    assert any(step['action'] == 'scrolled' for step in steps)
+    assert any(step['action'] == 'verified' and step.get('verified') for step in steps)
+    assert not any(path == '/ext/skills/choose' for path, _, _ in requests)

@@ -840,3 +840,21 @@ def test_skill_plan_disabled_fallback(http_dashboard, config, monkeypatch):
     assert ext(http_dashboard, 'POST', '/ext/skills/plan', {'page':{'description':'Use Python and C++; ongoing work.'}})[1] == {
         'matched':['Python','C++'], 'missing':[], 'other':['Rust','Go']}
     assert ext(http_dashboard, 'POST', '/ext/skills/choose', {'skill':'Unknown','options':['Python']})[1] == {'choice':None}
+
+
+def test_t047_trace_paired_bounded_and_retained(http_dashboard, config):
+    payload = dict(host='fixture.example', kind='skills', entries=[
+        dict(timestamp='2026-10-14T00:00:00Z', step='skills', action='scrolled', scrollTop=300),
+        dict(step='skills', action='verified', verified=True, pill='Java', password='excluded')])
+    assert request(http_dashboard[0], 'POST', '/ext/trace', {}, json.dumps(payload))[0] == 403
+    for _ in range(32):
+        status, saved, _ = ext(http_dashboard, 'POST', '/ext/trace', payload)
+        assert status == 200
+    files = list((config.private / 'traces').glob('*.json'))
+    assert len(files) == 30
+    data = json.loads((config.private / 'traces' / saved['filename']).read_text(encoding='utf-8'))
+    assert data['entries'][0]['action'] == 'scrolled'
+    assert 'password' not in data['entries'][1]
+    for change in [dict(host='../escape'), dict(kind='other'), dict(entries=[{}] * 2001),
+                   dict(entries=[dict(value='x' * (1024 * 1024))])]:
+        assert ext(http_dashboard, 'POST', '/ext/trace', dict(payload, **change))[0] == 400

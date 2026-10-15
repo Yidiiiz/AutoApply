@@ -335,3 +335,7 @@ async function runSkills() {
 for(const id of ['autofill-skills','footer-autofill-skills']) element(id).onclick=runSkills;
 element('cancel-skills').onclick=()=>send({type:'cancel-skills'}).catch(showError);
 send({type:'skills-available'}).then(value=>showSkills(Boolean(value.skills_available))).catch(()=>{});
+
+function traceStatus(value){if(value)element('trace-status').textContent='Last trace saved: '+value.filename;}
+traceStatus((await chrome.storage.session.get('lastTrace')).lastTrace);
+chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.lastTrace)traceStatus(changes.lastTrace.newValue);});

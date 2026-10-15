@@ -238,8 +238,12 @@ export async function autofill(tabId, application, advanceCount = 0) {
   try {
     await showSidebar(tabId);
     await report(result);
+    const traceTab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
+    result.tabId=traceTab?.id;
+    await chrome.scripting.executeScript({target:{tabId:traceTab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.beginTrace('autofill')});
     let scanned = await scan(tabId);
     if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
+    await chrome.scripting.executeScript({target:{tabId:scanned.tabId,allFrames:true},func:count=>{const api=globalThis.autoApplyContent;api?.beginTrace('autofill');api?.trace('scan','found',null,{total:count});},args:[scanned.fields.length]});
     clearTimeout(formWaits.get(scanned.tabId)); formWaits.delete(scanned.tabId); cancelledTabs.delete(scanned.tabId);
     const wasWaiting = activeResults.get(scanned.tabId)?.waiting;
     pendingSteps.delete(scanned.tabId);
@@ -278,8 +282,11 @@ export async function autofill(tabId, application, advanceCount = 0) {
     await rescanRevealed(result);
     result.progress = result.workday_step ?
       `Workday step: ${result.workday_step} - filled ${result.summary.filled}, needs input ${result.pending.length}` : result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
-  } catch (error) { result.error = error.message; }
-  finally { running = false; result.busy = false; }
+  } catch (error) { result.error = error.message; result.traceError={error:error.message,stack:error.stack}; }
+  finally {
+    if(result.tabId)await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},func:error=>{const api=globalThis.autoApplyContent;if(error)api?.trace("autofill","error",null,error);return api?.endTrace();},args:[result.traceError || null]}).catch(()=>{});
+    running = false; result.busy = false;
+  }
   await report(result);
   if (!result.error && result.writing?.length) {
     const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
@@ -353,6 +360,9 @@ async function action(message) {
       if(!frame) throw Error('No skills tag field found.');
       const [filled]=await chrome.scripting.executeScript({target:{tabId:tab.id,frameIds:[frame.frameId]},func:skills=>globalThis.autoApplyContent.autofillSkills(skills),args:[profile.skills || []]});
       return filled.result;
+    } catch(error) {
+      await saveTrace({host:new URL(tab.url).hostname,kind:'skills',entries:[{timestamp:new Date().toISOString(),step:'skills',action:'error',error:error.message,stack:error.stack}]}).catch(()=>{});
+      throw error;
     } finally {skillsRunning=false;}
   }
   if(message.type==='autofill' && skillsRunning) throw Error('Wait for skills autofill to finish.');
@@ -630,4 +640,16 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     api('/ext/skills/choose',{skill:message.skill,options:message.options});
   request.then(respond,()=>respond({choice:null,aliases:{}}));
   return true;
+});
+
+async function saveTrace(trace) {
+  const saved=await api('/ext/trace',trace);
+  await chrome.storage.session.set({lastTrace:{filename:saved.filename,saved:new Date().toISOString()}});
+  return saved;
+}
+
+// Content traces contain only extension actions and structural option metadata.
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  if(sender.id!==chrome.runtime.id || message.type!=='save-trace')return;
+  saveTrace(message.trace).then(respond).catch(error=>respond({error:error.message}));return true;
 });

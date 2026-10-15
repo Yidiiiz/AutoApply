@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import re
 import time
+import threading
 import uuid
 from urllib.parse import urlsplit
 
@@ -255,6 +256,39 @@ def match(dashboard, payload):
 def secondary_address(label):
     label = re.sub(r'[^a-z0-9]+', ' ', normalize(label)).strip()
     return bool(re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', label))
+
+
+_TRACE_LOCK = threading.Lock()
+
+
+def trace(dashboard, payload):
+    """Persist bounded diagnostics from the paired extension, with fixed retention."""
+    host, kind, entries = payload.get('host'), payload.get('kind'), payload.get('entries')
+    if not isinstance(host, str) or not re.fullmatch(r'[a-zA-Z0-9.-]{1,253}', host):
+        raise SettingsRejected('Invalid trace host')
+    if kind not in {'autofill', 'skills', 'section', 'fill'}:
+        raise SettingsRejected('Invalid trace kind')
+    if not isinstance(entries, list) or len(entries) > 2000 or any(not isinstance(row, dict) for row in entries):
+        raise SettingsRejected('Trace entries must contain at most 2000 objects')
+    allowed = {'timestamp', 'step', 'action', 'label', 'automation_id', 'element_id', 'value',
+               'texts', 'total', 'scrollTop', 'rows', 'target', 'verified', 'aria_label', 'pill',
+               'reason', 'error', 'stack', 'observed'}
+    rows = [{key: value for key, value in row.items() if key in allowed} for row in entries]
+    data = dict(host=host, kind=kind, started=str(payload.get('started', ''))[:100],
+                ended=str(payload.get('ended', ''))[:100], entries=rows,
+                truncated=payload.get('truncated') is True)
+    encoded = json.dumps(data, ensure_ascii=False)
+    if len(encoded.encode('utf-8')) > 1024 * 1024:
+        raise SettingsRejected('Trace exceeds 1 MB')
+    directory = dashboard.config.private / 'traces'
+    with _TRACE_LOCK:
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = host.lower() + '-' + str(time.time_ns()) + '-' + kind + '.json'
+        (directory / filename).write_text(encoded, encoding='utf-8')
+        files = sorted(directory.glob('*.json'), key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        for old in files[30:]:
+            old.unlink(missing_ok=True)
+    return dict(ok=True, filename=filename)
 
 
 def snapshot(dashboard, payload):
@@ -521,9 +555,9 @@ def skill_aliases(dashboard, payload):
 def skill_choose(dashboard, payload):
     skill = _text(payload, 'skill', 200, required=True).strip()
     options = payload.get('options')
-    if not isinstance(options, list) or len(options) > 200 or any(
+    if not isinstance(options, list) or len(options) > 2000 or any(
             not isinstance(item, str) or not item.strip() or len(item) > 300 for item in options):
-        raise SettingsRejected('options must be a list of at most 200 skill names')
+        raise SettingsRejected('options must be a list of at most 2000 skill names')
     aliases = skill_aliases(dashboard, {})['aliases']
     targets = {_skill_key(skill), _skill_key(aliases.get(_skill_key(skill), ''))}
     choice = next((item for item in options if _skill_key(item) in targets), None)
@@ -701,7 +735,7 @@ def unapplied(dashboard, payload):
     return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
 
 
-ROUTES = {('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
+ROUTES = {('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
           ('POST', '/ext/skills/plan'): skill_plan, ('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
