@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8">
+<style>input{min-height:24px}[data-automation-id=activeListContainer]{height:90px;overflow:auto;width:400px;border:1px solid}[role=option]{height:30px;box-sizing:border-box}</style>
+<h1>My Experience</h1><form><div data-automation-id="formField-skills"><label for="skills--skills">Skills</label><div data-automation-id="multiSelectContainer"><ul data-automation-id="selectedItemList"><li data-automation-id="selectedItem">Python</li></ul><div data-automation-id="multiselectInputContainer"><div data-automation-id="monikerSearchBox"><input data-automation-id="searchBox" id="skills--skills"></div></div></div></div></form>
+<script>
+window.mode='pill';window.searches=[];window.activations=[];window.scrolls=[];window.replacements=0;window.inertClicks=0;
+const input=document.querySelector('#skills--skills'),pills=document.querySelector('ul');
+const names=['AI Workflow Integration','SAP Workflows','AI Workflow Design','AI Workflow Management','Rust','AI Workflows','Workflow Automation','Unrelated'];
+const selected=new Set(['Python']);let popup,swapOnPointer=true;
+function pill(name){if([...pills.children].some(p=>p.textContent===name))return;const item=document.createElement('li');item.dataset.automationId='selectedItem';item.textContent=name;pills.append(item);}
+input.oninput=()=>{if(!input.value)popup?.remove();};
+input.onkeydown=event=>{
+ if(event.key==='Escape'){popup?.remove();return;}
+ if(event.key!=='Enter')return;event.preventDefault();searches.push(input.value);popup?.remove();
+ popup=document.createElement('div');popup.dataset.automationId='responsiveMonikerPrompt';
+ popup.innerHTML='<div data-automation-id="activeListContainer" role="listbox"><div role="presentation"></div></div>';document.body.append(popup);
+ const list=popup.firstElementChild,content=list.firstElementChild;
+ function render(){
+  const first=Math.floor(list.scrollTop/30);content.replaceChildren();
+  const top=document.createElement('div');top.style.height=first*30+'px';content.append(top);
+  for(const [offset,name] of names.slice(first,first+3).entries()){
+   const row=document.createElement('div');row.role='option';row.dataset.automationId='menuItem';
+   row.id=name==='AI Workflows'?'menuItem-AI Workflows':'menuItem-REMOTE_SKILL-'+(271000+first+offset);
+   row.setAttribute('aria-label',name+(selected.has(name)?' checked':' not checked'));
+   row.innerHTML='<div data-automation-id="promptLeafNode"><div data-automation-id="checkbox"><input type="checkbox" data-automation-id="checkboxPanel"></div><div data-automation-id="promptOption"></div></div>';
+   row.querySelector('[data-automation-id=promptOption]').textContent=name;
+   const check=row.querySelector('input');check.id='opaque-control-'+(first+offset);check.checked=selected.has(name);
+   row.onclick=event=>{if(event.target===row)inertClicks++;}; // The observed outer row is inert.
+   check.onpointerdown=()=>{if(name==='AI Workflows' && swapOnPointer){swapOnPointer=false;replacements++;render();}};
+   check.onclick=event=>{
+    event.stopPropagation();activations.push(name);
+    if(mode==='transient'){setTimeout(render,80);return;} // Native checked property only; no committed selection.
+    if(mode==='stale-label'){row.setAttribute('aria-label',name+' checked');render();return;} // Detached node lies.
+    if(selected.has(name)){selected.delete(name);check.checked=false;}else selected.add(name);
+    render(); // Commit replaces the activated node before verification.
+    if(mode==='pill')setTimeout(()=>pill(name),120);
+   };
+   content.append(row);
+  }
+  const bottom=document.createElement('div');bottom.style.height=Math.max(0,names.length-first-3)*30+'px';content.append(bottom);
+ }
+ list.onscroll=()=>{scrolls.push(list.scrollTop);setTimeout(render,30);};setTimeout(render,30);
+};
+document.querySelector('form').onsubmit=event=>{event.preventDefault();throw Error('Submission forbidden');};
+</script>

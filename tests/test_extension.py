@@ -71,7 +71,7 @@ def extension_server():
             if self.path.startswith("/ext/"):
                 self.ext(None)
                 return
-            file = {"/t047.html": "t047.html", "/t046.html": "t046.html", "/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
+            file = {"/t048.html": "t048.html", "/t047.html": "t047.html", "/t046.html": "t046.html", "/greenhouse-education.html": "greenhouse_education.html", "/t044.html": "t044.html", "/t040.html": "t040.html", "/t039.html": "t039.html", "/workday-experience.html": "workday_experience.html", "/workday-robust.html": "workday_robust.html", "/sections.html": "sections.html", "/phone.html": "phone.html", "/form.html": "form.html", "/frame.html": "frame.html", "/greenhouse.html": "greenhouse.html",
                     "/async_search.html": "async_search.html", "/needs_input.html": "needs_input.html",
                     "/batch-one.html": "batch_form.html", "/batch-two.html": "batch_form.html", "/job.html": "batch_job.html", "/workday-job.html": "workday_job.html", "/workday-signin.html": "workday_signin.html", "/workday-spa.html": "workday_spa.html"}.get(self.path)
             if not file:
@@ -1918,3 +1918,63 @@ def test_t047_virtual_skills_education_and_trace(loaded_extension, extension_ser
     assert any(step['action'] == 'scrolled' for step in steps)
     assert any(step['action'] == 'verified' and step.get('verified') for step in steps)
     assert not any(path == '/ext/skills/choose' for path, _, _ in requests)
+
+
+@pytest.mark.parametrize('mode', ['pill', 'label', 'transient', 'stale-label'])
+def test_t048_inert_workday_row_activates_inner_control(loaded_extension, extension_server, mode):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server, key=KEY))
+    page = context.new_page()
+    page.goto(server + '/t048.html')
+    page.evaluate('value=>window.mode=value', mode)
+    # Prove this fixture reproduces the real failure: the exact outer row does nothing.
+    search = page.locator('#skills--skills')
+    search.fill('AI Workflows')
+    search.press('Enter')
+    expect(page.locator('[role=option]')).to_have_count(3)
+    page.locator('[role=listbox]').evaluate('list=>{list.scrollTop=150;list.dispatchEvent(new Event("scroll"));}')
+    row = page.locator('[role=option]').filter(has=page.locator('[data-automation-id=promptOption]', has_text=re.compile('^AI Workflows$')))
+    expect(row).to_be_visible()
+    row.evaluate('row=>row.click()')
+    assert page.evaluate('inertClicks') == 1
+    assert page.evaluate('activations') == []
+    assert row.get_attribute('aria-label') == 'AI Workflows not checked'
+    search.press('Escape')
+    page.evaluate('searches.length=0')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+
+    def fill():
+        return worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},
+            func:()=>globalThis.autoApplyContent.autofillSkills(['Python','AI Workflows'])}))[0].result""", tab_id)
+
+    result = fill()
+    committed = mode in {'pill', 'label'}
+    assert result['added'] == int(committed)
+    assert result['skipped'] == int(not committed)
+    assert page.evaluate('activations') == ['AI Workflows']
+    assert page.evaluate('replacements') == 1
+    assert max(page.evaluate('scrolls')) >= 90
+    assert page.evaluate('[...selected]') == (['Python', 'AI Workflows'] if committed else ['Python'])
+    assert page.locator('[data-automation-id=selectedItem]').all_text_contents() == (
+        ['Python', 'AI Workflows'] if mode == 'pill' else ['Python'])
+    assert search.input_value() == ''
+    assert page.evaluate('searches') == ['AI Workflows']
+    steps = [entry for path, _, data in requests if path == '/ext/trace' for entry in data['entries']]
+    clicked = next(step for step in steps if step['step'] == 'skills' and step['action'] == 'clicked')
+    assert clicked['target'] == 'AI Workflows'
+    assert clicked['target_tag'] == 'input'
+    assert clicked['target_automation_id'] == 'checkboxPanel'
+    assert any(step['action'] == 'activation interrupted' for step in steps)
+    verified = next(step for step in steps if step['step'] == 'skills' and step['action'] == 'verified')
+    assert verified['verified'] is committed
+    assert verified['committed'] is committed
+    assert verified['pill'] == ('AI Workflows' if mode == 'pill' else '')
+    assert verified['aria_label'] == ('AI Workflows checked' if committed else 'AI Workflows not checked')
+    assert not any(path == '/ext/skills/choose' for path, _, _ in requests)
+    if committed:
+        # Both an existing pill and a checked virtual row must survive another fill.
+        again = fill()
+        assert again['skipped'] == 0 and again['added'] == 0
+        assert page.evaluate('activations') == ['AI Workflows']
+        assert page.evaluate('[...selected]') == ['Python', 'AI Workflows']

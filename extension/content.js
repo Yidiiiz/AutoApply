@@ -920,12 +920,15 @@
   function skillInputs() {
     return Array.from(document.querySelectorAll('input,[role="combobox"]')).filter(el=>visible(el) && isSkillsField(el) && !el.parentElement?.closest('[role="combobox"]'));
   }
-  function pointerClick(element) {
+  function pointerClick(element, current=()=>true) {
     for (const type of ['pointerover','pointerdown','mousedown','pointerup','mouseup']) {
       const EventType=type.startsWith('pointer')?PointerEvent:MouseEvent;
+      if (!element.isConnected || !current()) return false;
       element.dispatchEvent(new EventType(type,{bubbles:true,button:0,pointerId:1,pointerType:'mouse'}));
     }
+    if (!element.isConnected || !current()) return false;
     element.click();
+    return true;
   }
   let skillsCancelled=false, skillsState={busy:false,progress:''};
   const optionName = option => text(option.querySelector('[data-automation-id="promptOption"]')) ||
@@ -938,19 +941,69 @@
     return [...new Set(skill.split(/\s*(?:\/|&|,|\band\b)\s*/i).filter(Boolean)
       .map(part=>expanded[normal(part)] || part.trim()))];
   }
+  function skillResults(element, previousLists) {
+    const lists=Array.from(document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]'))
+      .filter(list=>!list.matches('[data-automation-id="selectedItemList"]') && visible(list) &&
+        (list.matches('[data-automation-id="activeListContainer"]') || !previousLists.has(list) ||
+         comboContainer(element).contains(list) ||
+         clean(element.getAttribute('aria-controls') || element.getAttribute('aria-owns')).split(' ').includes(list.id)));
+    const rows=[...new Set(lists.flatMap(list=>Array.from(list.querySelectorAll('[role="option"],[data-automation-id="menuItem"],[data-automation-id="promptOption"],option')).map(row=>row.closest('[data-automation-id="menuItem"][role="option"]') || row)))]
+      .filter(row=>visible(row) && row.getAttribute('aria-disabled')!=='true' && optionName(row) &&
+        !/^(loading\b|no (?:items|options|results)\b)/i.test(optionName(row)));
+    return {rows,lists};
+  }
+  async function selectSkillOption(element, name, previousLists, cancelled) {
+    // Never retain virtualized rows or synthesize opaque Workday IDs.
+    const currentRow=()=>skillResults(element,previousLists).rows.find(row=>skillNormal(optionName(row))===skillNormal(name));
+    const evidence=()=>{
+      const row=currentRow(), ariaLabel=row?.getAttribute('aria-label') || '';
+      const checked=row?.getAttribute('aria-checked')==='true' ||
+        Boolean(row?.querySelector('[role="checkbox"][aria-checked="true"]')) ||
+        / checked$/i.test(ariaLabel) && !/ not checked$/i.test(ariaLabel);
+      const pill=selectedSkills(element).some(value=>skillNormal(value)===skillNormal(name))?name:'';
+      return {committed:Boolean(pill || checked),pill,aria_label:ariaLabel,
+        aria_checked:row?.getAttribute('aria-checked') || '',
+        checkbox_checked:Boolean(row?.querySelector('input[type="checkbox"]')?.checked)};
+    };
+    let activated=false;
+    for(let attempt=0;attempt<3 && !cancelled();attempt++) {
+      let row=currentRow();
+      // A checked native property prevents toggling off, but cannot prove commit.
+      if(evidence().committed || row?.querySelector('input[type="checkbox"]')?.checked) break;
+      if(!row) {await pause(60);continue;}
+      row.scrollIntoView({block:'nearest'});
+      await pause(60);
+      row=currentRow();
+      if(!row) continue;
+      if(evidence().committed || row.querySelector('input[type="checkbox"]')?.checked) break;
+      const target=row.querySelector('input[type="checkbox"]') || row.querySelector('[role="checkbox"]') ||
+        row.querySelector('[data-automation-id="checkbox"]') || row;
+      if(target.disabled || target.matches(':disabled') || target.getAttribute('aria-disabled')==='true') break;
+      const details={target:name,element_id:row.id,target_tag:target.tagName.toLowerCase(),
+        target_automation_id:target.getAttribute('data-automation-id') || '',target_id:target.id};
+      activated=true;
+      const clicked=pointerClick(target,()=>currentRow()===row && !evidence().committed && !target.checked);
+      trace('skills',clicked?'clicked':'activation interrupted',element,details);
+      if(clicked) break; // Never repeat an activation while a commit may be pending.
+    }
+    let stableSince=0;
+    const committed=await waitFor(()=>{
+      if(cancelled()) return false;
+      const state=evidence();
+      if(!state.committed) {stableSince=0;return false;}
+      if(!stableSince) stableSince=Date.now();
+      return Date.now()-stableSince>=200 && state;
+    },2000);
+    const final=evidence(), verified=Boolean(committed && final.committed && !cancelled());
+    trace('skills','verified',element,{target:name,verified,...final,stable_ms:verified?Date.now()-stableSince:0});
+    return {verified,activated};
+  }
   async function skillOptions(element, previousLists) {
     const end=Date.now()+4000;
     let signature='', stableSince=Date.now(), popup=false;
     do {
-      const lists=Array.from(document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]'))
-        .filter(list=>!list.matches('[data-automation-id="selectedItemList"]') && visible(list) &&
-          (list.matches('[data-automation-id="activeListContainer"]') || !previousLists.has(list) ||
-           comboContainer(element).contains(list) ||
-           clean(element.getAttribute('aria-controls') || element.getAttribute('aria-owns')).split(' ').includes(list.id)));
+      const {rows,lists}=skillResults(element,previousLists);
       popup ||= lists.length>0;
-      const rows=[...new Set(lists.flatMap(list=>Array.from(list.querySelectorAll('[role="option"],[data-automation-id="menuItem"],[data-automation-id="promptOption"],option')).map(row=>row.closest('[data-automation-id="menuItem"][role="option"]') || row)))]
-        .filter(row=>visible(row) && row.getAttribute('aria-disabled')!=='true' && optionName(row) &&
-          !/^(loading\b|no (?:items|options|results)\b)/i.test(optionName(row)));
       const next=JSON.stringify(rows.map(optionName));
       if(next!==signature || !rows.length) stableSince=Date.now();
       else if(Date.now()-stableSince>=250){trace("options","options seen",element,{texts:rows.slice(0,30).map(optionName),total:rows.length});return {rows,popup,lists};}
@@ -1006,12 +1059,10 @@
             const name=optionName(choice);
             if(selected(name)) ok=true;
             else {
-              trace("skills","clicked",element,{target:optionName(choice),element_id:choice.id});
-              pointerClick(choice);
-              ok=Boolean(await waitFor(()=>selected(name) || (/ checked$/i.test(choice.getAttribute('aria-label') || '') &&
-                !/ not checked$/i.test(choice.getAttribute('aria-label') || '')),2000));
-              trace("skills","verified",element,{verified:ok,aria_label:choice.getAttribute("aria-label"),pill:selected(name)?name:""});
-              if(ok) added++;
+              const selection=await selectSkillOption(element,name,previous,cancelled);
+              ok=selection.verified;
+              if(ok && selection.activated) added++;
+              else if(ok) status='already added';
             }
           }
         } catch(error){trace("skills","error",element,{error:error.message,stack:error.stack});ok=false;}
