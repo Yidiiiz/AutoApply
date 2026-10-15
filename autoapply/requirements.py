@@ -2,6 +2,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,12 @@ def explicit_gate(text):
 
 
 def extract_requirements(description):
+    """Return an independent list; only pure text parsing is cached, never eligibility."""
+    return list(_extract_requirements(description))
+
+
+@lru_cache(maxsize=1024)
+def _extract_requirements(description):
     result, mode, excluded = [], 'outside', False
     for raw in description.splitlines():
         line = re.sub(r'\s+', ' ', raw).strip(' \t•*')
@@ -114,4 +121,4 @@ def extract_requirements(description):
                                                 r'work|comfort\w*|familiar\w*|interest)\b', part, re.I))
             if contextual or explicit or explicit_skill:
                 result.append(Requirement(part, preferred))
-    return list(dict.fromkeys(result))
+    return tuple(dict.fromkeys(result))

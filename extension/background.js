@@ -11,6 +11,32 @@ chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'toggle').catch(cons
 globalThis.autoApplySidebar=showSidebar;
 let running = false;
 const activeResults = new Map(), writingTasks = new Map();
+const skillSelections = new Map();
+function skillContext(result) {
+  const page=result.page || {};
+  return JSON.stringify([result.url?.split(/[?#]/)[0],page.description || '']);
+}
+async function fillMatchedSkills(result) {
+  if(!result.skills_available || cancelledTabs.has(result.tabId)) return;
+  const plan=await api('/ext/skills/plan',{page:result.page || {},application_id:result.matched?.application_id});
+  if (cancelledTabs.has(result.tabId)) return;
+  const context=skillContext(result), saved=skillSelections.get(result.tabId);
+  const skills=saved?.context===context ? [...new Set([...plan.matched.filter(s=>!saved.excluded.includes(s)),...saved.added])] : plan.matched;
+  const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.skillsAvailable()});
+  const frame=frames.find(f=>f.result);
+  if(!frame || !skills.length || cancelledTabs.has(result.tabId)) return;
+  result.skillsBusy=true;await report(result);
+  let filled;
+  try {
+    if (cancelledTabs.has(result.tabId)) return;
+    [filled]=await chrome.scripting.executeScript({target:{tabId:result.tabId,frameIds:[frame.frameId]},func:skills=>globalThis.autoApplyContent.autofillSkills(skills),args:[skills]});
+  } finally {result.skillsBusy=false;}
+  result.skills=filled.result;
+  result.pending=result.pending.filter(field=>!/^type to add skills\b/i.test(field.label));
+  result.summary.needs_input=result.pending.map(field=>field.label);
+  result.sections=(result.sections || []).filter(s=>s.name!=='skills');
+  result.sections.push({name:'skills',message:filled.result?.progress || 'Skills filled'});
+}
 let reporting = Promise.resolve();
 
 function report(result) {
@@ -58,8 +84,10 @@ async function scan(tabId) {
 const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
 
 async function fill(result, values, files = {}) {
+  if (cancelledTabs.has(result.tabId)) return;
   if ((await chrome.tabs.get(result.tabId)).url !== result.url) throw new Error("Application page changed. Run autofill again.");
   for (const frameId of new Set(values.map(value => Number(value.key.split(":")[0])))) {
+    if (cancelledTabs.has(result.tabId)) return;
     const prefix = `${frameId}:`;
     const local = values.filter(value => value.key.startsWith(prefix)).map(value => ({...value, key: value.key.slice(prefix.length)}));
     const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId, frameIds: [frameId]}, world: "ISOLATED",
@@ -83,11 +111,13 @@ async function fill(result, values, files = {}) {
 async function progress(result, text) { result.progress = text; await report(result); }
 
 async function coverLetter(result, answers) {
+  if (cancelledTabs.has(result.tabId)) return;
   result.coverBusy = true;
   result.coverProgress = "Writing cover letter...";
   await report(result);
+  if (cancelledTabs.has(result.tabId)) return;
   const file = await api("/ext/cover-letter", {...context(result), ...(answers ? {answers} : {})});
-  if (activeResults.get(result.tabId) !== result) return;
+  if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
   if (file.questions) {
     result.coverQuestions = file.questions;
     result.coverAnswers = answers || [];
@@ -132,7 +162,9 @@ async function advancePreference(value) {
   return {enabled: Boolean(autoAdvanceProfiles[key])};
 }
 async function clickNext(result, automatic = false) {
+  if (automatic && cancelledTabs.has(result.tabId)) return false;
   const scanned = await scan(result.tabId);
+  if (automatic && cancelledTabs.has(result.tabId)) return false;
   if (automatic && (result.pending.length || result.writing.length || result.summary.errors.length ||
       scanned.sign_in || scanned.fields.some(field => field.required && !field.answered))) return false;
   const [frame] = await chrome.scripting.executeScript({target:{tabId:result.tabId},
@@ -148,6 +180,7 @@ async function matchAndFill(result, prepare = false) {
     const sectionAnswers=[];
     if (prepare) {
     const profile = await api('/ext/profile-sections');
+    if (cancelledTabs.has(result.tabId)) return;
     const prepared = await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',
       func: profile => globalThis.autoApplyContent?.prepareSections(profile), args:[profile]});
     result.sections=[];
@@ -170,6 +203,7 @@ async function matchAndFill(result, prepare = false) {
     // but let profile matching resolve answers beyond that page as before.
     const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
     let {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
+    if (cancelledTabs.has(result.tabId)) return;
     answers.push(...sectionAnswers);
     // Resolve searchable profile answers first; open menus only for unresolved prompts.
     const unresolved = result.fields.filter(field => field.kind === "combobox" && !field.answered &&
@@ -216,6 +250,7 @@ async function loadOptions(result, key) {
 async function rescanRevealed(result) {
   for (let pass = 0; pass < 3; pass++) {
     await delay(500);
+    if (cancelledTabs.has(result.tabId)) return;
     const scanned = await scan(result.tabId);
     const known = new Set(result.fields.map(field=>field.key));
     const added = scanned.fields.filter(field=>!known.has(field.key) && !field.answered);
@@ -240,11 +275,13 @@ export async function autofill(tabId, application, advanceCount = 0) {
     await report(result);
     const traceTab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
     result.tabId=traceTab?.id;
+    cancelledTabs.delete(result.tabId);
     await chrome.scripting.executeScript({target:{tabId:traceTab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.beginTrace('autofill')});
     let scanned = await scan(tabId);
+    if (cancelledTabs.has(scanned.tabId)) return result;
     if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
     await chrome.scripting.executeScript({target:{tabId:scanned.tabId,allFrames:true},func:count=>{const api=globalThis.autoApplyContent;api?.beginTrace('autofill');api?.trace('scan','found',null,{total:count});},args:[scanned.fields.length]});
-    clearTimeout(formWaits.get(scanned.tabId)); formWaits.delete(scanned.tabId); cancelledTabs.delete(scanned.tabId);
+    clearTimeout(formWaits.get(scanned.tabId)); formWaits.delete(scanned.tabId);
     const wasWaiting = activeResults.get(scanned.tabId)?.waiting;
     pendingSteps.delete(scanned.tabId);
     activeResults.delete(scanned.tabId);
@@ -280,22 +317,23 @@ export async function autofill(tabId, application, advanceCount = 0) {
     await progress(result, "Matching profile answers...");
     await matchAndFill(result, true);
     await rescanRevealed(result);
-    result.progress = result.workday_step ?
-      `Workday step: ${result.workday_step} - filled ${result.summary.filled}, needs input ${result.pending.length}` : result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
+    try {await fillMatchedSkills(result);}catch(error){result.summary.errors.push("Skills: "+error.message);}
+    result.progress = result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
   } catch (error) { result.error = error.message; result.traceError={error:error.message,stack:error.stack}; }
   finally {
     if(result.tabId)await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},func:error=>{const api=globalThis.autoApplyContent;if(error)api?.trace("autofill","error",null,error);return api?.endTrace();},args:[result.traceError || null]}).catch(()=>{});
     running = false; result.busy = false;
   }
   await report(result);
-  if (!result.error && result.writing?.length) {
+  if (!cancelledTabs.has(result.tabId) && !result.error && result.writing?.length) {
     const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
       result.summary.errors.push(error.message);
       return report(result);
     }).finally(() => { if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
     writingTasks.set(result.tabId, task);
   }
-  if (!result.error && !result.waiting && advanceCount < 10 && (await advancePreference()).enabled && await clickNext(result, true)) {
+  if (!cancelledTabs.has(result.tabId) && !result.error && !result.waiting && advanceCount < 10 && (await advancePreference()).enabled && await clickNext(result, true)) {
+    if (cancelledTabs.has(result.tabId)) return result;
     pendingSteps.delete(result.tabId);
     return autofill(result.tabId, result.matched, advanceCount + 1);
   }
@@ -303,24 +341,26 @@ export async function autofill(tabId, application, advanceCount = 0) {
 }
 
 async function continueWriting(result) {
+  if (cancelledTabs.has(result.tabId)) return;
   for (const field of [...result.writing].filter(field => field.kind !== "file")) {
     if (!result.writing.some(item => item.key === field.key)) continue;
-    if (activeResults.get(result.tabId) !== result) return;
+    if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
     result.writingProgress = 'Writing: ' + field.label + '...';
     await report(result);
     try {
+      if (cancelledTabs.has(result.tabId)) return;
       const written = await api("/ext/write", {...context(result), question: field.label, max_length: field.max_length,
         instruction: field.max_length === null ? "" : 'Use at most ' + field.max_length + ' characters.'});
-      if (activeResults.get(result.tabId) !== result) return;
+      if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
       await fill(result, [{key: field.key, status: "RESOLVED", value: written.answer, source: "AI"}]);
       await rescanRevealed(result);
       result.writingProgress = 'Answer filled: ' + field.label;
       if (written.warning) result.summary.errors.push(field.label + ': ' + written.warning);
     } catch (error) { result.writingProgress = field.label + ': ' + error.message; result.summary.errors.push(result.writingProgress); }
-    if (activeResults.get(result.tabId) !== result) return;
+    if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
     await report(result);
   }
-  if (activeResults.get(result.tabId) !== result) return;
+  if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
   if (result.writing.some(field => field.kind === "file" && /cover/i.test(field.label))) {
     try { await coverLetter(result); }
     catch (error) { result.coverProgress = 'Cover letter error: ' + error.message; result.summary.errors.push(result.coverProgress); }
@@ -330,19 +370,25 @@ async function continueWriting(result) {
 }
 
 async function advanceAfterWriting(result) {
-  if (!running && activeResults.get(result.tabId) === result && (await advancePreference()).enabled && await clickNext(result,true)) {
+  if (!running && !cancelledTabs.has(result.tabId) && activeResults.get(result.tabId) === result && (await advancePreference()).enabled && await clickNext(result,true)) {
+    if (cancelledTabs.has(result.tabId)) return;
     pendingSteps.delete(result.tabId); await autofill(result.tabId,result.matched);
   }
 }
 let skillsRunning=false;
 async function action(message) {
+  if(message.type==='skill-selection') {
+    const id=message.tabId || (await chrome.tabs.query({active:true,currentWindow:true}))[0]?.id;
+    if(message.selection)skillSelections.set(id,message.selection);
+    return {ok:true,selection:skillSelections.get(id)};
+  }
   if (message.type === 'skills-available') {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
     if (!tab?.id || !/^https?:\/\//.test(tab.url || '')) return {skills_available:false};
     // Button discovery must not rescan and replace records during autofill.
     const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},
       func:()=>({available:globalThis.autoApplyContent?.skillsAvailable(),page:globalThis.autoApplyContent?.skillsPage()})});
-    return {skills_available:frames.some(frame=>frame.result?.available),page:frames.find(frame=>frame.frameId===0)?.result?.page};
+    return {tabId:tab.id,url:tab.url,matched:activeResults.get(tab.id)?.matched,skills_available:frames.some(frame=>frame.result?.available),page:frames.find(frame=>frame.frameId===0)?.result?.page};
   }
   if(['autofill-skills','cancel-skills','skills-status'].includes(message.type)) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
@@ -448,7 +494,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });
@@ -458,10 +504,12 @@ chrome.commands.onCommand.addListener(command => {
 });
 
 // Alarms wake a suspended MV3 worker; the short timer advances an active run promptly.
-let batchBusy = false;
-async function saveRun(run, changePause = false) {
+let batchBusy = false, runEpoch = 0;
+const staleRun = epoch => epoch !== runEpoch;
+async function saveRun(run, changePause = false, epoch) {
   if (changePause) await chrome.storage.session.set({chromeRunPaused: Boolean(run.paused)});
   const {chromeRunPaused = false} = await chrome.storage.session.get("chromeRunPaused");
+  if(epoch!==undefined && staleRun(epoch))return;
   run.paused = chromeRunPaused;
   await chrome.storage.session.set({chromeRun: run});
   await chrome.runtime.sendMessage({type: "run-status", run}).catch(() => {});
@@ -504,30 +552,43 @@ async function openApplication(result) {
   return result;
 }
 export async function runTick() {
-  if (batchBusy || running) return;
+  if (batchBusy || running || skillsRunning) return;
   batchBusy = true;
+  const epoch=runEpoch;
   let {chromeRun: run = {paused: false, index: 0, total: 0}} = await chrome.storage.session.get("chromeRun");
   try {
     const {chromeRunPaused = false} = await chrome.storage.session.get("chromeRunPaused");
     if (chromeRunPaused) return;
     if (!run.current) {
       const item = await api("/ext/run/next");
+      if(staleRun(epoch)) return;
       if (item.wait) return;
-      if (item.done) { run.active = false; await saveRun(run); return; }
+      if (item.done) { run.active = false; await saveRun(run,false,epoch); return; }
       run = {...run, active: true, current: item, index: item.index || run.index + 1, total: item.total || run.total, error: ""};
-      await saveRun(run);
+      await saveRun(run,false,epoch);
     }
+    if(staleRun(epoch)) return;
     if (!run.result) {
       try {
+        const status=await api('/ext/run/status');
+        if(staleRun(epoch)) return;
+        // Dashboard cancellation invalidates an already claimed item too.
+        if(status.items && !status.items.some(i=>i.application_id===run.current.application_id && i.run_id===run.current.run_id && i.state==='opened')) {
+          delete run.current;delete run.tabId;delete run.result;run.active=false;await saveRun(run,false,epoch);return;
+        }
         if (!run.tabId) {
           const tab = await chrome.tabs.create({url: run.current.url, active: true});
+          if(staleRun(epoch)) return;
           run.tabId = tab.id;
-          await saveRun(run);
+          await saveRun(run,false,epoch);
         }
         await waitForTab(run.tabId);
+        if(staleRun(epoch)) return;
         await showSidebar(run.tabId);
+        if(staleRun(epoch)) return;
         const result = await autofill(run.tabId, run.current);
         await writingTasks.get(result.tabId);
+        if(staleRun(epoch)) return;
         const prompts = result.pending?.length || result.writing?.length || result.coverQuestions?.length;
         run.result = {application_id: run.current.application_id,
           state: result.state === "needs_input" ? "needs_input" : result.error ? "failed" : prompts ? "needs_input" : result.summary?.errors.length ? "failed" : "filled",
@@ -535,17 +596,19 @@ export async function runTick() {
       } catch (error) {
         run.result = {application_id: run.current.application_id, state: "failed", detail: error.message.slice(0, 2000)};
       }
+      if(staleRun(epoch)) return;
       run.result.run_id = run.current.run_id;
-      await saveRun(run);
+      await saveRun(run,false,epoch);
     }
     try { await api("/ext/run/result", run.result); }
     catch (error) {
       // Cancellation (or a replaced completed run) makes this result stale.
       if (!/not open in this run/i.test(error.message)) throw error;
     }
+    if(staleRun(epoch)) return;
     delete run.current; delete run.tabId; delete run.result;
-    await saveRun(run);
-  } catch (error) { run.error = error.message; await saveRun(run); }
+    await saveRun(run,false,epoch);
+  } catch (error) { if(!staleRun(epoch)){run.error = error.message; await saveRun(run,false,epoch);} }
   finally { batchBusy = false; }
 }
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "chrome-run") runTick(); });
@@ -573,9 +636,24 @@ chrome.tabs.onRemoved.addListener(async tabId => {
   await chrome.storage.session.set({tabResults, autofillTabs});
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")) || message.type !== "run-pause") return;
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("")) || ! ["run-pause","run-cancel","run-skip"].includes(message.type)) return;
+  if(message.type!=='run-pause')runEpoch++;
   (async () => {
     const {chromeRun: run = {index: 0, total: 0}} = await chrome.storage.session.get("chromeRun");
+    if(message.type!=='run-pause') {
+      // Advance the epoch before any await; in-flight fills cannot publish or open another tab.
+      const current=run.current;
+      if(message.type==='run-cancel'){run.paused=true;await saveRun(run,true);}
+      if(run.tabId) {
+        cancelWait(run.tabId);
+        await chrome.scripting.executeScript({target:{tabId:run.tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.cancelSkills()}).catch(()=>{});
+      }
+      await api(message.type==='run-cancel'?'/ext/run/cancel':'/ext/run/skip', message.type==='run-cancel'?{run_id:current?.run_id}:{application_id:current?.application_id,run_id:current?.run_id});
+      delete run.current;delete run.tabId;delete run.result;
+      run.active=message.type!=='run-cancel';run.error='';
+      if(message.type==='run-cancel'){run.paused=false;await saveRun(run,true);}else await saveRun(run);
+      return run;
+    }
     run.paused = Boolean(message.paused); await saveRun(run, true);
     if (!run.paused) runTick();
     return run;

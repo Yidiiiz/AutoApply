@@ -340,6 +340,10 @@ class Database(ListingStore):
             self.flush_history()
 
     def setting(self, key, default=None):
+        # Raw settings from this selection's DB snapshot, never cached decisions.
+        settings = getattr(self, '_discovery_settings', None)
+        if settings is not None:
+            return settings.get(key, default)
         row = self.one("SELECT value FROM settings WHERE key=?", (key,))
         return json.loads(row["value"]) if row else default
 

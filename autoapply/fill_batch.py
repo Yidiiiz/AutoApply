@@ -143,11 +143,14 @@ def discover(db, config, seen=(), *, details=False):
                         AND s.value NOT IN ('false','null','0'))
         ORDER BY j.priority DESC,j.discovered_at,a.id''', (now(),))
     from .candidate_policy import preflight
-    from .answers import AnswerResolver
     from .conflicts import ConflictIndex
-    snapshot = AnswerResolver(config, db).refresh()
+    settings = {r['key']: json.loads(r['value']) for r in db.rows("""SELECT key,value FROM settings
+        WHERE key='controlled_application_id' OR key LIKE 'verified_fact:%'
+        OR key LIKE 'duplicate_submission_guard:%'""")}
+    snapshot = config.profile_snapshot().with_overrides(settings)
     # One protected-history scan per selection pass, not one per candidate.
     db._conflict_index = ConflictIndex(db)
+    db._discovery_settings = settings
     db._discovery_applications = {r['id']: r for r in rows}
     try:
         return [r if details else r['id'] for r in rows if r['id'] not in EXCLUDED | PROTECTED and r['id'] not in seen
@@ -157,6 +160,7 @@ def discover(db, config, seen=(), *, details=False):
     finally:
         db._conflict_index = None
         db._discovery_applications = None
+        db._discovery_settings = None
 
 
 async def checkpoint(engine, app_id, page):

@@ -360,3 +360,19 @@ async def test_engine_local_fixture_requests_only_four_unresolved(config, db, li
         engine.fill_invariant.check()
     finally:
         await engine.close()
+
+
+def test_requirement_text_cache_is_bounded_and_returns_fresh_lists():
+    from dataclasses import FrozenInstanceError
+    from autoapply.requirements import _extract_requirements
+    description = "Required qualifications\nPython experience required\nPreferred qualifications\nSQL preferred"
+    original = extract_requirements(description)
+    assert original and isinstance(_extract_requirements(description), tuple)
+    assert _extract_requirements.cache_info().maxsize == 1024
+    with pytest.raises(FrozenInstanceError):
+        original[0].text = "poison"
+    original.clear()
+    assert [r.text for r in extract_requirements(description)] == ["Python experience required", "SQL preferred"]
+    changed = description.replace("Python", "Java")
+    assert extract_requirements(changed)[0].text == "Java experience required"
+    assert extract_requirements(description)[0].text == "Python experience required"

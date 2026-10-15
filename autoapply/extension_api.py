@@ -241,7 +241,7 @@ def profile_sections(dashboard, payload):
 
 def ping(dashboard, payload):
     identity = dashboard.config.profile.get('identity', {})
-    return dict(ok=True, name='AutoApply', profile_name=' '.join(
+    return dict(ok=True, name='AutoApply', profile_revision=dashboard.config.profile_snapshot().revision, profile_name=' '.join(
         str(identity.get(k) or '') for k in ('first_name', 'last_name')).strip())
 
 
@@ -576,12 +576,6 @@ def skill_choose(dashboard, payload):
     return dict(choice=choice)
 
 
-def _skill_list(value):
-    if isinstance(value, str):
-        value = value.split(',')
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()] if isinstance(value, list) else []
-
-
 def skill_plan(dashboard, payload):
     page = payload.get('page', {})
     if not isinstance(page, dict) or any(not isinstance(page.get(key, ''), str)
@@ -598,22 +592,10 @@ def skill_plan(dashboard, payload):
         if cache_key in cache:
             return {key: list(value) for key, value in cache[cache_key].items()}
     description = page['description'].casefold()
-    matched = [skill for skill in skills if all(re.search(r'(?<!\w)' + re.escape(word) + r'(?!\w)', description)
-               for word in re.findall(r'[\w+#]+', skill.casefold())) and re.findall(r'[\w+#]+', skill)]
+    matched = [skill for skill in skills if re.search(
+        r'(?<![\w+#])' + re.escape(skill.casefold()) + r'(?![\w+#])', description)]
+    # Normal planning is deterministic and profile-supported; never invoke a writer.
     missing = []
-    try:
-        result = dashboard.run_writing(dict(task='skill_plan', skills=skills, page=page, timeout_seconds=8))
-        if isinstance(result, dict) and 'matched' in result:
-            profile = {skill.casefold(): skill for skill in skills}
-            matched = list(dict.fromkeys(profile[item.casefold()] for item in _skill_list(result['matched'])
-                                         if item.casefold() in profile))
-            seen = set(profile)
-            for item in _skill_list(result.get('missing', [])):
-                if item.casefold() not in seen and item.casefold() in description:
-                    missing.append(item)
-                    seen.add(item.casefold())
-    except Exception:
-        pass
     plan = dict(matched=matched, missing=missing, other=[skill for skill in skills if skill not in matched])
     with dashboard._ext_mutex:
         cache = getattr(dashboard, '_ext_skill_plans', {})
@@ -687,9 +669,21 @@ def run_start(dashboard, payload):
 
 def run_cancel(dashboard, payload):
     with dashboard._ext_mutex:
+        if payload.get('run_id') and any(item['run_id'] != payload['run_id'] for item in dashboard._ext_run):
+            raise SettingsRejected('Run has changed', status=409)
         for item in dashboard._ext_run:
             if item['state'] in {'pending', 'opened'}:
                 item.update(state='skipped', detail='Run cancelled')
+    return run_status(dashboard, {})
+
+
+def run_skip(dashboard, payload):
+    application_id = _id(payload.get('application_id'))
+    with dashboard._ext_mutex:
+        item = next((i for i in dashboard._ext_run if i['application_id'] == application_id), None)
+        if not item or item['state'] != 'opened' or payload.get('run_id') != item['run_id']:
+            raise SettingsRejected('Application is not open in this run', status=409)
+        item.update(state='skipped', detail='Skipped by user')
     return run_status(dashboard, {})
 
 
@@ -713,7 +707,7 @@ def run_result(dashboard, payload):
         raise SettingsRejected('Invalid result state or detail')
     with dashboard._ext_mutex:
         item = next((i for i in dashboard._ext_run if i['application_id'] == application_id), None)
-        if not item or item['state'] != 'opened' or payload.get('run_id', item['run_id']) != item['run_id']:
+        if not item or item['state'] != 'opened' or payload.get('run_id') != item['run_id']:
             raise SettingsRejected('Application is not open in this run', status=409)
         item.update(state=state, detail=detail)
     return dict(ok=True)
@@ -742,6 +736,7 @@ ROUTES = {('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_c
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
           ('POST', '/ext/cover-letter'): cover_letter,
           ('GET', '/ext/resume'): resume, ('GET', '/ext/run/next'): run_next,
+          ('POST', '/ext/run/cancel'): run_cancel, ('POST', '/ext/run/skip'): run_skip,
           ('POST', '/ext/run/result'): run_result, ('GET', '/ext/run/status'): extension_run_status}
 
 

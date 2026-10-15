@@ -39,7 +39,7 @@ def test_pairing_cors_settings(http_dashboard, config, db):
         assert request(server, 'GET', path)[0] == 403
         assert ext(http_dashboard, 'GET', path, **{'X-AutoApply-Key': 'wrong'})[0] == 403
     status, data, headers = ext(http_dashboard, 'GET', '/ext/ping')
-    assert status == 200 and data == dict(ok=True, name='AutoApply', profile_name='Test Student')
+    assert status == 200 and data == dict(ok=True, name='AutoApply', profile_name='Test Student', profile_revision=config.profile_snapshot().revision)
     assert headers['Access-Control-Allow-Origin'] == 'chrome-extension://fixture'
     preflight = {'Origin': 'chrome-extension://fixture', 'Access-Control-Request-Method': 'POST'}
     status, _, headers = request(server, 'OPTIONS', '/ext/answers', preflight)
@@ -238,14 +238,15 @@ def test_run_queue(http_dashboard, config, db, listing):
     assert run['current'] is None
     assert web(http_dashboard, '/api/ext-run', dict(application_ids=ids))[0] == 409
     for index, state in enumerate(('needs_input', 'filled')):
-        assert ext(http_dashboard, 'GET', '/ext/run/next')[1]['application_id'] == ordered[index]
+        claimed = ext(http_dashboard, 'GET', '/ext/run/next')[1]
+        assert claimed['application_id'] == ordered[index]
         assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(wait=True)
         status_run = ext(http_dashboard, 'GET', '/ext/run/status')[1]
         assert status_run['poll_age_seconds'] < 2
         assert request(http_dashboard[0], 'GET', '/api/ext-run')[1]['current'] == ordered[index]
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='filled', run_id='stale'))[0] == 409
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='submitted'))[0] == 400
-        assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state=state, detail='Test'))[0] == 200
+        assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], run_id=claimed['run_id'], state=state, detail='Test'))[0] == 200
     assert web(http_dashboard, '/api/ext-run/cancel')[0] == 200
     assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(done=True)
     run = request(http_dashboard[0], 'GET', '/api/ext-run')[1]
@@ -823,15 +824,15 @@ def test_skill_choice_persists_and_validates_alias(http_dashboard, writing_provi
 
 
 def test_skill_plan_parsing_and_cache(http_dashboard, config, writing_provider, monkeypatch):
-    (config.private / 'profile.yaml').write_text(yaml.safe_dump(dict(config.profile, skills=['Python', 'JavaScript', 'Rust'])), encoding='utf-8')
-    writing_provider.result = {'matched': 'javascript, Python, PYTHON, Invented', 'missing': 'Kubernetes, kubernetes, Rust, Imaginary'}
-    payload = {'page': {'title':'Engineer','company':'Fixture','description':'Python JavaScript Kubernetes Rust'}}
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(dict(config.profile, skills=['Python', 'JavaScript', 'Rust', 'C', 'C++', 'Go'])), encoding='utf-8')
+    monkeypatch.setattr(http_dashboard[1], 'run_writing', Mock(side_effect=AssertionError('No AI for planning')))
+    payload = {'page': {'title':'Engineer','company':'Fixture','description':'Python JavaScript Kubernetes Rust C++; ongoing work.'}}
     status, value, _ = ext(http_dashboard, 'POST', '/ext/skills/plan', payload)
-    assert status == 200 and value == {'matched':['JavaScript','Python'], 'missing':['Kubernetes'], 'other':['Rust']}
-    assert writing_provider.requests[-1]['skills'] == ['Python','JavaScript','Rust']
-    count = len(writing_provider.requests)
+    assert status == 200 and value == {'matched':['Python','JavaScript','Rust','C++'], 'missing':[], 'other':['C','Go']}
+    assert not writing_provider.requests
     assert ext(http_dashboard, 'POST', '/ext/skills/plan', payload)[1] == value
-    assert len(writing_provider.requests) == count
+    (config.private / 'profile.yaml').write_text(yaml.safe_dump(dict(config.profile, skills=['Rust'])), encoding='utf-8')
+    assert ext(http_dashboard, 'POST', '/ext/skills/plan', payload)[1]['matched'] == ['Rust']
 
 
 def test_skill_plan_disabled_fallback(http_dashboard, config, monkeypatch):
@@ -858,3 +859,20 @@ def test_t047_trace_paired_bounded_and_retained(http_dashboard, config):
     for change in [dict(host='../escape'), dict(kind='other'), dict(entries=[{}] * 2001),
                    dict(entries=[dict(value='x' * (1024 * 1024))])]:
         assert ext(http_dashboard, 'POST', '/ext/trace', dict(payload, **change))[0] == 400
+
+
+def test_t049_run_skip_cancel_reject_inflight_result(http_dashboard, config, db, listing):
+    ids = queue(db, config, listing, 3)
+    assert web(http_dashboard, '/api/ext-run', dict(application_ids=ids))[0] == 200
+    first = ext(http_dashboard, 'GET', '/ext/run/next')[1]
+    assert ext(http_dashboard, 'POST', '/ext/run/skip', dict(application_id=first['application_id'],run_id='old'))[0] == 409
+    assert ext(http_dashboard, 'POST', '/ext/run/skip', first)[0] == 200
+    assert ext(http_dashboard, 'POST', '/ext/run/result', dict(first,state='filled'))[0] == 409
+    second = ext(http_dashboard, 'GET', '/ext/run/next')[1]
+    assert second['application_id'] == ids[1]
+    assert ext(http_dashboard, 'POST', '/ext/run/cancel', dict(run_id='old'))[0] == 409
+    assert ext(http_dashboard, 'POST', '/ext/run/cancel', dict(run_id=second['run_id']))[0] == 200
+    assert ext(http_dashboard, 'POST', '/ext/run/result', dict(second,state='filled'))[0] == 409
+    assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(done=True)
+    assert [i['state'] for i in ext(http_dashboard, 'GET', '/ext/run/status')[1]['items']] == ['skipped'] * 3
+    assert all(db.application(i)['status'] == 'QUEUED' for i in ids)

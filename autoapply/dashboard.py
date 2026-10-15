@@ -21,13 +21,13 @@ import time
 import webbrowser
 from urllib.parse import parse_qs, quote, urlsplit
 
-from .archive import ApplicationHistory
 from .database import Database
 from .dashboard_ui import PAGE
 from .dashboard_settings import DashboardSettings, SettingsRejected, MAX_RESUME_BYTES
 from .dashboard_answers import DashboardAnswers
 from . import cv, descriptions, extension_api
 from .fill_batch import discover
+from .freshness import utc, parse_posted, window
 from . import liveness
 from .models import State, now
 from .runtime import ProcessLock
@@ -175,8 +175,9 @@ class Dashboard:
         self.config = config
         self.path = db.one('PRAGMA database_list')['file']
         self.history_root = db.history.root
-        # sync holds the DB write transaction and history lock, serializing this cache.
-        self.history = ApplicationHistory(self.history_root)
+        # Reuse initialized records; canonical history reads/sync share the root lock
+        # and revision token, including changes made by other processes.
+        self.history = db.history
         self.interval = liveness_minutes * 60
         self.token = secrets.token_hex(32)
         self._mutex = threading.Lock()
@@ -188,6 +189,7 @@ class Dashboard:
         self._priority_key = None
         self._priority_rows = []
         self._priority_at = 0
+        self._priority_deadline = 0
         self._sweep_mutex = threading.Lock()
         self._stop = threading.Event()
         self._observations = {}
@@ -219,9 +221,11 @@ class Dashboard:
             db.conn.execute('BEGIN')
             try:
                 key = (db.one('PRAGMA data_version')['data_version'],
-                       self.config.profile_snapshot().revision, json.dumps(self.config.data, sort_keys=True))
+                       self.config.profile_snapshot().revision, json.dumps(self.config.data, sort_keys=True),
+                       self.history._cache_revision())
                 # Retry deadlines and listing age can change eligibility without a DB write.
-                if key != self._priority_key or time.monotonic() - self._priority_at >= 30:
+                if (key != self._priority_key or time.monotonic() - self._priority_at >= 30
+                        or time.time() >= self._priority_deadline):
                     rows = []
                     for rank, app in enumerate(discover(db, self.config, details=True), 1):
                         url = app.get('canonical_url') or ''
@@ -231,6 +235,22 @@ class Dashboard:
                                          url=url if url.startswith(('https://', 'http://')) else ''))
                     self._priority_rows, self._priority_key = rows, key
                     self._priority_at = time.monotonic()
+                    # Re-evaluate at the earliest retry or age boundary, even without writes.
+                    reference = utc()
+                    deadlines = [reference.timestamp() + 30]
+                    duration = window(self.config['jobs']['max_listing_age_days'])
+                    for candidate in db.rows("""SELECT a.retry_at,j.posted_at FROM applications a
+                            JOIN jobs j ON j.id=a.job_id WHERE a.status IN ('QUEUED','RETRY')
+                            AND j.listing_active=1 AND j.listing_status='ACTIVE'"""):
+                        posted = parse_posted(candidate['posted_at'], reference)
+                        dates = [posted + duration if posted else None, posted]
+                        if candidate['retry_at']:
+                            try:
+                                dates.append(utc(candidate['retry_at']))
+                            except (ValueError, TypeError):
+                                pass
+                        deadlines.extend(date.timestamp() for date in dates if date and date >= reference)
+                    self._priority_deadline = min(deadlines)
                 rows = [dict(row) for row in self._priority_rows]
             finally:
                 db.conn.execute('ROLLBACK')

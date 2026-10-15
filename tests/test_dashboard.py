@@ -539,6 +539,7 @@ def test_priority_cache_and_bulk_details(dashboard, config, db, listing, monkeyp
     original_one = _Connection.one
     def no_row_lookup(self, sql, args=()):
         assert 'WHERE a.id=?' not in sql, 'per-row detail query'
+        assert 'SELECT value FROM settings WHERE key=?' not in sql, 'per-candidate settings query'
         return original_one(self, sql, args)
     monkeypatch.setattr(_Connection, 'one', no_row_lookup)
     first = dashboard.priority()['rows']
@@ -582,6 +583,7 @@ def test_dashboard_database_skips_history_maintenance(config, db, listing, monke
 
 def test_dashboard_connections_share_history_cache(dashboard, config, db, listing, monkeypatch):
     first, second = queue(db, config, listing, 2)
+    assert dashboard.history is db.history
     scan = Mock(wraps=dashboard.history._scan)
     write = Mock(wraps=dashboard.history._write)
     monkeypatch.setattr(dashboard.history, '_scan', scan)
@@ -593,14 +595,19 @@ def test_dashboard_connections_share_history_cache(dashboard, config, db, listin
         folder = dashboard.history.paths[str(app_id)]
         assert json.loads((folder / 'application.json').read_text(encoding='utf-8'))['description'] == text * 20
         assert (folder / 'job_description.txt').read_text(encoding='utf-8') == text * 20
-    assert scan.call_count == 1
+    assert scan.call_count == 0
     assert [call.args[0]['application_id'] for call in write.call_args_list] == [str(first), str(second)]
     assert db.rows('SELECT * FROM history_dirty') == []
     # Another exporter still invalidates the shared cache through the revision token.
-    descriptions.store(db, db.application(first)['job_id'], 'External description' * 30)
+    exporter = Database(config.private / 'test.sqlite3', startup_maintenance=False, history_maintenance=True)
+    try:
+        assert exporter.history is not dashboard.history
+        descriptions.store(exporter, db.application(first)['job_id'], 'External description' * 30)
+    finally:
+        exporter.close()
     with dashboard.connection(writable=True) as connection:
         descriptions.store(connection, db.application(second)['job_id'], 'Latest description' * 30)
-    assert scan.call_count == 2
+    assert scan.call_count == 1
     assert dashboard.history.records[str(first)]['description'] == 'External description' * 30
 
 
@@ -1640,10 +1647,11 @@ def test_tab_markup_accessibility_themes_polling_and_csp(http_dashboard):
     tabs = [a for t, a in parsed.elements if a.get('role') == 'tab']
     panels = {a['id']: a for t, a in parsed.elements if a.get('role') == 'tabpanel'}
     assert len([a for t, a in parsed.elements if a.get('role') == 'tablist']) == 1
-    assert [a['id'] for a in tabs] == ['tab-run', 'tab-priority', 'tab-applications', 'tab-answers', 'tab-settings']
+    assert [a['id'] for a in tabs] == ['tab-priority', 'tab-applications', 'tab-answers', 'tab-settings', 'tab-run']
     assert [a['aria-selected'] for a in tabs] == ['true', 'false', 'false', 'false', 'false']
     assert [a['tabindex'] for a in tabs] == ['0', '-1', '-1', '-1', '-1']
-    assert 'hidden' not in panels['panel-run']
+    assert 'hidden' not in panels['panel-priority']
+    assert all('hidden' in panel for name, panel in panels.items() if name != 'panel-priority')
     for tab in tabs:
         assert panels[tab['aria-controls']]['aria-labelledby'] == tab['id']
     for key in ('ArrowRight', 'ArrowLeft', 'Home', 'End', 'location.hash', 'hashchange'):
@@ -1653,7 +1661,8 @@ def test_tab_markup_accessibility_themes_polling_and_csp(http_dashboard):
     assert 'innerHTML' not in page and 'insertAdjacentHTML' not in page
     assert "a.target='_blank';a.rel='noopener noreferrer'" in page
     assert "u.protocol!=='https:'&&u.protocol!=='http:'" in page
-    assert 'Open application #' in page and 'Review #ID' in page and '!submitted ID' in page
+    assert 'Open application #' in page
+    assert 'Review #ID' not in page and '!submitted ID' not in page  # Removed legacy narration.
     assert 'prefers-color-scheme:dark' in page and ':focus-visible' in page and '--surface:' in page
     assert 'dataset.label' in page and '@media(max-width:480px)' in page
     assert f"script-src 'nonce-{dashboard.token}'" in headers['Content-Security-Policy']
@@ -1922,7 +1931,7 @@ const originalReload=reload;reload=async()=>[];
  // Reload refetches priority and every count, including when an older read is pending.
  const paths=[];request=async path=>{paths.push(path);return path==='/api/status'?{applications:[]}:path==='/api/priority'?{rows:[],sweep:{}}:{applications:[]};};
  let finishOld;loads.priority=new Promise(resolve=>{finishOld=()=>{delete loads.priority;resolve();};});
- statusLoading=null;const reading=originalReload();assert.deepEqual(paths,[]);finishOld();await reading;
+ statusLoading=null;const reading=originalReload();assert.deepEqual(new Set(paths),new Set(['/api/manual','/api/failed','/api/applied','/api/status']));finishOld();await reading;
  assert.deepEqual(new Set(paths),new Set(['/api/priority','/api/manual','/api/failed','/api/applied','/api/status']));
  assert.equal(document.getElementById('count-priority').textContent,'0');
  // Status failures disable controls with reasons and recover without a page reload.
@@ -1998,7 +2007,7 @@ const originalReload=reload;reload=async()=>[];
 '''
     env = dict(os.environ, TZ='America/New_York', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
     script_path = tmp_path / 'dashboard-renderers.js'
-    script_path.write_text(harness + script[:script.index('restoreSearch();loadSettings')]+assertions, encoding='utf-8')
+    script_path.write_text(harness + script[:script.index("document.getElementById('tab-settings').addEventListener")]+assertions, encoding='utf-8')
     result = subprocess.run([executable, str(script_path)], text=True, capture_output=True, env=env, timeout=15)
     assert result.returncode == 0, result.stderr
 
@@ -2015,7 +2024,7 @@ def test_javascript_pagination_sorting_and_application_segments(tmp_path):
     assignment = next(n for n in fn.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'harness' for t in n.targets))
     harness = ast.literal_eval(assignment.value)
     script = PAGE.split('<script nonce="__TOKEN__">', 1)[1].split('</script>', 1)[0]
-    script = script[:script.index('restoreSearch();loadSettings')]
+    script = script[:script.index("document.getElementById('tab-settings').addEventListener")]
     checks = r"""
 const sample=Array.from({length:1083},(_,i)=>({application_id:i+10000,company:'Company '+i,title:'Role',ats:'Lever',posted_at:'2026-10-01'}));
 render({rows:sample,sweep:{}});
@@ -2128,7 +2137,7 @@ def test_javascript_chrome_selection_status_cancel_and_cover_popup(tmp_path):
     harness = harness.replace('const setInterval=()=>{},setTimeout=()=>{},clearTimeout=()=>{};',
                               'const scheduled=[];const setInterval=()=>{},setTimeout=fn=>{scheduled.push(fn);return scheduled.length},clearTimeout=()=>{};')
     script = PAGE.split('<script nonce="__TOKEN__">', 1)[1].split('</script>', 1)[0]
-    script = script[:script.index('restoreSearch();loadSettings')]
+    script = script[:script.index("document.getElementById('tab-settings').addEventListener")]
     checks = r"""
 (async()=>{
 const sample=[1,2,3].map(application_id=>({application_id,url:'https://fixture.test/'+application_id,company:'Fixture',title:'Intern'}));
@@ -2172,3 +2181,156 @@ def test_compact_chrome_run_markup_and_theme_scrollbars():
     for css in (PAGE, Path('extension/shared.css').read_text(encoding='utf-8')):
         assert 'scrollbar-width:thin' in css and 'scrollbar-color:' in css
         assert '::-webkit-scrollbar-thumb' in css and 'border-radius:10px' in css
+
+
+def test_t049_queue_timings(dashboard, config, db, listing):
+    """674 unique ~3.3k descriptions; cold parser, forced rebuild, then queue cache."""
+    import time
+    from autoapply.requirements import _extract_requirements
+    first = queue(db, config, listing, 1)[0]
+    def description(i):
+        intro = (f'Fixture engineering team {i} develops tools for local testing. '
+                 'Our engineers collaborate on product design and maintain reliable systems. '
+                 'The internship provides project experience and code reviews. ')
+        return ('Job description\n' + intro * 13 + '\nResponsibilities\n'
+                + 'Build and test internal tools with the team.\n' * 12
+                + 'Required qualifications\nCurrently enrolled in a Bachelor degree program.\n'
+                + 'Preferred qualifications\nPython experience preferred.\nSQL knowledge preferred.\n'
+                + 'Benefits\nMentoring and learning opportunities.\n')
+    def clone(table, changes):
+        columns = [r['name'] for r in db.rows('PRAGMA table_info(' + table + ')') if r['name'] != 'id']
+        source = db.one('SELECT * FROM ' + table + ' ORDER BY id LIMIT 1')
+        values = [changes.get(k, source[k]) for k in columns]
+        return db.conn.execute('INSERT INTO ' + table + '(' + ','.join(columns) + ') VALUES (' + ','.join('?' for _ in columns) + ')', values).lastrowid
+    ids = [first]
+    db.conn.execute('BEGIN')
+    with db.conn:
+        db.conn.execute('UPDATE jobs SET description=?', (description(0),))
+        for i in range(1, 674):
+            job_id = clone('jobs', dict(company=f'Fixture {i}', canonical_url=f'https://example.test/jobs/{i}', identity_key=f'fixture-{i}', description=description(i)))
+            ids.append(clone('applications', dict(job_id=job_id)))
+    _extract_requirements.cache_clear()
+    start = time.perf_counter()
+    cold = dashboard.priority()['rows']
+    cold_seconds = time.perf_counter() - start
+    cold_cache = _extract_requirements.cache_info()._asdict()
+    dashboard._priority_at = 0
+    start = time.perf_counter()
+    rebuilt = dashboard.priority()['rows']
+    rebuild_seconds = time.perf_counter() - start
+    start = time.perf_counter()
+    warm = dashboard.priority()['rows']
+    warm_seconds = time.perf_counter() - start
+    assert len(cold) == len(rebuilt) == len(warm) == len(ids)
+    assert [r['application_id'] for r in cold] == [r['application_id'] for r in rebuilt] == [r['application_id'] for r in warm]
+    evidence = dict(rows=len(cold), unique_descriptions=674,
+                    average_description_chars=sum(len(description(i)) for i in range(674))/674,
+                    cold_seconds=cold_seconds, forced_rebuild_seconds=rebuild_seconds,
+                    warm_seconds=warm_seconds, cold_parser_cache=cold_cache,
+                    final_parser_cache=_extract_requirements.cache_info()._asdict())
+    output = Path('.tmp/review/t049')
+    output.mkdir(parents=True, exist_ok=True)
+    (output/'representative-timings.json').write_text(json.dumps(evidence, indent=2))
+    print('T049 representative local fixture:', json.dumps(evidence))
+
+
+@pytest.mark.browser
+def test_t049_dashboard_screenshots(http_dashboard, config, db, listing):
+    from playwright.sync_api import sync_playwright
+    queue(db, config, listing, 8)
+    server, dashboard = http_dashboard
+    output = Path('.tmp/review/t049')
+    output.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel='chromium', headless=True)
+        try:
+            context = browser.new_context()
+            calls = []
+            def respond(route):
+                incoming = route.request
+                if not incoming.url.startswith('http://127.0.0.1:8765/'):
+                    route.abort()
+                    return
+                target = incoming.url.removeprefix('http://127.0.0.1:8765')
+                calls.append(target)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    status, body, headers = pool.submit(request, server, incoming.method, target, incoming.all_headers(), incoming.post_data).result()
+                route.fulfill(status=status, body=body if isinstance(body,(str,bytes)) else json.dumps(body), headers=headers)
+            context.route('**/*', respond)
+            page = context.new_page()
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            for theme in ('light','dark'):
+                page.emulate_media(color_scheme=theme)
+                for width in (1440,800):
+                    page.set_viewport_size(dict(width=width,height=900))
+                    page.goto('http://127.0.0.1:8765/#priority')
+                    page.locator('#rows .item').first.wait_for()
+                    page.wait_for_function("document.getElementById('refresh').disabled===false")
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    assert page.locator('main').evaluate('e=>e.scrollWidth<=e.clientWidth')
+                    assert page.locator('#rows .item').first.evaluate("e=>{const boxes=[...e.children].filter(c=>getComputedStyle(c).display!=='none').map(c=>c.getBoundingClientRect());return boxes.every((b,i)=>!i || boxes[i-1].right<=b.left+1)}")
+                    page.screenshot(path=str(output / f'dashboard-{width}-{theme}.png'))
+            assert not errors
+            assert not any(p.startswith(('/api/settings','/api/answers')) for p in calls)
+        finally:
+            browser.close()
+
+
+def test_t049_priority_time_boundaries(dashboard, config, db, listing, monkeypatch):
+    from autoapply.freshness import utc, window
+    ids=queue(db,config,listing,2)
+    base=utc()
+    db.execute('UPDATE jobs SET posted_at=? WHERE id=(SELECT job_id FROM applications WHERE id=?)', ((base-window(30)+timedelta(seconds=1)).isoformat(),ids[0]))
+    db.execute('UPDATE applications SET retry_at=? WHERE id=?', ((base+timedelta(seconds=.5)).isoformat(),ids[1]))
+    clock=[base]
+    def virtual_utc(value=None):
+        return clock[0] if value is None else utc(value)
+    monkeypatch.setattr('autoapply.freshness.utc',virtual_utc)
+    monkeypatch.setattr('autoapply.dashboard.utc',virtual_utc)
+    monkeypatch.setattr('autoapply.dashboard.time.time',lambda:clock[0].timestamp())
+    monkeypatch.setattr('autoapply.fill_batch.now',lambda:clock[0].isoformat())
+    assert [r['application_id'] for r in dashboard.priority()['rows']]==[ids[0]]
+    clock[0]=base+timedelta(seconds=.6)
+    assert [r['application_id'] for r in dashboard.priority()['rows']]==ids
+    clock[0]=base+timedelta(seconds=1.1)
+    assert [r['application_id'] for r in dashboard.priority()['rows']]==[ids[1]]
+
+
+def test_t049_priority_history_token(dashboard, config, db, listing, monkeypatch):
+    queue(db,config,listing,1)
+    selector=Mock(wraps=discover)
+    monkeypatch.setattr('autoapply.dashboard.discover',selector)
+    dashboard.priority()
+    dashboard.priority()
+    assert selector.call_count==1
+    with db.history.locked():
+        db.history._invalidate_readers()
+    dashboard.priority()
+    assert selector.call_count==2
+
+
+def test_t049_canonical_history_reuse_and_duplicate_detection(dashboard, config, db, listing):
+    from autoapply.conflicts import ConflictIndex
+    from autoapply.archive import atomic_json
+    first=queue(db,config,listing,1)[0]
+    original=db.history.records[str(first)]
+    with db.history.locked():
+        for i in range(64):
+            atomic_json(db.history.root/'unknown'/f'fixture-{i}'/'application.json',dict(original,application_id=f'legacy-{i}',application_state='UNKNOWN'))
+        db.history._invalidate_readers()
+    assert dashboard.history is db.history
+    with dashboard.connection() as reader:
+        index = ConflictIndex(reader)
+        assert len(index.history) == 64
+        records = reader.history.list_applications()
+    assert dashboard.history.revision == db.history._cache_revision()
+    assert len(records)==65
+    assert sum(r['application_state']=='UNKNOWN' for r in records)==64
+    assert {r['application_id'] for r in records}=={str(first),*(f'legacy-{i}' for i in range(64))}
+    with db.history.locked():
+        atomic_json(db.history.root/'unknown'/'duplicate'/'application.json',dict(original,application_id='legacy-0',application_state='UNKNOWN'))
+        db.history._invalidate_readers()
+    with pytest.raises(ValueError,match='Duplicate application ID'):
+        with dashboard.connection() as reader:
+            ConflictIndex(reader)

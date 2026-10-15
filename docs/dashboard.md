@@ -9,8 +9,8 @@ enter the dashboard URL and the Chrome extension pairing key from
 toolbar action opens a side panel; **Autofill this page** or **Alt+Shift+F** fills
 the current application and its accessible embedded frames. It preserves existing
 values, attaches the resume, and lists unresolved questions. Orange outlines mark
-required fields needing review. Submission remains manual. AI writing, chat,
-cover-letter generation and batch controls are reserved for later tasks.
+required fields needing review. Submission remains manual. AI writing, chat, cover-letter generation and paired
+Chrome runs remain available.
 See [the extension README](../extension/README.md) for setup and fixture checks.
 
 ## Extension API
@@ -55,7 +55,7 @@ or manual lists. GET `/api/ext-run` returns items and the current opened id;
 POST `/api/ext-run/cancel` skips remaining items. Dashboard writes retain the
 existing same-origin dashboard token requirement. GET `/ext/run/next` claims
 the next pending item; POST `/ext/run/result` accepts `application_id`,
-`state` (filled, needs_input, failed, skipped) and optional `detail`.
+`run_id`, `state` (filled, needs_input, failed, skipped) and optional `detail`.
 Runs live only in dashboard memory. Confirmed manual submissions update an item
 to `submitted` through `/ext/applied`; generic confirmation text requires a submit
 click in the same tab within two minutes. Validation errors prevent detection.
@@ -72,7 +72,10 @@ view without becoming reusable memory. Cover letters generate automatically only
 when an upload field exists; Generate cover letter remains available manually.
 Autofill returns after deterministic fields are filled, so the form can be reviewed
 while AI answers fill progressively and the cover letter is written and attached
-in the background. Separate progress lines show writing, attachment, or errors.
+in the background. Progress lines show pending writing and actionable errors;
+completed writing and attachment narration disappear. Compact field/skill totals,
+Answers rows, the actual page fields/uploads and the cover download show outcomes.
+Sign-in instructions, form waiting/cancellation and retry guidance stay visible.
 Chat uses timestamped bubbles and a one-row composer (Enter sends; Shift+Enter
 adds a newline). Completed answers use compact rows with inline Save/Cancel edits.
 Phone formatting follows the page's national-number and country-code controls;
@@ -92,17 +95,22 @@ Startup skips full history validation/export and listing maintenance. The HTTP
 server begins serving before the first background liveness sweep and browser
 launch. The page loads immediately with an empty queue, then fetches its lists.
 Queue reads cache the existing selector's ranked rows, with candidate details
-fetched in one query. Database commits, profile edits and configuration changes
-invalidate the cache; it also expires after 30 seconds for time-based eligibility.
+fetched in one query. Database commits, profile edits, configuration changes and published history
+revisions invalidate the cache. It expires at the earliest retry/listing-age
+boundary, with a 30-second maximum lifetime. Each selection pass bulk-reads
+only its raw policy settings and protected history, then evaluates every candidate.
+Pure requirement parsing caches at most 1,024 immutable text results and returns
+a fresh list to each caller; applicant eligibility decisions are recomputed.
 GET reads allow 30 seconds. Background list polls retry once quietly before
 showing a friendly message such as `Queue: request timed out`, preserving the
 last successful list.
 
-The dashboard opens on **Run**, with the batch controls at the top. Its 56px fixed
+The dashboard opens on **Queue**. Rare worker controls remain under **Worker**,
+inside **Legacy worker controls**. Its 56px fixed
 navbar shows worker status (Idle, Running, Paused or Stopping) and a 32px
 **Reload data** circular-arrow icon, which only reloads dashboard data. It spins
 while loading and shows elapsed seconds, then a ticking **Updated Ns ago** label
-with the absolute completion time on hover. Reduced-motion preferences stop the spin. Tabs are ordered **Run**, **Queue**, **Applications**, **Answers**, **Settings**.
+with the absolute completion time on hover. Reduced-motion preferences stop the spin. Tabs are ordered **Queue**, **Applications**, **Answers**, **Settings**, **Worker**.
 Applications has a remembered **Needs you**, **Failed**, **Applied** segmented switch
 with counts; its navbar badge shows the Needs you count. Applied includes Not eligible.
 Select a tab with the mouse or Left/Right arrow keys;
@@ -125,7 +133,9 @@ manually. The item disappears immediately from those tabs and appears in
 **Applied**. An eight-second toast offers **Undo**. Unchecking in Applied puts
 a dashboard mark back, with an Undo toast to mark it again. Queue ranks renumber
 immediately after removal; both actions refetch the queue and all tab counts,
-waiting for any older reads to finish before issuing fresh requests. Permanent
+waiting only for each list's own older read before issuing its fresh request.
+A slow inactive list never gates Queue. Answers, Settings and their previews
+load only when opened. Permanent
 records show a disabled checked checkbox with a **Recorded in Discord** tooltip.
 Failed requests restore the item and show an error. Check-offs record a duplicate
 guard; they do not submit to an employer.
@@ -383,8 +393,9 @@ write locks and use bounded timeouts (15 seconds per request). Candidates missin
 descriptions go first, then least recently checked candidates, so the queue rotates
 through the cap. Probe failures count as `UNKNOWN`; `described` counts enrichment.
 After all probes finish, descriptions and retirement results are written in one
-short batch with one history flush. Dashboard connections share a history cache;
-the existing archive revision token avoids rescanning unchanged records.
+short batch with one history flush. Dashboard and its connections reuse the
+canonical initialized `db.history`; the existing archive revision token avoids
+rescanning unchanged records and invalidates readers after another exporter writes.
 The next queue rebuild re-evaluates eligibility using the stored text: PhD
 rejections leave the queue without retiring or changing application state.
 The page shows sweep start/end times, counts, errors and results; this monitoring
@@ -712,3 +723,34 @@ The Fill tab shows a skills plan when a tag input is available. Matched profile 
 Workday searches one skill at a time and reads its document-level results popup. Exact names and saved aliases take priority; the paired backend can choose a catalog option with a bounded AI request. Validated choices are saved as skill aliases for future forms. Unmatched combined skills are split into parts, and existing pills are preserved. If AI is unavailable, choices remain empty and the plan uses profile skills explicitly present in the description. Final submission remains manual.
 
 Autofill, section, and skills runs automatically send bounded diagnostics to the paired local `POST /ext/trace` endpoint. Traces retain up to 2000 steps (1 MB maximum), with the newest 30 JSON files in `data/private/traces/`. The sidebar footer shows the last saved filename. Diagnostics record extension-set values and structural option metadata; passwords, file contents, and pre-existing user input values are excluded.
+
+## T049 sidebar and skills
+
+The shared palette and controls are documented in [UI design](ui-design.md).
+The compact job header shows Pause/Resume, Cancel run and Skip current while
+relevant. Pause retains the existing safe-point behavior. Cancel skips remaining
+items; Skip current skips only the claimed item. Open tabs stay available for
+review. Paired POST /ext/run/cancel accepts run_id; paired POST /ext/run/skip
+requires application_id and run_id. Results require the same run ID.
+Cancellation/skip invalidates in-flight local results before a later item can
+open. These controls never submit.
+
+Normal /ext/skills/plan matching is local and deterministic, using only skills
+in the profile and exact phrase boundaries in the job description. Its cache is
+bounded and keyed by application, description/title/company and current profile
+skills. No AI, subprocess or network provider runs for planning. Unsupported
+employer mentions are never added automatically. On-demand catalog alias choice
+retains its existing fallback.
+
+Autofill automatically attempts all matched skills after the form fill is ready,
+including when no sidebar is mounted. It awaits planning and one skill pass,
+preserves existing selected skills and uses T048 inner-checkbox verification.
+The Skills disclosure offers selected exclusions, other profile skills, Add all,
+then Type to add skills, a compact retry action and cancellation. Explicit choices
+survive another sidebar mount for the same URL/description context. Opening the
+sidebar does not fill any skills. The duplicate Type to Add Skills prompt is
+hidden from Needs your input; other unknown questions remain actionable.
+
+Next page and the compact Auto-advance switch sit at the bottom, followed by the
+text-only Send page structure link. Workday step narration and saved-trace notices
+are hidden; step detection and automatic trace collection remain active.

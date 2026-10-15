@@ -12,7 +12,8 @@ for(const tab of document.querySelectorAll('[role="tab"]'))tab.onkeydown=event=>
 element('close').onclick=()=>send({type:'sidebar-control',state:'closed'});
 element('minimize').onclick=()=>send({type:'sidebar-control',state:'minimized'});
 element('undo-applied').onclick=()=>perform({type:'undo-applied'}).catch(showError);
-let skillsBusy=false, skillPlan, skillPlanKey, skillPlanPromise, selectedSkillNames=new Set(), chipStatuses={};
+let skillsBusy=false, skillPlan, skillPlanKey, skillPlanPromise, selectedSkillNames=new Set(), chipStatuses={}, profileRevision="", mainBusy=false;
+const skillOverrides=new Map();
 let result, source, histories = (await chrome.storage.session.get("answerHistory")).answerHistory || {};
 let messages = [], aiBusy = false, chatBusy = false, downloadURL;
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
@@ -24,8 +25,8 @@ function openHelper(field){source={...field,tabId:result.tabId,url:result.url};e
 function node(tag, text) { const item = document.createElement(tag); item.textContent = text; return item; }
 function button(text, action) { const item = node("button", text); item.type = "button"; item.onclick = action; return item; }
 async function connection() {
-  try { const value = await api("/ext/ping"); element("connection").textContent = `Connected — ${value.profile_name || value.name}`; element("connection").classList.add("connected"); }
-  catch (error) { element("connection").textContent = error.message; element("connection").classList.remove("connected"); }
+  try { const value = await api("/ext/ping"); if(profileRevision && profileRevision!==value.profile_revision){skillPlanKey=undefined;skillPlan=undefined;}profileRevision=value.profile_revision || ""; element("connection").textContent = ""; element("connection").title = `Connected — ${value.profile_name || value.name}`; element("connection").setAttribute("aria-label", element("connection").title); element("connection").classList.add("connected"); }
+  catch (error) { element("connection").textContent = error.message; element("connection").title = "Connection error"; element("connection").setAttribute("aria-label", error.message); element("connection").classList.remove("connected"); }
 }
 async function perform(message) {
   const response = await send(message);
@@ -52,7 +53,9 @@ function inputFor(field) {
 }
 function prompts() {
   element("needs-input").replaceChildren();
-  for (const field of result?.pending || []) {
+  const pending=(result?.pending || []).filter(field=>!result?.skills_available || !/^type to add skills\b/i.test(field.label));
+  element("needs-input-heading").hidden=!pending.length;
+  for (const field of pending) {
     const row = node("div", ""); row.className = "prompt";
     const actions = node("div", ""); actions.className = "prompt-actions";
     row.append(node("p", field.label));
@@ -83,7 +86,7 @@ function prompts() {
     if (!actions.parentElement) row.append(actions);
     element("needs-input").append(row);
   }
-  if (!result?.pending?.length) {const empty=node("p",result?.summary ? "All set. Review your completed answers." : "Autofill to find questions that need your input.");empty.className="empty";element("needs-input").append(empty);}
+
   element("cover-questions").replaceChildren();
   if (result?.coverQuestions?.length) {
     element("cover-questions").append(node("h3", "Cover letter questions (blank allowed)"));
@@ -127,21 +130,33 @@ function render(value) {
   element("error").textContent = value.error || "";
   element("company").textContent = value.matched?.company || value.page?.company || "Current application";
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
-  element("progress").textContent = value.progress || "";
-  element("autofill").disabled = Boolean(value.busy);
+  const busy = Boolean(value.busy || value.skillsBusy || skillsBusy || value.writing?.length && /^Writing:/.test(value.writingProgress || ""));
+  const totals = [value.summary?.filled ? `${value.summary.filled} field${value.summary.filled===1 ? "" : "s"} filled` : "", value.skills?.added ? `${value.skills.added} skill${value.skills.added===1 ? "" : "s"} added` : ""].filter(Boolean);
+  const pending = value.pending?.length || value.coverQuestions?.length;
+  const progress = value.progress || "";
+  const detail = value.state === "needs_input" || value.waiting || value.state === "failed" ? value.detail || "" : "";
+  // Compact ordinary completion/step narration; keep instructions and wait outcomes.
+  const ordinary = !progress || /^Workday step:/i.test(progress) || progress === "Autofill finished. Review the page.";
+  element("progress").textContent = !ordinary ? progress : detail || (value.skillsBusy || skillsBusy ? "" : busy ? "Filling…" : value.summary ? (totals.join(" · ") || (pending ? "Review the questions below." : "Review the page.")) : "");
+  element("autofill").disabled = Boolean(value.busy || value.skillsBusy || mainBusy || skillsBusy);
+  element("skills-activity").hidden=!(value.skillsBusy || skillsBusy);
+  if(value.skillsBusy)element("skills-progress").textContent=skillPlan ? skillPlan.matched.length+" matched" : "";
+  else if(value.skills)renderSkills(value.skills);
+  else if(element("skills-progress").textContent==="Adding skills…")element("skills-progress").textContent="Skills need review";
   element('next-page').disabled = false;
   element('cancel-form-wait').hidden = !value.waiting;
   element("cover-letter").disabled = Boolean(value.busy || value.coverBusy);
-  element("cover-progress").textContent = value.coverProgress || "";
-  element("writing-progress").textContent = value.writingProgress || "";
+  element("cover-progress").textContent = value.coverBusy || value.coverQuestions?.length || /error|needs review/i.test(value.coverProgress || "") ? value.coverProgress || "" : "";
+  element("writing-progress").textContent = /^Writing:/.test(value.writingProgress || "") && !value.writing?.length ? "" : /^Answer filled:/.test(value.writingProgress || "") ? "" : value.writingProgress || "";
   element("results").hidden = !value.summary;
   if (value.summary) {
-    element("filled").textContent = `Filled ${value.summary.filled}`;
-    element("skipped").textContent = `Skipped ${value.summary.skipped} (including existing answers)`;
+    element("filled").textContent = "";
+    element("skipped").textContent = "";
     element("upload-errors").textContent = value.summary.errors.join("\n");
   }
   const sectionText=(value.sections||[]).map(s=>(s.message || s.name[0].toUpperCase()+s.name.slice(1))+(s.message?'':s.total!==undefined?' '+s.added+'/'+s.total:': '+s.added+' added'+(s.skipped?' / '+s.skipped+' not in list':''))).join(' · ');
-  for(const id of ['section-results','answer-section-results']) element(id).textContent=sectionText;
+  element('section-results').textContent='';
+  element('answer-section-results').textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
   element("autofill").textContent=value.busy?"Filling…":"Autofill this page";
@@ -219,7 +234,12 @@ async function chat() {
   finally { chatBusy = false; renderMessages(); element("send").disabled = element("clear-chat").disabled = false; }
 }
 element("settings").onclick = () => chrome.runtime.openOptionsPage();
-element("autofill").onclick = () => perform({type: "autofill"}).catch(showError);
+element("autofill").onclick = async () => {
+  if(mainBusy || skillsBusy) return;
+  mainBusy=true;element('autofill').disabled=true;
+  try {if(!element('skills-panel').hidden){await connection();await loadSkillPlan();await saveSkillSelection();}await perform({type:'autofill'});}
+  catch(error){showError(error);}finally{mainBusy=false;element('autofill').disabled=false;}
+};
 element("cover-letter").onclick = () => perform({type: "cover-letter"}).catch(showError);
 element("generate").onclick = () => write(false);
 element("refine").onclick = () => write(true);
@@ -244,12 +264,19 @@ render(tabId?initial.tabResults?.[tabId]:initial.lastResult); completedAnswers()
 let runPaused = false;
 function renderRun(run = {}) {
   runPaused = Boolean(run.paused);
-  element("run-section").open=Boolean(run.total||run.paused||run.error);
-  element("chrome-run-status").textContent = `Run: ${run.index || 0}/${run.total || 0}${runPaused ? " (paused)" : run.active ? "" : " (idle)"}${run.error ? " · " + run.error : ""}`;
-  element("run-pause").textContent = runPaused ? "Resume run" : "Pause run";
+  element('run-controls').hidden=!(run.active || run.paused || run.current);
+  element('chrome-run-status').textContent=run.error || (run.total ? (run.index || 0)+'/'+run.total : '');
+  const label=runPaused?'Resume run':'Pause run';
+  element('run-pause').textContent=runPaused?'▶':'Ⅱ';
+  element('run-pause').setAttribute('aria-label',label);element('run-pause').title=label;
+  element('run-skip').disabled=!run.current;
+
 }
+for(const action of ['cancel','skip'])element('run-'+action).onclick=async()=>{
+  try{const value=await send({type:'run-'+action});if(value.error)throw Error(value.error);renderRun(value);}catch(error){showError(error);}
+};
 element("run-pause").onclick = async () => {
-  try { renderRun(await send({type: "run-pause", paused: !runPaused})); } catch (error) { showError(error); }
+  try { const value=await send({type: "run-pause", paused: !runPaused});if(value.error)throw Error(value.error);renderRun(value); } catch (error) { showError(error); }
 };
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.chromeRun) renderRun(changes.chromeRun.newValue);
@@ -269,41 +296,53 @@ element('send-structure').onclick=async()=>{try{const response=await send({type:
 
 
 function showSkills(available) {
-  for(const id of ['skills-panel','autofill-skills','footer-autofill-skills']) element(id).hidden=!available;
+  for(const id of ['skills-panel','autofill-skills']) element(id).hidden=!available;
   if(available) loadSkillPlan();
 }
+function stableSkillContext() {
+  const page=result?.page || {};
+  return JSON.stringify([result?.url?.split(/[?#]/)[0],page.description || '']);
+}
+async function saveSkillSelection() {
+  if(!skillPlan)return;
+  const selection={context:stableSkillContext(),excluded:skillPlan.matched.filter(s=>!selectedSkillNames.has(s)),added:[...selectedSkillNames].filter(s=>!skillPlan.matched.includes(s))};
+  skillOverrides.set(selection.context,selection);
+  await send({type:'skill-selection',selection});
+}
 async function loadSkillPlan() {
-  const key=applicationKey()+JSON.stringify(result?.page || {});
+  if(!result?.page){const value=await send({type:'skills-available'});if(!value.page)return;result={...result,...value};}
+  const context=stableSkillContext(), key=context+profileRevision;
   if(skillPlanKey===key) return skillPlanPromise;
-  skillPlanKey=key; skillPlan=undefined;
-  element('skills-progress').textContent='Planning skills…';
+  skillPlanKey=key;skillPlan=undefined;
+  element('skills-progress').textContent='Loading…';
   skillPlanPromise=(async()=>{
     try {
-      const page=result?.page || (await send({type:'skills-available'})).page || {};
-      let plan;
-      try {plan=await api('/ext/skills/plan',{page,...(result?.matched?.application_id?{application_id:result.matched.application_id}:{})});}
-      catch {const profile=await api('/ext/profile-sections');plan={matched:profile.skills || [],missing:[],other:[]};}
-      if(skillPlanKey!==key) return;
-      skillPlan=plan;selectedSkillNames=new Set(plan.matched);chipStatuses={};renderSkillPlan();
-      element('skills-progress').textContent=plan.matched.length+' matched skills ready';
-    } catch(error) {element('skills-progress').textContent=error.message;}
+      const plan=await api('/ext/skills/plan',{page:result.page,...(result?.matched?.application_id?{application_id:result.matched.application_id}:{})});
+      if(skillPlanKey!==key)return;
+      const stored=await send({type:'skill-selection'});
+      if(skillPlanKey!==key)return;
+      skillPlan=plan;const saved=skillOverrides.get(context) || (stored?.selection?.context===context?stored.selection:undefined);
+      selectedSkillNames=new Set([...plan.matched.filter(s=>!saved?.excluded.includes(s)),...(saved?.added || [])]);
+      chipStatuses={};renderSkillPlan();element('skills-progress').textContent=plan.matched.length+' matched';
+    }catch(error){if(skillPlanKey===key){skillPlanKey=undefined;element('skills-progress').textContent=error.message;}}
   })();
   return skillPlanPromise;
 }
+function changedSkills(){renderSkillPlan();saveSkillSelection().catch(showError);}
 function renderSkillPlan() {
   if(!skillPlan) return;
   const matched=element('matched-skills');matched.replaceChildren();
   for(const skill of selectedSkillNames) {
     const chip=node('span','');chip.className='skill-chip';chip.dataset.status=chipStatuses[skill] || 'pending';
     const status=node('small',chipStatuses[skill] || 'pending');status.className='skill-status';
-    const remove=button('×',()=>{selectedSkillNames.delete(skill);renderSkillPlan();});
+    const remove=button('×',()=>{selectedSkillNames.delete(skill);changedSkills();});
     remove.setAttribute('aria-label','Remove '+skill);remove.disabled=skillsBusy;
     chip.append(node('span',skill),status,remove);matched.append(chip);
   }
   if(!matched.children.length) matched.append(node('p','No skills selected. Include skills below.'));
   const missing=element('missing-skills');missing.replaceChildren();
   for(const skill of skillPlan.missing) {
-    const include=button((selectedSkillNames.has(skill)?'✓ ':'+ ')+skill,()=>{selectedSkillNames.add(skill);renderSkillPlan();});
+    const include=button((selectedSkillNames.has(skill)?'✓ ':'+ ')+skill,()=>{selectedSkillNames.add(skill);changedSkills();});
     include.setAttribute('aria-label','Include '+skill);include.disabled=skillsBusy || selectedSkillNames.has(skill);missing.append(include);
   }
   if(!missing.children.length) missing.append(node('p','No missing skills identified.'));
@@ -312,30 +351,32 @@ function renderSkillPlan() {
     const label=node('label',''),input=document.createElement('input');input.type='checkbox';input.checked=checked;input.disabled=skillsBusy;input.onchange=()=>action(input.checked);label.append(input,node('span',name));other.append(label);
   }
   check('Add all',skillPlan.other.length>0 && skillPlan.other.every(skill=>selectedSkillNames.has(skill)),checked=>{
-    for(const skill of skillPlan.other) {if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);}renderSkillPlan();
+    for(const skill of skillPlan.other) {if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);}changedSkills();
   });
-  for(const skill of skillPlan.other) check(skill,selectedSkillNames.has(skill),checked=>{if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);renderSkillPlan();});
+  const manual=button('Type to add skills',()=>{element('manual-skills').hidden=false;element('manual-skill-input').focus();});other.append(manual);
+  for(const skill of skillPlan.other) check(skill,selectedSkillNames.has(skill),checked=>{if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);changedSkills();});
   if(!skillPlan.other.length) other.append(node('p','All profile skills are in the main list.'));
 }
 function renderSkills(value) {
-  element('skills-progress').textContent=value.progress || '';
+  element('skills-progress').textContent=value.busy ? (skillPlan ? skillPlan.matched.length+" matched" : "") : result?.skills && skillPlan ? skillPlan.matched.length+' matched' : value.progress || '';
+  element('skills-activity').hidden=!value.busy && !result?.skillsBusy && !skillsBusy;
   chipStatuses={...chipStatuses,...value.items};renderSkillPlan();
 }
 async function runSkills() {
-  if(skillsBusy) return;
+  if(skillsBusy || mainBusy) return;
+  skillsBusy=true;
+  await connection();
   await loadSkillPlan();
-  skillsBusy=true;renderSkillPlan();
-  for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page']) element(id).disabled=true;
-  element('cancel-skills').hidden=false;
+  if(!skillPlan){skillsBusy=false;return;}
+  renderSkillPlan();
+  for(const id of ['autofill-skills','autofill','next-page']) element(id).disabled=true;
+  element('skills-activity').hidden=false;
   const timer=setInterval(()=>send({type:'skills-status'}).then(renderSkills).catch(showError),250);
   try {const response=await send({type:'autofill-skills',...(skillPlan?{skills:[...selectedSkillNames]}:{})});if(response.error)throw Error(response.error);renderSkills(response);}
   catch(error){showError(error);}
-  finally {clearInterval(timer);skillsBusy=false;renderSkillPlan();element('cancel-skills').hidden=true;for(const id of ['autofill-skills','footer-autofill-skills','autofill','next-page'])element(id).disabled=false;}
+  finally {clearInterval(timer);skillsBusy=false;renderSkillPlan();element('skills-activity').hidden=true;for(const id of ['autofill-skills','autofill','next-page'])element(id).disabled=false;}
 }
-for(const id of ['autofill-skills','footer-autofill-skills']) element(id).onclick=runSkills;
+for(const id of ['autofill-skills']) element(id).onclick=runSkills;
 element('cancel-skills').onclick=()=>send({type:'cancel-skills'}).catch(showError);
-send({type:'skills-available'}).then(value=>showSkills(Boolean(value.skills_available))).catch(()=>{});
-
-function traceStatus(value){if(value)element('trace-status').textContent='Last trace saved: '+value.filename;}
-traceStatus((await chrome.storage.session.get('lastTrace')).lastTrace);
-chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.lastTrace)traceStatus(changes.lastTrace.newValue);});
+element('manual-skill-add').onclick=()=>{const input=element('manual-skill-input');if(input.value.trim()){selectedSkillNames.add(input.value.trim());input.value='';changedSkills();}};
+send({type:'skills-available'}).then(value=>{if(!result?.page)result={...result,...value};showSkills(Boolean(value.skills_available));}).catch(()=>{});

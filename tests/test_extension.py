@@ -104,17 +104,34 @@ def extension_server():
                 self.response(200, {"ok": True})
             elif self.path == "/ext/fixture-start":
                 base = f"http://127.0.0.1:{self.server.server_port}"
-                run.update(items=[dict(application_id=1, url=base + ("/workday-job.html" if payload.get("workday") else "/job.html"), company="Fixture", title="One", index=1, total=2),
-                                  dict(application_id=2, url=base + "/batch-two.html", company="Fixture", title="Two", index=2, total=2)], index=0)
+                run.update(items=[dict(application_id=1, run_id="fixture-run", state="pending", url=base + ("/workday-job.html" if payload.get("workday") else "/job.html"), company="Fixture", title="One", index=1, total=2),
+                                  dict(application_id=2, run_id="fixture-run", state="pending", url=base + "/batch-two.html", company="Fixture", title="Two", index=2, total=2)], index=0)
                 self.response(200, {"ok": True})
             elif self.path == "/ext/run/next":
                 if run["index"] < len(run["items"]):
                     item = run["items"][run["index"]]
                     run["index"] += 1
+                    item["state"] = "opened"
                     self.response(200, item)
                 else:
                     self.response(200, {"done": True})
-            elif self.path in {"/ext/trace", "/ext/run/result", "/ext/run/status"}:
+            elif self.path == '/ext/run/status':
+                self.response(200, dict(items=run['items']))
+            elif self.path in {'/ext/run/cancel','/ext/run/skip'}:
+                for item in run['items']:
+                    if item['state'] in {'pending','opened'} and (self.path.endswith('/cancel') or item['application_id']==payload.get('application_id')):
+                        item['state']='skipped'
+                if self.path.endswith('/cancel'):
+                    run['index']=len(run['items'])
+                self.response(200, dict(items=run['items']))
+            elif self.path == '/ext/run/result':
+                item=next((i for i in run['items'] if i['application_id']==payload['application_id']),None)
+                if item and item['state']=='opened':
+                    item['state']=payload['state']
+                    self.response(200, dict(ok=True))
+                else:
+                    self.response(409, dict(error='Application is not open in this run'))
+            elif self.path == '/ext/trace':
                 self.response(200, {"ok": True, "filename": "fixture-trace.json"})
             elif self.path == "/ext/skills/aliases":
                 self.response(200, {"aliases": skill_aliases})
@@ -213,7 +230,7 @@ def loaded_extension(tmp_path):
                     pytest.fail(f"Chromium launches, but loading the extension failed: {error}")
             pytest.skip("Chromium cannot launch at all: " + "\n".join(launch_errors))
         try:
-            context.route("**/", lambda route: route.continue_() if urlsplit(route.request.url).hostname in {"127.0.0.1", "localhost"} or route.request.url.startswith("chrome-extension://") else route.abort())
+            context.route("**/*", lambda route: route.continue_() if urlsplit(route.request.url).hostname in {"127.0.0.1", "localhost"} or route.request.url.startswith("chrome-extension://") else route.abort())
             worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker", timeout=15000)
             # A missing worker/invalid manifest is a failure, never a skip.
             assert worker.evaluate("""async () => {
@@ -282,10 +299,10 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
 
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    panel.locator("#connection").filter(has_text="Connected — Fixture Student").wait_for()
+    expect(panel.locator("#connection")).to_have_attribute("aria-label", "Connected — Fixture Student")
     assert panel.locator("#company").inner_text() == "Fixture Company"
     assert panel.locator("#job").inner_text() == "Fixture Intern"
-    expect(panel.locator("#filled")).to_have_text("Filled 14")
+    expect(panel.locator("#progress")).to_have_text("14 fields filled")
     assert "Unresolved" in panel.locator("#needs-input").inner_text()
     expect(panel.locator("#cover-questions")).to_contain_text("Which project")
     # Refill through the actual runtime message path, with the fixture tab active.
@@ -698,10 +715,10 @@ def test_chrome_run_opens_fills_and_keeps_two_tabs(loaded_extension, extension_s
     }""", server)
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    expect(panel.locator('#run-pause')).to_have_text('Resume run')
+    expect(panel.locator('#run-pause')).to_have_attribute('aria-label','Resume run')
     panel.locator('#run-pause').click()
-    expect(panel.locator('#chrome-run-status')).to_contain_text('Run: 2/2', timeout=30000)
-    expect(panel.locator('#chrome-run-status')).to_contain_text('(idle)', timeout=30000)
+    expect(panel.locator('#chrome-run-status')).to_contain_text('2/2', timeout=30000)
+    expect(panel.locator('#run-controls')).to_be_hidden(timeout=30000)
     results = [payload for path, _, payload in requests if path == '/ext/run/result']
     assert [(item['application_id'], item['state']) for item in results] == [(1, 'filled'), (2, 'filled')]
     pages = [page for page in context.pages if page.url in {server + '/batch-one.html', server + '/batch-two.html'}]
@@ -714,8 +731,8 @@ def test_chrome_run_opens_fills_and_keeps_two_tabs(loaded_extension, extension_s
     answers = [payload for path, _, payload in requests if path == '/ext/answers']
     assert [payload['application_id'] for payload in answers] == [1, 2]
     assert all(next(field for field in payload['fields'] if field['label'] == 'Phone country')['answered'] for payload in answers)
-    panel.locator('#run-pause').click()
-    expect(panel.locator('#chrome-run-status')).to_contain_text('(paused)')
+    worker.evaluate("()=>chrome.storage.session.set({chromeRun:{paused:true,active:true,index:2,total:2}})")
+    expect(panel.locator('#run-pause')).to_have_attribute('aria-label','Resume run')
 
 
 @pytest.mark.parametrize("batch", [False, True])
@@ -800,7 +817,7 @@ def test_workday_spa_refills_without_navigation(loaded_extension, extension_serv
     expect(page.locator('#year')).to_have_value('2024')
     expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
     expect(page.locator('#filename')).to_have_text('fixture-resume.pdf')
-    expect(panel.locator('#progress')).to_contain_text('Workday step: My Experience - filled')
+    expect(panel.locator('#progress')).to_contain_text('fields filled')
     expect(panel.locator('#company')).to_have_text('Run Company' if run_tab else 'Fixture Company')
     answers = [p for endpoint, _, p in requests if endpoint == '/ext/answers']
     assert {p['application_id'] for p in answers} == {7 if run_tab else 42}
@@ -843,7 +860,9 @@ def test_sidebar_answers_learning_phone_and_manual_cover(loaded_extension, exten
     assert not any(path == '/ext/cover-letter' for path, _, _ in requests)
     assert page.locator('#autoapply-sidebar').evaluate('el => !!el.shadowRoot')
     panel = page.frame_locator('#autoapply-sidebar iframe')
-    expect(panel.locator('#connection')).to_contain_text('Connected')
+    expect(panel.get_by_role('status', name='Connected — Fixture Student', exact=True)).to_be_visible()
+    expect(panel.locator('#connection')).to_have_attribute('title', 'Connected — Fixture Student')
+    expect(panel.locator('#connection')).to_be_empty()
     fields = [dict(field, key=field['key'].split(':', 1)[1]) for field in result['fields'] if field['key'].startswith('0:')]
     values = [dict(key=field['key'], status='RESOLVED', value='+1 301-401-9768', force=True) for field in fields if 'phone' in field['label'].lower()]
     worker.evaluate('async ({tabId, values}) => chrome.scripting.executeScript({target: {tabId}, func: values => autoApplyContent.fill(values), args: [values]})', dict(tabId=tab_id, values=values))
@@ -1020,15 +1039,28 @@ def test_autofill_returns_before_delayed_writing_and_cover(loaded_extension, ext
         expect(page.locator("#missing")).to_have_value("Reviewed while writing")
         fixture_delay(worker, release=["write"])
         expect(page.locator("#writing")).to_have_value("I enjoy building useful local tools.")
-        expect(panel.locator("#writing-progress")).to_contain_text("Answer filled:")
+        expect(panel.locator("#writing-progress")).to_be_empty()
+        written = panel.locator('.answer-card').filter(has_text='Why this role?')
+        expect(written.locator('.answer-value')).to_have_text('I enjoy building useful local tools.')
+        expect(written.locator('.source-pill')).to_have_text('AI')
     expect(panel.locator("#cover-progress")).to_have_text("Writing cover letter...")
+    expect(panel.locator("#cover-letter")).to_be_disabled()
+    expect(panel.get_by_role('link', name='Download cover letter')).to_be_hidden()
     assert page.locator("#cover").evaluate("e => e.files.length") == 0
     fixture_delay(worker, release=["cover"])
-    expect(panel.locator("#cover-progress")).to_have_text("Cover letter attached")
+    expect(page.locator("#cover")).to_have_value(re.compile(r"fixture-cover\.pdf$"))
+    expect(panel.locator("#cover-progress")).to_be_empty()
+    expect(panel.get_by_role('link', name='Download cover letter')).to_be_visible()
+    expect(panel.locator("#cover-letter")).to_be_enabled()
+    expect(panel.locator("#progress")).to_have_text(re.compile(r"^\d+ fields filled$"))
     assert page.locator("#cover").evaluate("e => e.files[0].name") == "fixture-cover.pdf"
     final = worker.evaluate("async id => (await chrome.storage.session.get('tabResults')).tabResults[id]", tab_id)
     assert final["summary"]["needs_writing"] == []
     assert not final["coverBusy"]
+    assert final["coverFile"]["filename"] == "fixture-cover.pdf"
+    assert any(field['kind'] == 'file' and field['value'] == 'fixture-cover.pdf' for field in final['completed'])
+    if not with_ai:
+        expect(page.locator('#writing')).to_have_value('My existing answer')
     if with_ai:
         assert any(field["value"] == "Reviewed while writing" for field in final["completed"])
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
@@ -1149,7 +1181,8 @@ def test_saved_source_labels(loaded_extension):
         pending:[],writing:[],summary:{filled:6,skipped:0,errors:[]},sections:[{name:'experience',added:2,skipped:0}]}})""")
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
     expect(panel.locator('.source-pill')).to_have_text(['Profile','Saved','Saved','Saved (similar)','AI','You'])
-    assert panel.locator('#section-results').text_content() == 'Experience: 2 added'
+    assert panel.locator('#section-results').text_content() == ''
+    expect(panel.locator('#progress')).to_have_text('6 fields filled')
     assert panel.locator('#answer-section-results').text_content() == 'Experience: 2 added'
 
 
@@ -1628,7 +1661,8 @@ def test_t040_real_workday_repeatable_sections(loaded_extension, extension_serve
     panel = context.new_page()
     worker.evaluate("sections=>chrome.storage.session.set({lastResult:{tabId:999,page:{title:'Fixture'},completed:[],pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]},sections}})", prepared['sections'])
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
-    expect(panel.locator('#section-results')).to_have_text(f"Experience {experience['added']}/2 · Education 1/1 · Skills: run Autofill skills")
+    expect(panel.locator('#section-results')).to_be_empty()
+    expect(panel.locator('#answer-section-results')).to_have_text(f"Experience {experience['added']}/2 · Education 1/1 · Skills: run Autofill skills")
 
 
 def test_t040_inferred_current_and_extra_user_entries(loaded_extension, extension_server):
@@ -1803,8 +1837,9 @@ def test_t044_skills_action_buttons_progress_and_cancel(loaded_extension, extens
     tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
     panel = context.new_page()
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    panel.locator('#skills-menu > summary').click()
     expect(panel.locator('#autofill-skills')).to_be_visible()
-    expect(panel.locator('#footer-autofill-skills')).to_be_visible()
+    assert panel.locator('#footer-autofill-skills').count() == 0
     result = worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
         const api=globalThis.autoApplyContent;
         await api.prepareSections({skills:['Python','JavaScript']});
@@ -1862,6 +1897,7 @@ def test_t046_skill_panel_controls(loaded_extension, extension_server, theme):
     panel.set_viewport_size(dict(width=360,height=800))
     panel.emulate_media(color_scheme=theme)
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    panel.locator('#skills-menu > summary').click()
     expect(panel.locator('#matched-skills')).to_contain_text('TypeScript')
     panel.get_by_role('button',name='Include Kubernetes',exact=True).click()
     expect(panel.locator('#matched-skills')).to_contain_text('Kubernetes')
@@ -1978,3 +2014,209 @@ def test_t048_inert_workday_row_activates_inner_control(loaded_extension, extens
         assert again['skipped'] == 0 and again['added'] == 0
         assert page.evaluate('activations') == ['AI Workflows']
         assert page.evaluate('[...selected]') == ['Python', 'AI Workflows']
+
+
+@pytest.mark.parametrize('theme', ['light','dark'])
+def test_t049_one_click_skills_and_layout(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server,key=KEY))
+    page = context.new_page()
+    page.goto(server+'/t046.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    panel = context.new_page()
+    errors=[]
+    panel.on('pageerror', lambda error: errors.append(str(error)))
+    panel.emulate_media(color_scheme=theme)
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    expect(panel.locator('#skills-progress')).to_have_text('1 matched')
+    assert not page.evaluate('searches')
+    panel.locator('#autofill').click()
+    expect(page.locator('[data-automation-id=selectedItem]').filter(has_text='TypeScript')).to_have_count(1,timeout=20000)
+    expect(panel.locator('#autofill')).to_be_enabled(timeout=20000)
+    assert page.evaluate('searches').count('TypeScript')==1
+    expect(panel.locator('#skills-progress')).not_to_contain_text('Adding skills')
+    expect(panel.locator('#skills-progress')).to_have_text('1 matched')
+    expect(panel.locator('#progress')).to_have_text('1 skill added')
+    expect(panel.locator('#section-results')).to_be_empty()
+    expect(panel.locator('#filled')).to_be_empty()
+    expect(panel.locator('#skipped')).to_be_empty()
+    assert not any(path=='/ext/skills/choose' and data['skill']=='TypeScript' for path,_,data in requests)
+    output=ROOT/'.tmp/review/t049'
+    output.mkdir(parents=True,exist_ok=True)
+    for width in (360,400):
+        panel.set_viewport_size(dict(width=width,height=800))
+        assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        footer=panel.locator('.page-navigation').bounding_box()
+        assert footer['y']+footer['height']<=800
+        assert panel.locator('#send-structure').is_visible()
+        assert panel.locator('#footer-autofill-skills').count()==0
+        panel.screenshot(path=str(output/f'sidebar-{width}-{theme}.png'))
+    panel.set_viewport_size(dict(width=360,height=800))
+    panel.locator('#skills-menu > summary').click()
+    panel.screenshot(path=str(output/f'expanded-skills-360-{theme}.png'))
+    panel.locator('#tab-answers').click()
+    panel.screenshot(path=str(output/f'answers-360-{theme}.png'))
+    panel.locator('#tab-chat').click()
+    panel.screenshot(path=str(output/f'chat-360-{theme}.png'))
+    panel.locator('#tab-fill').click()
+    panel.evaluate("""async () => {
+        const {tabResults}=await chrome.storage.session.get('tabResults');
+        const current=Object.values(tabResults).find(r=>r.skills);
+        current.matched={...current.matched,company:'Fixture International Research and Engineering Company',title:'Software Engineering Intern, Developer Tools and Distributed Systems'};
+        current.pending=[{key:'fixture-input',label:'Which local fixture project should we highlight?',kind:'text',options:[]}];
+        current.skillsBusy=true;
+        await chrome.storage.session.set({tabResults,lastResult:current,chromeRun:{active:true,index:1,total:8,current:{application_id:42},tabId:current.tabId}});
+    }""")
+    expect(panel.locator('#run-controls')).to_be_visible()
+    expect(panel.locator('#company')).to_have_text('Fixture International Research and Engineering Company')
+    panel.locator('#skills-menu > summary').click()
+    expect(panel.locator('#cancel-skills')).to_be_visible()
+    expect(panel.locator('#needs-input')).to_contain_text('Which local fixture project')
+    assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    boxes=[panel.locator(selector).bounding_box() for selector in ('#company','#job','#run-controls')]
+    assert boxes[0]['x']+boxes[0]['width']<=boxes[2]['x']+1
+    assert boxes[1]['y']>=boxes[2]['y']+boxes[2]['height']-1
+    expect(panel.locator('#progress')).to_be_empty()
+    expect(panel.locator('#skills-progress')).to_have_text('1 matched')
+    footer=panel.locator('.page-navigation').bounding_box()
+    assert footer['y']+footer['height']<=800
+    panel.screenshot(path=str(output/f'active-run-pending-360-{theme}.png'))
+    assert not errors
+
+
+@pytest.mark.parametrize('action',['cancel','skip'])
+def test_t049_run_controls_during_inflight_fill(loaded_extension,extension_server,action):
+    context,worker,extension_id=loaded_extension
+    server,requests=extension_server
+    worker.evaluate("()=>chrome.storage.session.set({chromeRunPaused:true})")
+    worker.evaluate("config=>chrome.storage.local.set(config)",dict(server=server,key=KEY))
+    worker.evaluate("server => chrome.storage.local.set({autoAdvanceProfiles:{[server+':Fixture Student']:true}})",server)
+    fixture_delay(worker,hold=['write'])
+    worker.evaluate("""async server=>fetch(server+'/ext/fixture-start',{method:'POST',headers:{'X-AutoApply-Key':'fixture-pairing-key'},body:'{}'})""",server)
+    panel=context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html')
+    expect(panel.locator('#run-pause')).to_have_attribute('aria-label','Resume run')
+    panel.locator('#run-pause').click()
+    expect(panel.locator('#writing-progress')).to_contain_text('Writing:',timeout=20000)
+    old_page=next(p for p in context.pages if p.url==server+'/batch-one.html')
+    old_page.evaluate("""() => {window.nextClicks=0;const next=document.createElement('button');next.type='button';next.textContent='Next';next.dataset.automationId='pageFooterNextButton';next.onclick=()=>nextClicks++;document.querySelector('form').append(next);}""")
+    expect(panel.locator('#run-skip')).to_be_enabled()
+    panel.locator('#run-'+action).click()
+    expect(panel.locator('#run-skip')).to_be_disabled()
+    fixture_delay(worker,release=['write'])
+    if action=='skip':
+        expect(panel.locator('#chrome-run-status')).to_contain_text('2/2',timeout=30000)
+    expect(panel.locator('#run-controls')).to_be_hidden(timeout=30000)
+    results=[data for p,_,data in requests if p=='/ext/run/result']
+    assert [data['application_id'] for data in results]==([2] if action=='skip' else [])
+    pages=[p for p in context.pages if p.url in {server+'/batch-one.html',server+'/batch-two.html'}]
+    assert len(pages)==(2 if action=='skip' else 1)
+    assert all(p.evaluate('[submitClicks,submissions]')==[0,0] for p in pages)
+    assert old_page.evaluate('nextClicks')==0
+    expect(old_page.locator('#writing')).to_have_value('')
+
+
+def test_t049_skill_overrides_survive_main_autofill(loaded_extension,extension_server):
+    context,worker,extension_id=loaded_extension
+    server,requests=extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)",dict(server=server,key=KEY))
+    page=context.new_page()
+    page.goto(server+'/t046.html')
+    tab_id=worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id",page.url)
+    panel=context.new_page()
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    panel.locator('#skills-menu > summary').click()
+    panel.get_by_role('button',name='Remove TypeScript',exact=True).click()
+    panel.locator('#other-skills summary').click()
+    panel.get_by_label('Add all',exact=True).check()
+    manual=panel.get_by_role('button',name='Type to add skills',exact=True)
+    manual.click()
+    panel.locator('#manual-skill-input').fill('Node')
+    panel.locator('#manual-skill-add').click()
+    panel.locator('#autofill').click()
+    expect(panel.locator('#autofill')).to_be_enabled(timeout=30000)
+    selected=page.locator('[data-automation-id=selectedItem]').all_text_contents()
+    assert 'TypeScript' not in selected
+    assert {'Python','Rust','Node.js'}<=set(selected)
+    assert page.evaluate('searches').count('Python')==1
+    assert page.evaluate('searches').count('Rust')==1
+    expect(panel.get_by_role('button',name='Remove Node',exact=True)).to_be_visible()
+
+
+def test_t049_skills_without_mounted_sidebar_and_concurrent_fill(loaded_extension,extension_server):
+    context,worker,_=loaded_extension
+    server,requests=extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)",dict(server=server,key=KEY))
+    page=context.new_page()
+    page.goto(server+'/t046.html')
+    tab_id=worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id",page.url)
+    worker.evaluate("""async id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{globalThis.autoApplyContent.sidebar=()=> 'closed';}})""",tab_id)
+    results=worker.evaluate("id=>Promise.all([autoApplyAutofill(id),autoApplyAutofill(id)])",tab_id)
+    assert sum(not result.get('error') for result in results)==1
+    assert sum(result.get('error')=='Autofill is already running.' for result in results)==1
+    assert page.locator('[data-automation-id=selectedItem]').filter(has_text='TypeScript').count()==1
+    assert page.locator('iframe').count()==0
+    assert page.evaluate('searches').count('TypeScript')==1
+    assert sum(p=='/ext/skills/plan' for p,_,_ in requests)==1
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_t050_actionable_status_and_compact_outcomes(loaded_extension, extension_server, theme):
+    context, worker, extension_id, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused:true})")
+    panel = context.new_page()
+    panel.set_viewport_size(dict(width=360, height=800))
+    panel.emulate_media(color_scheme=theme)
+    errors = []
+    panel.on('pageerror', lambda error: errors.append(str(error)))
+    panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    output = ROOT / '.tmp/review/t050'
+    output.mkdir(parents=True, exist_ok=True)
+    base = dict(tabId=tab_id, page=dict(company='Fixture Company', title='Fixture Intern'),
+                fields=[], pending=[], writing=[], completed=[], summary=dict(filled=4, skipped=0, errors=[]))
+    sign_in = 'Sign in to Workday in this tab. Autofill will resume automatically.'
+    for name, changes, expected in [
+        ('sign-in', dict(state='needs_input', waiting=True, detail=sign_in), sign_in),
+        ('detail', dict(state='needs_input', detail=sign_in,
+                        progress='Autofill finished. Review the page.'), sign_in),
+        ('cancelled', dict(state='needs_input', waiting=False, detail=sign_in,
+                           progress='Form waiting cancelled.'), 'Form waiting cancelled.'),
+        ('waiting', dict(waiting=True, progress='Waiting for the application form...'),
+                    'Waiting for the application form...'),
+        ('retry', dict(state='needs_input', detail=sign_in,
+                      progress='No form appeared. Press Autofill to try again.'),
+                  'No form appeared. Press Autofill to try again.'),
+        ('error', dict(progress='Fix the page validation errors before continuing.',
+                      error='Fixture connection error: check pairing settings.',
+                      summary=dict(filled=4, skipped=0, errors=['Resume upload needs review.']),
+                      writingProgress='Why this role?: Fixture writer unavailable',
+                      coverProgress='Cover letter error: Fixture writer unavailable'),
+                  'Fix the page validation errors before continuing.'),
+        ('settled', dict(progress='Autofill finished. Review the page.',
+                        writingProgress='Answer filled: Why this role?', coverProgress='Cover letter attached'),
+                    '4 fields filled'),
+        ('step', dict(progress='Workday step: My Experience'), '4 fields filled'),
+    ]:
+        worker.evaluate("value => chrome.storage.session.set({tabResults:{[value.tabId]:value}})", dict(base, **changes))
+        expect(panel.locator('#progress')).to_have_text(expected)
+        if changes.get('waiting'):
+            expect(panel.locator('#cancel-form-wait')).to_be_visible()
+        else:
+            expect(panel.locator('#cancel-form-wait')).to_be_hidden()
+        if name == 'error':
+            expect(panel.locator('#error')).to_have_text(changes['error'])
+            expect(panel.locator('#upload-errors')).to_have_text('Resume upload needs review.')
+            expect(panel.locator('#writing-progress')).to_have_text(changes['writingProgress'])
+            expect(panel.locator('#cover-progress')).to_have_text(changes['coverProgress'])
+        if name == 'settled':
+            expect(panel.locator('#writing-progress')).to_be_empty()
+            expect(panel.locator('#cover-progress')).to_be_empty()
+            expect(panel.locator('#error')).to_be_empty()
+            expect(panel.locator('#upload-errors')).to_be_empty()
+        assert panel.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        footer = panel.locator('.page-navigation').bounding_box()
+        assert footer['y'] + footer['height'] <= 800
+        if name in {'sign-in', 'cancelled', 'error', 'settled'}:
+            panel.screenshot(path=str(output / f'{name}-360-{theme}.png'))
+    assert not errors
