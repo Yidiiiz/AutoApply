@@ -1,0 +1,39 @@
+<!doctype html><meta charset="utf-8"><!-- Snapshot automation IDs; synthetic rerender/CSS/handlers. -->
+<style>button,label{display:inline-block;padding:8px}input{min-height:24px}.check{position:relative}.check input{opacity:0;width:20px;height:20px}.check label{padding:8px}[role=option]{padding:8px}</style>
+<h1>My Experience</h1><form>
+<div role="group" aria-label="Education"><div role="group" aria-label="Education 1">
+<div data-automation-id="formField-schoolName"><label for="education-26--schoolName">School or University</label><input id="education-26--schoolName" value="Fixture University"></div>
+<div data-automation-id="formField-fieldOfStudy"><label for="education-26--fieldOfStudy">Field of Study</label><ul data-automation-id="selectedItemList"><li><div role="option" data-automation-id="selectedItem" id="pill-e87f304d06be103ec2566b50726c06de">Computer Science</div></li></ul><input id="education-26--fieldOfStudy" data-automation-id="searchBox" value="stale search"></div>
+</div></div>
+<div role="group" aria-label="Languages" id="languages"><div role="group" aria-label="Languages 1" id="language-entry"></div><button type="button" id="add-language">Add another language</button></div>
+</form>
+<script>
+window.submissions=0;window.adds=0;window.nativeClicks=0;window.picks=[];window.searches=[];window.language='English';window.fluent=false;window.levels={};
+const entry=document.querySelector('#language-entry');
+const controls=[['language','Language'],['e87f304d06be103ec224a643fe5905f6','All (Reading/Speaking/Writing)'],['e87f304d06be103ec224a4efe9af05f5','Reading'],['e87f304d06be103ec224a30be7f105f4','Speaking'],['e87f304d06be103ec224980130be05f3','Writing']];
+function render(){
+ entry.replaceChildren();
+ for(const [key,label] of controls){
+  const field=document.createElement('div');field.dataset.automationId='formField-'+key;
+  const id='language-111--'+key;
+  field.innerHTML='<label for="'+id+'">'+label+'</label><button type="button" aria-haspopup="listbox" id="'+id+'">'+(key==='language'?language || 'Select One':levels[key] || 'SelectOne')+'</button><input type="text" style="display:none" aria-label="'+label+'">';
+  field.querySelector('button').onclick=()=>open(key,id);entry.append(field);
+  if(key==='language'){
+   const native=document.createElement('div');native.className='check';native.dataset.automationId='formField-native';
+   native.innerHTML='<input type="checkbox" id="language-111--native" name="native"><label for="language-111--native">I am fluent in this language.</label>';
+   native.querySelector('input').checked=fluent;native.querySelector('input').onclick=e=>{fluent=e.target.checked;nativeClicks++;render();};entry.append(native);
+  }
+ }
+}
+function open(key,id){
+ document.querySelector('#popup')?.remove();const popup=document.createElement('div');popup.id='popup';popup.role='listbox';
+ const options=key==='language'?['English','Spanish']:['1 - Beginner','2 - Intermediate','3 - Advanced','4 - Fluent'];
+ for(const value of options){const option=document.createElement('div');option.role='option';option.textContent=value;option.onclick=()=>{picks.push([key,value]);if(key==='language')language=value;else levels[key]=value;popup.remove();render();};popup.append(option);}document.body.append(popup);
+ document.getElementById(id).setAttribute('aria-controls','popup');
+}
+render();document.querySelector('#add-language').onclick=()=>adds++;
+const study=document.getElementById('education-26--fieldOfStudy');
+study.oninput=()=>searches.push(study.value);
+study.onkeydown=e=>{if(e.key!=='Enter')return;e.preventDefault();document.querySelector('#study-popup')?.remove();const popup=document.createElement('div');popup.id='study-popup';popup.dataset.automationId='responsiveMonikerPrompt';popup.innerHTML='<div data-automation-id="activeListContainer"><div data-automation-id="menuItem"><input type="radio" data-automation-id="radioBtn"><span data-automation-id="promptOption">Computer Science</span></div></div>';popup.querySelector('input').onclick=()=>{document.querySelector('[data-automation-id=selectedItemList]').innerHTML='<li data-automation-id="selectedItem">Computer Science</li>';study.value='';popup.remove();};document.body.append(popup);};
+document.querySelector('form').onsubmit=e=>{e.preventDefault();submissions++};
+</script>

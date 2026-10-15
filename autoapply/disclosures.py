@@ -11,6 +11,27 @@ FACTS = {
 }
 
 
+def employment_restriction(label):
+    """An agreement's existence or employment constraints are personal legal facts."""
+    text = normalize(label)
+    return bool(re.search(r'\b(?:non competition|non compete|non disclosure|non solicitation)\b', text)
+                or re.search(r'\bagreement\b', text) and re.search(
+                    r'\b(?:subject to|bound by|preclude|restrict|prevent|prohibit|obligation)\w*\b', text))
+
+
+def restriction_existence(label, company):
+    """Full positive existence grammar; added legal promises require review."""
+    text = normalize(label)
+    employer = '|'.join(re.escape(normalize(v)) for v in
+                        ('any employer', 'the employer', 'this company', company) if v)
+    agreements = r'(?:non competition|non compete|non disclosure|non solicitation)'
+    return bool(re.fullmatch(
+        rf'are you subject to any {agreements}(?: {agreements})* or other agreement that would '
+        rf'(?:preclude or restrict|restrict|preclude) your employment (?:at|with) (?:{employer})', text)
+        or re.fullmatch(r'do you have an agreement that restricts your employment', text)
+        or re.fullmatch(r'are you bound by a non disclosure agreement', text))
+
+
 def _list_of(item):
     return rf"{item}(?:(?: or | and | ){item})*"
 

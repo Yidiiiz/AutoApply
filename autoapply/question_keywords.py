@@ -96,7 +96,7 @@ CONCEPTS = [
     dict(key='education.credit_hours_by_start', any=['credit hours', 'credits completed', 'completed credits'], all=[], exclude=[]),
     dict(key='education.credit_hours_by_start', any=['credits'], all=['completed'], exclude=[]),
     dict(key='contact.phone_device_type', any=['phone device type', 'phone type'], all=[], exclude=[]),
-    dict(key='contact.permanent_address', any=['permanent address'], all=[], exclude=[]),
+    dict(key='contact.permanent_address', any=['permanent address', 'permanant address'], all=[], exclude=[]),
     dict(key='government_employment', any=['federal government'], all=['employee'], exclude=[]),
     dict(key='independent_auditor_employment', any=['independent auditor'], all=['employee'], exclude=[]),
     dict(key='education.degree', any=['degree', 'degree level'], all=[], exclude=['enrolled', 'pursuing', 'major', 'graduation']),

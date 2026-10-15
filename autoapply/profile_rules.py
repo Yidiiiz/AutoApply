@@ -145,6 +145,21 @@ def resolve(label, kind, options, profile):
     text = _norm(label)
     if not text:
         return None
+    from .concepts import canonical_key
+    from .disclosures import employment_restriction
+    if employment_restriction(label):
+        return None
+    key = canonical_key(label)
+    if key == 'contact.permanent_address':
+        from .answers import permanent_address
+        return permanent_address(profile) if not options else None
+    if key == 'education.country':
+        value = _get(profile, 'education.country')
+        return fit(value, options) if value else None
+    # Country facts concern this applicant, never a job destination or another person.
+    if re.search(r'\bcountry\b', text) and not re.fullmatch(
+            r'(?:what is )?(?:your |my )?(?:current )?country(?: of (?:residence|residency))?|country region', text):
+        return None
     year, month = _graduation(profile)
     # Conditional follow-ups ("If yes, please describe ...") when the trigger answer is No.
     if re.match(r'^if (?:yes|so|applicable)\b', text) and kind in {'text', 'textarea'}:

@@ -768,3 +768,20 @@ output and refinement stay hidden until an answer exists. Queue groups filter,
 layout, select-count and Run in one responsive action bar. More holds discovery
 and listing checks; Settings is the top-right gear. See [UI design](ui-design.md)
 for palette, keyboard behavior and local screenshot evidence.
+
+
+T054 UI: company and title align with the header controls and connection dot;
+Settings uses a shared outlined gear. Extension icons use the canonical crescent.
+The sidebar's final Submit requires a deliberate footer press after review; Auto
+is disabled on final review without changing its saved preference. Clicking
+Submit only shows pending feedback. A fresh visible site confirmation shows
+Application submitted. Database tracking errors and missing matches remain
+separate, with retry. One compact moon banner says Application submitted; successful
+tracking adds Undo tracking inline. Undo changes tracking only and preserves the
+site-confirmed banner, with a small status explaining that the site submission is unchanged.
+
+The favicon uses the same crescent SVG path as the extension icons. The dashboard
+response CSP permits only data: images; default-src, nonce-bound scripts/styles,
+same-origin connections and frame/form protections remain intact. A local browser
+fixture decodes and paints the actual favicon URI under the served response policy
+without securitypolicyviolation events (.tmp/review/t054/favicon-csp.json).

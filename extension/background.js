@@ -11,6 +11,7 @@ chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'toggle').catch(cons
 globalThis.autoApplySidebar=showSidebar;
 let running = false;
 const activeResults = new Map(), writingTasks = new Map();
+const manualActionTabs = new Set();
 const skillSelections = new Map();
 function skillContext(result) {
   const page=result.page || {};
@@ -21,7 +22,8 @@ async function fillMatchedSkills(result) {
   const plan=await api('/ext/skills/plan',{page:result.page || {},application_id:result.matched?.application_id});
   if (cancelledTabs.has(result.tabId)) return;
   const context=skillContext(result), saved=skillSelections.get(result.tabId);
-  const skills=saved?.context===context ? [...new Set([...plan.matched.filter(s=>!saved.excluded.includes(s)),...saved.added])] : plan.matched;
+  const profileSkills=[...plan.matched,...plan.other];
+  const skills=saved?.context===context ? [...new Set([...profileSkills.filter(s=>!saved.excluded.includes(s)),...saved.added])] : profileSkills;
   const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.skillsAvailable()});
   const frame=frames.find(f=>f.result);
   if(!frame || !skills.length || cancelledTabs.has(result.tabId)) return;
@@ -62,8 +64,12 @@ async function scan(tabId) {
   let frames = [];
   // Navigation can finish before the content script has initialized.
   for (let attempt = 0; attempt < 20; attempt++) {
-    frames = (await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: "ISOLATED",
-      func: () => globalThis.autoApplyContent?.scan()})).filter(frame => frame.result);
+    const scanned=await chrome.scripting.executeScript({target: {tabId: tab.id, allFrames: true}, world: "ISOLATED",
+      func: async () => {try {return await globalThis.autoApplyContent?.scan();}
+        catch(error) {return {scan_error:error.message || String(error)};}}});
+    const failure=scanned.find(frame=>frame.error || frame.result?.scan_error);
+    if(failure) throw new Error(failure.result?.scan_error || failure.error.message || String(failure.error));
+    frames = scanned.filter(frame => frame.result);
     if (frames.length) break;
     await delay(100);
   }
@@ -78,7 +84,7 @@ async function scan(tabId) {
   await chrome.storage.session.set({jobContexts});
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
-  return {tabId: tab.id, url: tab.url, page, fields, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
+  return {tabId: tab.id, url: tab.url, page, fields, next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
 const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
@@ -271,15 +277,16 @@ export async function autofill(tabId, application, advanceCount = 0) {
   running = true;
   let result = {busy: true, progress: "Scanning application..."};
   try {
-    await showSidebar(tabId);
-    await report(result);
     const traceTab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
-    result.tabId=traceTab?.id;
+    result.tabId=traceTab?.id; result.url=traceTab?.url;
     cancelledTabs.delete(result.tabId);
+    activeResults.set(result.tabId,result);
+    await report(result);
+    await showSidebar(result.tabId);
     await chrome.scripting.executeScript({target:{tabId:traceTab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.beginTrace('autofill')});
     let scanned = await scan(tabId);
     if (cancelledTabs.has(scanned.tabId)) return result;
-    if (!scanned.sign_in && !scanned.fields.length) scanned = await openApplication(scanned);
+    if (!scanned.sign_in && !scanned.fields.length && scanned.next_action?.kind!=='submit') scanned = await openApplication(scanned);
     await chrome.scripting.executeScript({target:{tabId:scanned.tabId,allFrames:true},func:count=>{const api=globalThis.autoApplyContent;api?.beginTrace('autofill');api?.trace('scan','found',null,{total:count});},args:[scanned.fields.length]});
     clearTimeout(formWaits.get(scanned.tabId)); formWaits.delete(scanned.tabId);
     const wasWaiting = activeResults.get(scanned.tabId)?.waiting;
@@ -296,8 +303,8 @@ export async function autofill(tabId, application, advanceCount = 0) {
     await chrome.storage.session.set({autofillTabs});
     if (result.matched.company) result.page.company = result.matched.company;
     if (result.matched.title) result.page.title = result.matched.title;
-    if (!result.sign_in && !result.fields.length && /review/i.test(result.workday_step || '')) {
-      result.progress = 'Review the application and submit on the page yourself.';
+    if (!result.sign_in && result.next_action?.kind==='submit') {
+      result.progress = 'Review the application. Submit when you are ready.';
       return await report({...result,busy:false});
     }
     if (result.sign_in || !result.fields.length) {
@@ -425,7 +432,51 @@ async function action(message) {
     const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId},func:()=>globalThis.autoApplyContent.pageStructure()});
     return api('/ext/snapshot',frame.result);
   }
+  if(message.type==='retry-submission-tracking') {
+    const {tabResults={},autofillTabs={}}=await chrome.storage.session.get(['tabResults','autofillTabs']);
+    const current=activeResults.get(message.tabId)||tabResults[message.tabId], authorized=autofillTabs[message.tabId];
+    const tab=await chrome.tabs.get(message.tabId);
+    if(!current?.siteConfirmed || !authorized || current.url!==tab.url || authorized.applied || confirmingTabs.has(tab.id))
+      throw Error('Application changed. Review the employer page.');
+    const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent?.confirmationEvidence()});
+    if(!frame.result)throw Error('The employer confirmation is no longer visible.');
+    confirmingTabs.add(tab.id);
+    try {
+      if(!authorized.matched?.application_id){authorized.matched=await api('/ext/match',{url:tab.url});current.matched=authorized.matched;}
+      if(!authorized.matched?.application_id)throw Error('No matching application to track');
+      await api('/ext/applied',{application_id:authorized.matched.application_id,url:tab.url,evidence:frame.result});
+      authorized.applied=true;current.applied=true;current.trackingError='';await chrome.storage.session.set({autofillTabs});
+    }catch(error){current.trackingError='Tracking failed: '+error.message+'. Retry applied tracking.';}
+    finally{confirmingTabs.delete(tab.id);}
+    return report(current);
+  }
+  if (message.type === 'manual-submit') {
+    if(running || skillsRunning || batchBusy)throw Error('Wait for autofill and the run to finish.');
+    const scanned=await scan(message.tabId);
+    const {tabResults={},autofillTabs={},chromeRun={}}=await chrome.storage.session.get(['tabResults','autofillTabs','chromeRun']);
+    const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId];
+    const authorized=autofillTabs[scanned.tabId];
+    if(chromeRun.active || chromeRun.current || !current || current.busy || current.waiting || current.submitting ||
+       current.writing?.length || cancelledTabs.has(scanned.tabId) || scanned.url!==current.url ||
+       scanned.next_action?.kind!=='submit' || message.expected?.url!==scanned.url ||
+       message.expected?.step!==scanned.next_action.step || current.next_action?.step!==scanned.next_action.step)
+      throw Error('Application changed or is busy. Review the employer page and run Autofill again.');
+    if(authorized){delete authorized.undone;authorized.submitAt=Date.now();authorized.submitUrl=scanned.url;await chrome.storage.session.set({autofillTabs});}
+    current.submitting=true;current.progress='Submitting... Waiting for employer confirmation.';await report(current);
+    try {
+      if(running || skillsRunning || batchBusy || activeResults.has(scanned.tabId) && activeResults.get(scanned.tabId)!==current || current.waiting)throw Error('Application became busy. Review the employer page.');
+      const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId},
+        func:expected=>globalThis.autoApplyContent.manualSubmit(expected),args:[message.expected]});
+      if(!frame.result?.clicked || frame.result.errors?.length){
+        current.submitting=false;current.progress=frame.result?.errors?.join('\n') || frame.result?.message || 'Submission needs review on the employer page.';
+        if(authorized){delete authorized.submitAt;await chrome.storage.session.set({autofillTabs});}
+      }
+    } catch(error){current.submitting=false;current.progress='Submission could not be activated. Review the employer page.';if(authorized){delete authorized.submitAt;await chrome.storage.session.set({autofillTabs});}await report(current);throw error;}
+    setTimeout(()=>{if(current.submitting&&!current.siteConfirmed){current.submitting=false;current.progress='No confirmation yet. Review the employer page before trying again.';report(current);}},10000);
+    return report(current);
+  }
   if (message.type === 'next-page') {
+    if(running || skillsRunning)throw Error('Wait for autofill to finish.');
     const scanned=await scan(message.tabId);
     const {tabResults={}}=await chrome.storage.session.get('tabResults');
     const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId]||{...scanned,pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]}};
@@ -452,6 +503,7 @@ async function action(message) {
     if ((await advancePreference()).enabled && await clickNext(result,true)) return autofill(result.tabId,result.matched);
   } else if (message.type === 'undo-applied') {
     await api('/ext/unapplied',{application_id:result.matched.application_id});result.applied=false;
+    result.progress='';result.trackingError='';result.trackingNote='Tracking undone. Site submission is unchanged.';
     const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
     if(autofillTabs[result.tabId]){delete autofillTabs[result.tabId].applied;delete autofillTabs[result.tabId].submitAt;autofillTabs[result.tabId].undone=true;await chrome.storage.session.set({autofillTabs});}
   } else if (message.type === "skip-answer") {
@@ -494,7 +546,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
+  if(['manual-submit','retry-submission-tracking'].includes(message.type) && (sender.url?.split('?')[0]!==chrome.runtime.getURL('sidepanel.html') ||
+     sender.tab?.id && !sender.tab.url?.startsWith(chrome.runtime.getURL('')) && sender.tab.id!==message.tabId ||
+     new URL(sender.url).searchParams.has('tabId') && Number(new URL(sender.url).searchParams.get('tabId'))!==message.tabId))return;
+  if(message.type==='manual-submit') {
+    if(manualActionTabs.has(message.tabId)){respond({error:'Submission is already pending.'});return;}
+    manualActionTabs.add(message.tabId);
+    action(message).then(respond,error=>respond({error:error.message})).finally(()=>manualActionTabs.delete(message.tabId));
+    return true;
+  }
   action(message).then(respond, error => respond({error: error.message}));
   return true;
 });
@@ -696,18 +757,23 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(field.kind!=='textarea'&&message.value!==''&&message.value!==null){await api('/ext/remember',{...field,...context(result),url:result.url,value:message.value});result.saved='Saved';}
       await report(result);return;
     }
-    if(!authorized?.matched?.application_id||sender.frameId!==0)return;
-    if(message.type==='submit-intent'){delete authorized.undone;authorized.submitAt=Date.now();await chrome.storage.session.set({autofillTabs});return;}
-    if(authorized.applied||authorized.undone||confirmingTabs.has(tabId))return;
+    if(!authorized||sender.frameId!==0)return;
+    if(message.type==='submit-intent'){if(message.url!==sender.tab.url || result?.url!==sender.tab.url)return;delete authorized.undone;authorized.submitAt=Date.now();authorized.submitUrl=sender.tab.url;await chrome.storage.session.set({autofillTabs});return;}
+    if(authorized.applied||authorized.undone||result?.siteConfirmed||confirmingTabs.has(tabId))return;
     const url=new URL(sender.tab.url),strong=(/^(?:.+\.)?(?:greenhouse\.io|lever\.co)$/.test(url.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(url.pathname))||/^(?:.+\.)?ashbyhq\.com$/.test(url.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(url.pathname);
     if(!strong&&(!authorized.submitAt||Date.now()-authorized.submitAt>120000))return;
-    if(!message.evidence||message.url!==sender.tab.url)return;
+    if(!message.evidence||message.url!==sender.tab.url || !result || result.matched?.application_id!==authorized.matched?.application_id || new URL(authorized.url).origin!==url.origin)return;
+    const [proof]=await chrome.scripting.executeScript({target:{tabId},func:()=>globalThis.autoApplyContent?.confirmationEvidence()});
+    if(!strong && (!proof.result || proof.result!==message.evidence))return;
+    if(confirmingTabs.has(tabId)||result.siteConfirmed)return;
     confirmingTabs.add(tabId);
     try{
+      result.siteConfirmed=true;result.submitting=false;result.progress='';await report(result);
+      if(!authorized.matched?.application_id){result.trackingError='No matching application to track.';await report(result);return;}
       await api('/ext/applied',{application_id:authorized.matched.application_id,url:message.url,evidence:message.evidence});
       authorized.applied=true;await chrome.storage.session.set({autofillTabs});
-      if(result){result.applied=true;result.progress='Marked as applied';await report(result);}
-    }finally{confirmingTabs.delete(tabId);}
+      if(result){result.applied=true;result.trackingError='';result.progress='';await report(result);}
+    }catch(error){result.trackingError='Tracking failed: '+error.message+'. Retry applied tracking.';await report(result);throw error;}finally{confirmingTabs.delete(tabId);}
   })().then(respond,error=>respond({error:error.message}));return true;
 });
 

@@ -1322,8 +1322,10 @@ def test_workday_real_labels_conditional_options_and_attached_resume(loaded_exte
     assert not panel.locator('#auto-advance').is_checked()
     panel.locator('#next-page').click()
     expect(page.locator('#submit')).to_have_text('Submit')
-    panel.locator('#next-page').click()
+    expect(panel.locator('#next-page')).to_have_text('Submit')
     assert page.evaluate('clicks.submit') == 0
+    panel.locator('#next-page').click()
+    page.wait_for_function('clicks.submit === 1',timeout=5000)
 
 
 def test_workday_load_options_retry(loaded_extension, extension_server):
@@ -1405,13 +1407,48 @@ def test_auto_advance_stops_at_submit_or_validation(loaded_extension, extension_
     expect(panel.locator('#auto-advance')).to_be_checked()
 
 
-@pytest.mark.parametrize('caption,accessible', [('Submit',''),('Submit Application',''),('Apply',''),('Apply Now',''),('Next','Submit Application')])
+@pytest.mark.parametrize('caption,accessible', [('Submit',''),('Submit Application',''),('Apply',''),('Apply Now',''),('Next','Submit Application'),('Next','Apply now')])
 def test_next_page_rejects_final_controls(loaded_extension, extension_server, caption, accessible):
     _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
     page.evaluate("args=>{const next=document.querySelector('#next');next.textContent=args.caption;if(args.accessible)next.setAttribute('aria-label',args.accessible);}", {'caption':caption,'accessible':accessible})
     response=worker.evaluate("""async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>globalThis.autoApplyContent.nextPage()}))[0].result""",tab_id)
     assert response['clicked'] is False
     assert page.evaluate('clicks') == {'next':0,'submit':0,'uploads':0}
+
+
+@pytest.mark.parametrize('attribute,identity', [
+    ('data-automation-id','finalSubmit'), ('data-automation-id','submitApplicationButton'),
+    ('data-automation-id','applyNowButton'), ('id','finalSubmit'),
+    ('aria-labelledby','final-action-label'),
+])
+def test_next_page_rejects_final_semantic_identity(loaded_extension, extension_server, attribute, identity):
+    _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate('''({attribute,identity})=>{
+        const next=document.querySelector('#next');
+        if(attribute==='aria-labelledby'){
+            const label=document.createElement('span');label.id=identity;label.textContent='Submit Application';
+            label.hidden=true;document.body.append(label);
+        }
+        next.setAttribute(attribute,identity);
+    }''',dict(attribute=attribute,identity=identity))
+    response=worker.evaluate('''async id=>(await chrome.scripting.executeScript({target:{tabId:id},
+        func:()=>autoApplyContent.nextPage()}))[0].result''',tab_id)
+    assert response['clicked'] is False
+    assert page.evaluate('clicks') == {'next':0,'submit':0,'uploads':0}
+
+
+def test_next_page_allows_workday_footer_with_stepper_label(loaded_extension, extension_server):
+    _, worker, _, page, tab_id, _ = robust_fixture(loaded_extension, extension_server)
+    page.evaluate('''()=>{
+        const next=document.querySelector('#next');next.textContent='Save and Continue';
+        next.setAttribute('data-automation-id','pageFooterNextButton');
+        next.setAttribute('aria-label','completed step 1 of 7 My Information completed step 2 of 7 My Experience current step 3 of 7 Application Questions step 4 of 7 Voluntary Disclosures step 5 of 7 Self Identify step 6 of 7 Review');
+        next.setAttribute('name','jobApplication');
+    }''')
+    response=worker.evaluate('''async id=>(await chrome.scripting.executeScript({target:{tabId:id},
+        func:()=>autoApplyContent.nextPage()}))[0].result''',tab_id)
+    assert response['clicked'] is True
+    assert page.evaluate('clicks') == {'next':1,'submit':0,'uploads':0}
 
 
 def test_workday_preceding_text_replaces_identifier_label(loaded_extension, extension_server):
@@ -1561,7 +1598,7 @@ def test_t039_labels_rules_navigation_and_snapshot(loaded_extension, extension_s
     panel = context.new_page()
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Page structure sent.')
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
     worker.evaluate("""async id=>chrome.storage.session.set({tabResults:{[id]:{tabId:id,busy:true,waiting:true,fields:[],pending:[],writing:[],page:{},summary:{filled:0,skipped:0,errors:[]}}}})""", tab_id)
     expect(panel.locator('#autofill')).to_be_disabled()
     for name in ('fill','answers','chat'):
@@ -1952,6 +1989,10 @@ def test_t047_virtual_skills_education_and_trace(loaded_extension, extension_ser
     assert {'skills', 'section', 'fill'} <= {trace['kind'] for trace in traces}
     steps = [step for trace in traces for step in trace['entries']]
     assert any(step['action'] == 'scrolled' for step in steps)
+    study_steps = [step for step in steps if step.get('label') == 'Field of Study']
+    assert any(step['step'] == 'dropdown' and step['action'] == 'scrolled' for step in study_steps)
+    assert any(step['step'] == 'dropdown' and step['action'] == 'verified' and step.get('verified') for step in study_steps)
+    assert all(step['step'] != 'skills' for step in study_steps)
     assert any(step['action'] == 'verified' and step.get('verified') for step in steps)
     assert not any(path == '/ext/skills/choose' for path, _, _ in requests)
 
@@ -2037,7 +2078,9 @@ def test_t049_one_click_skills_and_layout(loaded_extension, extension_server, th
     assert page.evaluate('searches').count('TypeScript')==1
     expect(panel.locator('#skills-progress')).not_to_contain_text('Adding skills')
     expect(panel.locator('#skills-progress')).to_have_text('1 matched')
-    expect(panel.locator('#progress')).to_have_text('1 skill added')
+    expect(panel.locator('#progress')).to_have_text('3 skills added')
+    assert {'TypeScript','Python','Rust'} <= set(page.locator('[data-automation-id=selectedItem]').all_text_contents())
+    assert 'Kubernetes' not in page.locator('[data-automation-id=selectedItem]').all_text_contents()
     expect(panel.locator('#section-results')).to_be_empty()
     expect(panel.locator('#filled')).to_be_empty()
     expect(panel.locator('#skipped')).to_be_empty()
@@ -2141,7 +2184,9 @@ def test_t049_skill_overrides_survive_main_autofill(loaded_extension,extension_s
     assert {'Python','Rust','Node.js'}<=set(selected)
     assert page.evaluate('searches').count('Python')==1
     assert page.evaluate('searches').count('Rust')==1
-    expect(panel.get_by_role('button',name='Remove Node',exact=True)).to_be_visible()
+    expect(panel.get_by_role('button',name='Remove Node',exact=True)).to_have_count(0)
+    expect(panel.get_by_label('Python',exact=True)).not_to_be_checked()
+    expect(panel.get_by_label('Rust',exact=True)).not_to_be_checked()
 
 
 def test_t049_skills_without_mounted_sidebar_and_concurrent_fill(loaded_extension,extension_server):
@@ -2416,3 +2461,218 @@ def test_t051_actual_iframe_settings_helper_and_collapsed_control(loaded_extensi
     expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
     assert not any(path=='/ext/answers' for path,_,_ in requests)
     assert not errors
+
+
+def test_t054_manual_submit_confirmation_and_narrow_utilities(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)',dict(server=server,key=KEY))
+    page=context.new_page()
+    page.route('**/t054.html',lambda route:route.fulfill(path=str(FIXTURES/'t054.html'),content_type='text/html'))
+    page.goto(server+'/t054.html')
+    page.emulate_media(reduced_motion='reduce')
+    page.set_viewport_size(dict(width=360,height=600))
+    tab_id=worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id',page.url)
+    errors=[]
+    page.on('pageerror',lambda error:errors.append(str(error)))
+    page.emulate_media(reduced_motion='reduce')
+    worker.evaluate('id=>globalThis.autoApplySidebar(id,"open")',tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#settings').wait_for()
+    panel=next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    page.set_viewport_size(dict(width=360,height=600))
+    page.screenshot(path=str(ROOT/'.tmp/review/t054/auto-off.png'))
+    panel.locator('#auto-advance').check()
+    page.screenshot(path=str(ROOT/'.tmp/review/t054/auto-on-lock.png'))
+    value=worker.evaluate('id=>globalThis.autoApplyAutofill(id)',tab_id)
+    assert value['next_action']['kind']=='submit' and not value.get('waiting')
+    expect(panel.locator('#next-page')).to_have_text('Submit')
+    expect(panel.locator('#auto-advance')).to_be_disabled()
+    assert panel.locator('#auto-advance').is_checked()
+    assert page.evaluate('clicks')==0
+    automatic=worker.evaluate('''async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>autoApplyContent.nextPage(true)}))[0].result''',tab_id)
+    assert not automatic['clicked'] and page.evaluate('clicks')==0
+    output=ROOT/'.tmp/review/t054'
+    output.mkdir(parents=True,exist_ok=True)
+    def shot(name):
+        assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        assert panel.evaluate('''()=>['settings','minimize','close','autofill','next-page','send-structure'].every(id=>{
+            const e=document.getElementById(id),b=e.getBoundingClientRect();
+            return b.width>0&&b.left>=0&&b.right<=innerWidth&&b.bottom<=innerHeight&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));})''')
+        page.screenshot(path=str(output/(name+'.png')))
+    for width,height in [(360,600),(400,800)]:
+        page.set_viewport_size(dict(width=width,height=height))
+        for long in [False,True]:
+            updated=dict(value,page=dict(company='Fixture Company'+(' with a very long research and engineering name'*3 if long else ''),title='Fixture Intern'+(' building distributed systems and developer tools'*3 if long else '')))
+            updated['matched']=dict(value.get('matched',{}),company=updated['page']['company'],title=updated['page']['title'])
+            worker.evaluate('value=>chrome.storage.session.set({tabResults:{[value.tabId]:value}})',updated)
+            expect(panel.locator('#company')).to_have_text(updated['page']['company'])
+            assert panel.evaluate('''()=>{const b=id=>document.getElementById(id).getBoundingClientRect();return Math.abs((b('company').y+b('company').height/2)-(b('settings').y+15))<2&&Math.abs((b('job').y+b('job').height/2)-(b('connection').y+3.5))<2;}''')
+            shot(f'header-{width}x{height}-'+('long' if long else 'short'))
+    page.set_viewport_size(dict(width=360,height=600))
+    panel.locator('#settings').click()
+    expect(panel.locator('#server')).to_be_enabled()
+    page.screenshot(path=str(output/'settings-360x600.png'))
+    panel.locator('#settings-back').click()
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    assert panel.evaluate('''()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left&&Math.abs(s.y+s.height/2-b.y-b.height/2)<2;}''')
+    shot('sent-inline')
+    expect(panel.locator('#snapshot-status')).to_be_empty(timeout=5000)
+    panel.evaluate('''()=>{const send=chrome.runtime.sendMessage.bind(chrome.runtime);let failed=false;chrome.runtime.sendMessage=m=>m.type==='page-snapshot'&&!failed?(failed=true,Promise.resolve({error:'Fixture snapshot failed'})):send(m);}''')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Failed')
+    expect(panel.locator('#error')).to_contain_text('Try Send page structure again')
+    shot('snapshot-error')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#error')).to_be_empty()
+    shot('snapshot-retry-sent')
+    panel.locator('#minimize').click()
+    page.locator('#autoapply-sidebar .restore').hover()
+    page.screenshot(path=str(output/'minimized-hover-x.png'))
+    assert page.locator('#autoapply-sidebar .collapsed').evaluate("e=>getComputedStyle(e).overflow")=='hidden'
+    page.locator('#autoapply-sidebar .restore').click()
+    # Runtime/page synthetic requests cannot invoke the privileged manual action.
+    page.evaluate("()=>window.postMessage({type:'manual-submit'},'*')")
+    assert page.evaluate('clicks')==0
+    stale=panel.evaluate('''({tabId,expected})=>chrome.runtime.sendMessage({type:'manual-submit',tabId,expected:{...expected,step:'Old step'}})''',dict(tabId=tab_id,expected=value['next_action']))
+    assert 'error' in stale and page.evaluate('clicks')==0
+    worker.evaluate('()=>chrome.storage.session.set({chromeRun:{active:true}})')
+    refused=panel.evaluate('''({tabId,expected})=>chrome.runtime.sendMessage({type:'manual-submit',tabId,expected})''',dict(tabId=tab_id,expected=value['next_action']))
+    assert 'error' in refused and page.evaluate('clicks')==0
+    worker.evaluate('()=>chrome.storage.session.set({chromeRun:{active:false}})')
+    page.evaluate("mode='invalid'")
+    panel.locator('#next-page').click()
+    expect(panel.locator('#progress')).to_contain_text('Required information missing')
+    assert page.evaluate('clicks')==1
+    expect(panel.locator('#submission-status')).to_be_hidden()
+    assert not any(path=='/ext/applied' for path,_,_ in requests)
+    shot('submission-validation-failure')
+    page.evaluate("document.querySelector('#feedback').replaceChildren();mode='pending'")
+    panel.locator('#next-page').click()
+    expect(panel.locator('#next-page')).to_have_text('Submitting...')
+    expect(panel.locator('#submission-status')).to_be_hidden()
+    assert page.evaluate('clicks')==2
+    shot('submitting-no-celebration')
+    duplicate=panel.evaluate('''({tabId,expected})=>chrome.runtime.sendMessage({type:'manual-submit',tabId,expected})''',dict(tabId=tab_id,expected=value['next_action']))
+    assert 'error' in duplicate and page.evaluate('clicks')==2
+    page.evaluate('confirmApplication()')
+    expect(panel.locator('#submission-status')).to_be_visible()
+    expect(panel.locator('#applied-status')).to_be_visible()
+    expect(panel.locator('#progress')).to_be_empty()
+    expect(panel.get_by_text('Application submitted',exact=True)).to_have_count(1)
+    expect(panel.get_by_text('Marked as applied',exact=True)).to_have_count(0)
+    expect(panel.get_by_role('button',name='Undo tracking',exact=True)).to_be_visible()
+    assert panel.locator('#submission-status #undo-applied').count()==1
+    shot('confirmed-moon')
+    confirmed=worker.evaluate("async id=>(await chrome.storage.session.get('tabResults')).tabResults[id]",tab_id)
+    for theme in ['dark','light']:
+        page.emulate_media(color_scheme=theme,reduced_motion='reduce')
+        for long in [False,True]:
+            title='Fixture Intern'+(' building distributed systems and developer tools'*3 if long else '')
+            company='Fixture Company'+(' with a very long research and engineering name'*3 if long else '')
+            updated=dict(confirmed,matched=dict(confirmed.get('matched',{}),company=company,title=title))
+            worker.evaluate('value=>chrome.storage.session.set({tabResults:{[value.tabId]:value}})',updated)
+            expect(panel.locator('#company')).to_have_text(company)
+            expect(panel.locator('#job')).to_have_text(title)
+            assert panel.locator('#submission-status').evaluate("e=>e.getBoundingClientRect().height<=48")
+            assert panel.locator('#undo-applied').evaluate("e=>{const b=e.getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}")
+            shot('confirmed-360x600-'+theme+'-'+('long' if long else 'short'))
+    page.evaluate("document.querySelector('#submitted-heading').textContent='Application Submitted '")
+    page.wait_for_timeout(500)
+    assert sum(path=='/ext/applied' for path,_,_ in requests)==1
+    panel.locator('#undo-applied').click()
+    expect(panel.locator('#applied-status')).to_be_hidden()
+    expect(panel.locator('#submission-status')).to_be_visible()
+    expect(panel.locator('#tracking-status')).to_have_text('Tracking undone. Site submission is unchanged.')
+    expect(panel.locator('#retry-tracking')).to_be_hidden()
+    page.evaluate("document.querySelector('#submitted-heading').textContent='Application Submitted'")
+    page.wait_for_timeout(500)
+    assert sum(path=='/ext/applied' for path,_,_ in requests)==1
+    assert sum(path=='/ext/unapplied' for path,_,_ in requests)==1
+    # Reviewing a fresh form restores the explicit Submit action after tracking Undo.
+    page.evaluate("document.querySelector('#feedback').replaceChildren()")
+    worker.evaluate('id=>globalThis.autoApplyAutofill(id)',tab_id)
+    expect(panel.locator('#submission-status')).to_be_hidden()
+    expect(panel.locator('#next-page')).to_be_enabled()
+    assert page.evaluate('clicks')==2
+    assert not errors
+
+
+# Keep the preserved regression cases in the runner's explicit extension file.
+# The source module sets __test__ false so full discovery executes each case once.
+@pytest.mark.parametrize('name,parameters', [
+    ('test_snapshot_checkbox_questions_and_pending_options',{}),
+    *[('test_english_proficiency_rerender_preserves_language_and_study',{'language':value}) for value in ['English','','Spanish']],
+    ('test_stale_study_search_is_not_a_committed_pill',{}),
+    *[('test_generic_study_requires_stable_pill_after_current_activation',{'mode':mode}) for mode in ['replaced','native-only','stale-label','transient-pill']],
+    ('test_immediate_busy_before_delayed_scan_and_error_reset',{}),
+    ('test_all_profile_skills_and_reset_do_not_create_exclusions',{}),
+    ('test_c_cpp_split_before_search_preserves_punctuation_and_pills',{}),
+])
+def test_t053_preserved_browser_coverage(loaded_extension, extension_server, name, parameters, request):
+    import test_t053_browser as source
+    getattr(source,name)(loaded_extension,extension_server,**parameters)
+
+
+@pytest.mark.parametrize('scenario',['tracking_error','unmatched','stale_confirmation'])
+def test_t054_confirmation_tracking_boundaries(loaded_extension, extension_server, scenario):
+    context,worker,extension_id=loaded_extension
+    server,requests=extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)',dict(server=server,key=KEY))
+    if scenario=='unmatched':
+        worker.evaluate('''()=>{const original=fetch;globalThis.fetch=(url,...args)=>String(url).endsWith('/ext/match')?Promise.resolve(new Response('{}',{headers:{'Content-Type':'application/json'}})):original(url,...args);}''')
+    page=context.new_page()
+    page.route('**/t054.html',lambda route:route.fulfill(path=str(FIXTURES/'t054.html'),content_type='text/html'))
+    page.goto(server+'/t054.html')
+    tab_id=worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id',page.url)
+    if scenario=='stale_confirmation':page.evaluate('confirmApplication()')
+    worker.evaluate('id=>globalThis.autoApplyAutofill(id)',tab_id)
+    if scenario=='unmatched':
+        # Exercise an absent authorized match, not only an empty match object.
+        worker.evaluate("async id=>{const {autofillTabs}=await chrome.storage.session.get('autofillTabs');delete autofillTabs[id].matched;await chrome.storage.session.set({autofillTabs});}",tab_id)
+    errors=[]
+    page.on('pageerror',lambda error:errors.append(str(error)))
+    panel=page.frame_locator('#autoapply-sidebar iframe')
+    if scenario=='tracking_error':
+        worker.evaluate('''()=>{const original=fetch;globalThis.fixtureFetch=original;globalThis.trackingAttempts=0;globalThis.fetch=(url,...args)=>String(url).endsWith('/ext/applied')?(globalThis.trackingAttempts++,Promise.resolve(new Response('{"error":"Fixture tracking unavailable"}',{status:503,headers:{'Content-Type':'application/json'}}))):original(url,...args);}''')
+    page.locator('#final').click()
+    if scenario=='stale_confirmation':
+        page.locator('#feedback').evaluate("el=>el.append(' ')")
+        page.wait_for_timeout(500)
+        expect(panel.locator('#submission-status')).to_be_hidden()
+        assert not any(path=='/ext/applied' for path,_,_ in requests)
+        return
+    page.evaluate('confirmApplication()')
+    expect(panel.locator('#submission-status')).to_be_visible()
+    expect(panel.locator('#applied-status')).to_be_hidden()
+    expect(panel.locator('#tracking-status')).to_contain_text('No matching application' if scenario=='unmatched' else 'Tracking failed')
+    expect(panel.locator('#retry-tracking')).to_be_visible()
+    expect(panel.locator('#progress')).to_be_empty()
+    expect(panel.get_by_text('Application submitted',exact=True)).to_have_count(1)
+    page.evaluate("document.querySelector('#submitted-heading').textContent='Application Submitted '")
+    page.wait_for_timeout(600)
+    assert not any(path=='/ext/applied' for path,_,_ in requests)
+    if scenario=='tracking_error':
+        assert worker.evaluate('trackingAttempts')==1
+    assert not errors
+    page.emulate_media(reduced_motion='reduce')
+    page.set_viewport_size(dict(width=360,height=600))
+    page.screenshot(path=str(ROOT/'.tmp/review/t054'/('confirmation-'+scenario+'.png')))
+    if scenario=='tracking_error':
+        worker.evaluate('()=>{globalThis.fetch=globalThis.fixtureFetch;}')
+        panel.locator('#retry-tracking').click()
+        expect(panel.locator('#applied-status')).to_be_visible()
+        expect(panel.locator('#tracking-status')).to_be_empty()
+        assert sum(path=='/ext/applied' for path,_,_ in requests)==1
+
+
+def test_t054_manifest_moon_icons_are_vector_derived():
+    import struct
+    manifest=json.loads((ROOT/'extension/manifest.json').read_text())
+    assert manifest['icons']==manifest['action']['default_icon']
+    assert 'M20 15.5A9 9 0 0 1 8.5 4 9 9 0 1 0 20 15.5Z' in (ROOT/'extension/icons/moon.svg').read_text()
+    for size in [16,32,48,128]:
+        data=(ROOT/'extension'/manifest['icons'][str(size)]).read_bytes()
+        assert data[:8]==b'\x89PNG\r\n\x1a\n'
+        assert struct.unpack('>II',data[16:24])==(size,size)

@@ -1010,7 +1010,20 @@ def test_html_loads_queue_asynchronously_no_external_assets_or_unsafe_endpoints(
     assert status == 200
     assert server.server_address[0] == '127.0.0.1'
     assert dashboard.token in page and '__TOKEN__' not in page
-    assert '<script src=' not in page and '<link ' not in page
+    class Assets(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.links=[]
+            self.scripts=[]
+        def handle_starttag(self,tag,attrs):
+            if tag=='link': self.links.append(dict(attrs))
+            if tag=='script': self.scripts.append(dict(attrs))
+    assets=Assets()
+    assets.feed(page)
+    assert all('src' not in script for script in assets.scripts)
+    assert len(assets.links)==1
+    assert assets.links[0]['rel']=='icon' and assets.links[0]['type']=='image/svg+xml'
+    assert assets.links[0]['href'].startswith('data:image/svg+xml,')
     assert 'setInterval(load,60000)' in page
     assert headers['Cache-Control'] == 'no-store'
     initial = json.loads(page.split('render(')[-1].split(');setInterval')[0])
@@ -2372,3 +2385,62 @@ def test_t049_canonical_history_reuse_and_duplicate_detection(dashboard, config,
     with pytest.raises(ValueError,match='Duplicate application ID'):
         with dashboard.connection() as reader:
             ConflictIndex(reader)
+
+
+@pytest.mark.browser
+def test_t054_dashboard_gear_and_favicon_source(http_dashboard, config, db, listing):
+    from playwright.sync_api import sync_playwright
+    queue(db,config,listing,3)
+    server,_=http_dashboard
+    output=Path('.tmp/review/t054')
+    output.mkdir(parents=True,exist_ok=True)
+    with sync_playwright() as playwright:
+        browser=playwright.chromium.launch(channel='chromium',headless=True)
+        try:
+            page=browser.new_page(viewport=dict(width=1440,height=900))
+            errors=[]
+            page.on('pageerror',lambda error:errors.append(str(error)))
+            page.add_init_script("window.cspViolations=[];document.addEventListener('securitypolicyviolation',event=>cspViolations.push({directive:event.effectiveDirective,uri:event.blockedURI}));")
+            def respond(route):
+                incoming=route.request
+                if not incoming.url.startswith('http://127.0.0.1:8765/'):
+                    route.abort();return
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    status,body,headers=pool.submit(request,server,incoming.method,incoming.url.removeprefix('http://127.0.0.1:8765'),incoming.all_headers(),incoming.post_data).result()
+                route.fulfill(status=status,body=body if isinstance(body,(str,bytes)) else json.dumps(body),headers=headers)
+            page.route('**/*',respond)
+            page.goto('http://127.0.0.1:8765/#priority')
+            page.locator('#rows .item').first.wait_for()
+            gear=page.locator('#tab-settings')
+            assert gear.evaluate("e=>{const b=e.getBoundingClientRect();return b.right<=innerWidth&&b.top>=0&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}")
+            assert page.locator('link[rel=icon]').get_attribute('href').startswith('data:image/svg+xml,')
+            assert 'M20%2015.5A9' in page.locator('link[rel=icon]').get_attribute('href')
+            _,_,response_headers=request(server,'GET','/')
+            csp=next(value for key,value in response_headers.items() if key.lower()=='content-security-policy')
+            directives=dict(part.strip().split(' ',1) for part in csp.split(';'))
+            assert directives['default-src']=="'none'" and directives['img-src']=='data:'
+            assert directives['connect-src']=="'self'"
+            assert directives['script-src']==directives['style-src']==f"'nonce-{server.dashboard.token}'"
+            assert all(directives[name]=="'none'" for name in ['base-uri','frame-ancestors','form-action'])
+            # Decode and paint the actual favicon URI in the actual response CSP.
+            # The in-memory handler fixture never starts the private dashboard.
+            rendered=page.evaluate("""async()=>{
+                const image=new Image();image.src=document.querySelector('link[rel=icon]').href;
+                await image.decode();
+                const canvas=document.createElement('canvas');canvas.width=canvas.height=24;
+                const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0,24,24);
+                const pixels=ctx.getImageData(0,0,24,24).data;
+                return {width:image.naturalWidth,height:image.naturalHeight,painted:[...pixels].some((v,i)=>i%4===3&&v>0),uri:canvas.toDataURL()};
+            }""")
+            assert rendered['width']>0 and rendered['height']>0 and rendered['painted']
+            assert page.evaluate('cspViolations')==[]
+            import base64
+            (output/'favicon-rendered.png').write_bytes(base64.b64decode(rendered.pop('uri').split(',',1)[1]))
+            (output/'favicon-csp.json').write_text(json.dumps(dict(declaration=page.locator('link[rel=icon]').get_attribute('href'),csp=csp,display_verified=True,rendered=rendered,violations=page.evaluate('cspViolations'))),encoding='utf-8')
+            page.screenshot(path=str(output/'dashboard-1440.png'))
+            gear.click()
+            page.locator('#settings-nav button').first.wait_for()
+            page.screenshot(path=str(output/'dashboard-settings-1440.png'))
+            assert not errors
+        finally:
+            browser.close()

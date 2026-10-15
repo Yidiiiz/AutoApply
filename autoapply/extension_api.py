@@ -87,6 +87,8 @@ def _question(field):
             or not isinstance(field.get('key', field['label']), str)
             or not isinstance(field.get('section', ''), str)):
         raise SettingsRejected('Invalid field kind, options, required, key or max_length')
+    if kind == 'checkbox' and len(options) > 1 and field.get('multiple') is True:
+        kind = 'multiselect'
     return Question(field.get('key', field['label']), field['label'], kind,
                     field.get('required', False), options, maximum)
 
@@ -319,6 +321,57 @@ def snapshot(dashboard, payload):
     return dict(ok=True, filename=filename)
 
 
+def _choice_answer(dashboard, q, resolution, profile):
+    """One cached interpretation through the existing writer; choices are never prose."""
+    from .profile_snapshot import fingerprint
+    descriptor = resolution.descriptor
+    if (descriptor.semantic_key != 'UNKNOWN_FIELD' or not q.options
+            or q.kind not in {'multiselect', 'select', 'radio', 'combobox'}
+            or descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}):
+        return None
+    # Undefined legal, identity and demographic claims must stay with the applicant.
+    if re.search(r'\b(?:agree\w*|restrict\w*|legal|consent|certify|citizen\w*|sponsor\w*|visa|gender|race|ethnic\w*|disab\w*|veteran|sexual|medical)\b', normalize(q.label)):
+        return None
+    facts = {key: profile[key] for key in ('languages', 'skills', 'skill_categories',
+             'education', 'career_interests') if profile.get(key)}
+    preferences = profile.get('application_preferences', {})
+    for key in ('role_preferences', 'internship_cohort', 'career_goal'):
+        if preferences.get(key):
+            facts['application_preferences.' + key] = preferences[key]
+    if not facts:
+        return None
+    cache_key = fingerprint([descriptor.signature, resolution.profile_revision, facts])
+    cache = getattr(dashboard, '_ext_choice_answers', {})
+    if cache_key in cache:
+        return cache[cache_key]
+    answer = None
+    try:
+        result = dashboard.run_writing(dict(task='choice_interpret', profile=facts,
+            question=q.label, options=q.options, job={}, timeout_seconds=8,
+            instruction=('Interpret this choice question only from explicit supplied profile facts. '
+                'Omission is not evidence of a negative fact. Do not infer unlisted abilities. '
+                'Return a JSON object with choices (exact offered strings), '
+                'fact_ids (nonempty supplied profile keys supporting the choices), and needs_input. '
+                'If ambiguous set needs_input true and choices empty. None is exclusive. '
+                'Do not write prose. Choose one unless multiple is true.'),
+            multiple=q.kind == 'multiselect'))
+        proposed = result
+        choices, ids = proposed.get('choices'), proposed.get('fact_ids')
+        if (proposed.get('needs_input') is False and isinstance(choices, list) and choices
+                and isinstance(ids, list) and ids and all(isinstance(k, str) and k in facts for k in ids)):
+            value = choices if q.kind == 'multiselect' else choices[0] if len(choices) == 1 else None
+            answers.validate_answer(q, value)
+            answer = Answer(value, 'grounded_ai:choice', evidence=ids,
+                            provenance={'rule': 'validated-profile-choice'})
+    except Exception:
+        pass  # Unavailable/invalid/ambiguous interpretation remains visible for user input.
+    if len(cache) >= 64:
+        cache.clear()
+    cache[cache_key] = answer
+    dashboard._ext_choice_answers = cache
+    return answer
+
+
 def resolve_answers(dashboard, payload):
     fields = payload.get('fields')
     if not isinstance(fields, list) or len(fields) > 500:
@@ -406,6 +459,8 @@ def resolve_answers(dashboard, payload):
                         raise ValueError('Field cannot accept text')
                 except (ValueError, TypeError):
                     answer = None
+            if answer is None and not repeated and not education_part:
+                answer = _choice_answer(dashboard, q, resolution, resolver.snapshot.facts)
             status = ('RESOLVED' if answer else 'NEEDS_WRITING' if not field.get('section_missing_date') and answers.is_writing_question(q)
                       else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP')
             result.append(dict(key=q.key, value=answer.value if answer else None,

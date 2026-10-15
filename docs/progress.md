@@ -413,3 +413,222 @@ review at1440/500px:50 visible rows, no horizontal overflow, top-right gear
 visible, zero JavaScript errors. Screenshot .tmp/review/t052-integrated/queue-1440-dark.png
 was visually inspected. No employer actions, final submissions or push occurred.
 Reload extension and refresh already-open employer tabs to activate the new UI.
+
+
+## T053 supervisor review ? interrupted draft, 2026-10-15
+
+Run0a77801f5d0f489abe1ee1926c8b96b8 stopped at provider quota before a structured
+worker result. Runner recorded auth_or_quota; supervisor reviewed needs_followup,
+no source integration. Draft has checkbox visibility/grouping and committed
+activation, English section rerender handling, Field of Study prompt occupancy,
+profile skills all-by-default, separate C/C++ selection, success UI reset distinct
+from user exclusions, early busy state, and label/preference/unknownchoice rules.
+Worker claims all8 new browser and11 answer regressions pass; supervisor is
+independently running tests/test_t053_answers.py and tests/test_t053_browser.py.
+Full required checks remain; no claim of completed live form acceptance.
+
+User clarified Yes to employment restrictions for ALL employers after launch.
+Supervisor saved application_preferences.employment_restrictions=true privately
+with USER_PROVIDED provenance. Previously reported incorrect No entries for
+applications7349/7350 were privately backed up and unverified. Also saved exact
+LinkedIn URL, orderedlocations, rolepreferences, No preference cohort, university
+US country and corrected permanent address privately. No private data is staged.
+The interrupted draft still abstains on restriction questions without exactmemory;
+follow-up must support the explicit current profile boolean and retain abstention
+when absent. Task T054.json contains this steering and remaining UI requests.
+
+Supervisor source review identified _choice_answer uses task=question_answer,
+but CodexWritingProvider only enforces request timeout on skill tasks; it also
+prompts prose. Correct actual provider deadline and structured choice prompt in
+follow-up with provider-level stalled/invalid-output tests. Optional unknownchoice
+failures must remain pending, no unbounded request hangs.
+
+UI/manual submission work remains unimplemented: proper gear and all moonicons,
+headeralignment, centeredtabs, unobtrusive coverletter, inlinefading Sent, rounded
+collapsedhover, lockAuto, explicitmanual finalSubmit and confirmationcelebration.
+T054 task is prepared but NOT launched. Preserve finalautomaticSubmit prohibition;
+user authorized manual sidebar action only. No live employer Submit was performed.
+Quota-stop reset needs explicit user authorization; no reset performed this turn.
+
+Independent T053 focused result: **19 passed in34.46s** across new answer and
+browser regressions, .venv Python -p no:cacheprovider with basetemp
+.tmp/t053-supervisor. git diff --check also passed. Full suites, actual provider
+timeout correction, explicit all-employer Yes support and UI work remain before
+acceptance/integration. No sourcecode changes by supervisor.
+
+
+## T054 scoped implementation and remaining acceptance gap - 2026-10-15
+
+Preserved every T053 draft edit. Added the real choice_interpret provider task:
+request-wide async deadline (8 seconds, capped at 10), structured choices/fact_ids/
+needs_input prompt, existing process cancellation/kill/wait cleanup, and unchanged
+ordinary writing/chat timeouts. Consumer validation rejects unsupported options,
+invalid evidence IDs, exclusive-choice conflicts and ambiguous/unavailable output.
+Provider tests use stalled subprocess coroutines and stub process output only.
+
+The explicit application_preferences.employment_restrictions boolean now answers
+fully matched positive agreement-existence questions for any named employer, with
+profile provenance, before stale No memory. Missing facts preserve review; unknown
+extra legal promises and negative grammar remain unresolved. Ordinary I agree is
+unchanged. All-profile skills, committed checkbox activation, English rerenders,
+Field of Study occupancy, busy feedback and user exclusions remain preserved.
+
+Implemented shared recognizable gears; canonical crescent manifest PNGs generated
+locally from SVG; aligned/truncated company/title rows; centered tabs; compact cover
+utility; inline fading Sent and retryable errors without footer growth; internal
+checked-state Auto lock and initialization race fix; clipped minimized hover.
+Manual final Submit detects the actual caption and review/footer context, including
+Workday's reused automation ID and giant stepper aria-label. Zero-field review is
+published explicitly. Only authorized sidebar messages activate it after fresh
+URL/step/visibility/enabled/validation/idle checks, with overlap serialization.
+Automatic Next never submits. Embedded and standalone sidebars are both covered.
+
+Trusted employer clicks and explicit sidebar intent wait for fresh visible site
+confirmation. Clicks, stale confirmation and validation failure do not celebrate.
+The compact moon/status respects reduced motion; applied tracking is idempotent
+and retains Undo. Tracking failures and missing matches have distinct feedback and
+Retry applied tracking without falsely claiming a database update.
+
+Focused .venv checks (all fixture-only):
+- .tmp/t054-final-backend.log: 62 passed in10.28s, including provider timeout,
+  prompt/schema/invalid output, normal timeout preservation, restriction true/false,
+  another employer, absent facts, extra clauses and stale memory; question rules.
+- .tmp/t054-configured-coverage.log: 24 passed in41.19s. The original 11 T053
+  answer and8 browser cases plus5 profile cases now run through the actual configured
+  test_extension.py/test_extension_api.py wrappers. Their original source modules
+  are retained with __test__ false so full discovery does not collect cases twice.
+  Both tests/test_t053_answers.py and tests/test_t053_browser.py were included in
+  focused verification. No runner configuration was edited.
+- .tmp/t054-preserved-skills.log: 7 passed in51.40s (light/dark skills, overrides,
+  automatic all-profile filling, run cancel/skip).
+- .tmp/t054-final-guards.log: 6 passed in24.81s, final manual-only action, stale/run/
+  duplicate refusal, submitting versus real confirmation, direct employer intent,
+  tracking retry, old confirmation refusal, reused Workday label transition, and
+  1440px dashboard gear/favicon source/CSP inspection.
+- .tmp/t054-dashboard.log: 3 passed in3.09s, dashboard rendering, ASCII-only source
+  and existing JavaScript display contract. PNG dimensions/source-path checks pass.
+- All changed extension JavaScript syntax and git diff --check pass.
+
+Screenshots in .tmp/review/t054 were visually inspected: actual shadow iframes at
+360x600 and400x800 with short/long contexts, aligned controls and hit-tested bounds,
+settings, Auto off/on-lock, inline Sent/fade/error/retry, minimized hover/X, final
+Submit with Auto disabled, submitting/failure and real confirmation, tracking
+failure/missing match, dashboard gear at1440px, and16/32/48/128px moon icon sheet.
+No page JavaScript errors were observed in the relevant fixture checks.
+
+The original favicon acceptance gap is resolved in the authorized T054 follow-up:
+the response CSP adds only img-src data:, preserving all existing directives.
+The actual handler response is used by the local browser fixture, which decodes
+and paints the favicon URI and asserts zero securitypolicyviolation events.
+The evidence is .tmp/review/t054/favicon-csp.json and favicon-rendered.png.
+The follow-up also removes duplicate applied narration: a single compact moon
+Application submitted banner carries Undo tracking inline. Tracking failures and
+missing matches remain separate small statuses. Undo preserves site confirmation
+and explains that only tracking changed. The confirmation listener safely handles
+an absent authorized match and ignores duplicate proof even after tracking failure.
+Full configured extension/dashboard/semi_auto/diff checks remain for the independent
+runner as requested; no full extension suite was repeated in this task.
+
+No agents, orchestration/runtime/auth/budget changes, ignored applicant data edits,
+live services, employer submissions, dashboard startup, external requests, package
+installs, staging, commits, pushes or deployment were used. The shell helper failed
+to initialize; local Node child-process execution ran the permitted fixture checks.
+
+
+T054 follow-up validation (2026-10-15, local fixtures only):
+- .tmp/review/t054/followup-extension-final.log: 16 passed, including trusted
+  employer clicks, manual Submit/pending/validation guards, absent authorized match,
+  duplicate confirmation after tracking failure, explicit tracking retry/Undo,
+  and preserved checkbox/language/skills/C/C++ cases.
+- .tmp/review/t054/followup-provider-final.log: 26 passed, including provider
+  deadlines/failure handling, missing facts and preserved T053 answer coverage.
+- .tmp/review/t054/followup-dashboard-final.log: 4 passed, including actual CSP
+  image decoding/painting, no external assets, listing injection and JS renderers.
+- .tmp/review/t054/followup-semi-auto-final.log: 2 passed for manual-only intent
+  and final-action guards. JavaScript syntax, dashboard ASCII/AST and diff hygiene pass.
+
+Two concrete focused-check failures were resolved: the nonce CSP rejected existing
+inline width attributes on the selection number inputs (now an equivalent class
+in the nonce stylesheet), and the old no-link assertion rejected the new favicon
+(now asserts exactly one data SVG icon and no external scripts/assets). Prior
+configured check logs were cancelled, not failed test results. Full configured
+extension/dashboard/semi_auto/diff checks remain the independent runner step.
+
+Visually inspected final screenshots: .tmp/review/t054/confirmed-360x600-{dark,light}-
+{short,long}.png, confirmation-unmatched.png, confirmation-tracking_error.png,
+favicon-rendered.png and manifest-moon-icons.png. The four confirmed captures
+show one compact banner and accessible inline Undo tracking, without duplicate
+applied narration. Existing extension/icons/moon-{16,32,48,128}.png files were
+verified against manifest paths, PNG headers and dimensions; they were not rebuilt.
+Integration must explicitly include these ignored PNG assets.
+
+
+## T054 attempt 3: final-action identity and virtual education correction - 2026-10-15
+
+Read the prior runner's check-extension.log: 326 passed, with failures for Next
+carrying aria-label Submit Application and the T047 virtual Field of Study pill.
+Reproduced both against the actual unpacked MV3 extension before correcting them.
+Baseline evidence is .tmp/t054-attempt3/baseline-direct.log and
+.tmp/t054-attempt3/baseline-diagnosis.json. The structured trace showed Field of
+Study starting its option lookup before the first 100ms render, recording zero
+scrolls, and leaving the pill list empty. The cause was the comma expression
+await (settledComboOptions(...), promptOption(...)): its first promise was never
+awaited. This was an observed readiness failure, not an assumed detached click.
+
+Automatic Next now checks caption, accessible labels and precise final-action
+words in automation identity, including camel-case Submit/Apply markers. Generic
+jobApplication words and Workday's reused pageFooterNextButton remain valid for
+Save and Continue with the long Application Questions stepper label. The explicit
+manual Submit caption/context/user-action path is unchanged.
+
+Generic prompts now await initial options, use the existing bounded option
+stability wait after scrolling, reacquire exact rendered rows, and use the existing
+pointer activation guard. Inner radioBtn, checkboxPanel and clickable row handlers
+are supported. Interrupted activation can reacquire a replacement; a completed
+click is never repeated while commitment is pending. Verification requires a
+stable selected-item pill, excluding search text, native checked state, stale
+checked labels and transient pills. Education keeps dropdown/field traces and
+never calls the skill choice provider. Existing skill cancellation/activation and
+pre-existing-value guards were preserved.
+
+Focused .venv Python results (all external browser traffic blocked by the existing
+fixture harness; no live employer/Discord service or application submission):
+- .tmp/t054-attempt3/navigation.log: 13 passed in 58.80s. Original rejection cases
+  retained, plus Apply now, final automation/accessible identity and the positive
+  long-stepper Workday footer; includes original T047 exact education/Java pills.
+- .tmp/t054-attempt3/preserved.log: 17 passed in 113.21s. T048 inner-checkbox
+  commitment variants, all eight T053 preserved browser cases, four new generic
+  study replacement/no-pill/stale-label/transient-pill cases, and T044 cancellation.
+  New source-module cases are imported by the configured test_extension.py wrapper.
+- .tmp/t054-attempt3/manual.log: 3 passed in 35.23s. Existing T054 explicit manual
+  Submit confirmation guards and automatic advance stopping at final/validation.
+- .tmp/t054-attempt3/virtual-trace.log: 1 passed in 15.04s after strengthening the
+  original T047 assertions for Field of Study scrolling/verification and absence
+  of skills-labelled education traces. All original behavior assertions remain.
+- JavaScript syntax, Python test syntax and git diff --check passed.
+
+Only extension/content.js, tests/test_extension.py, tests/test_t053_browser.py and
+this progress note were changed in this correction. All pre-existing combined
+Workday/profile/UI edits and binary icons were preserved. No workers, runtime or
+orchestration metadata, private applicant data, budgets, staging, commits, pushes,
+deployments or dashboard startup were used. The shell helper could not initialize;
+permitted local checks used Node child processes. Full configured extension,
+dashboard, semi_auto and diff checks remain for the independent runner.
+
+## Final T053/T054 supervisor acceptance - 2026-10-15
+
+T054 attempt3 run e27ab244fcac498fb5646a7d12ef5cb8 returned valid completed
+claim. Independent runner checks passed: extension/API339, dashboard353,
+semi_auto60, diff. Supervisor accepted after reviewing source, scoped baseline
+changes, local snapshot-derived prompt/checkbox traces and lunar UI screenshots.
+Original Next/Submit-label and virtual Field of Study failures were reproduced,
+corrected and retained as regressions. New prompt replacement/transient/stale
+commit tests remain. No automatic final Submit path was added; explicit user
+footer Submit and trusted employer clicks require real confirmation for success.
+Moon PNG assets verified at16/32/48/128 and will be explicitly staged despite
+global PNG ignore. No private data staged or live employer submissions performed.
+
+Integrate combined preserved draft in codex-work, fast-forward chrome-extension,
+restart dashboard hidden with .venv Python and --no-browser; verify local APIs
+against user-supplied facts and read-only rendered dashboard. Real employer
+appearance/fill acceptance remains for user's extension reload and fresh run.

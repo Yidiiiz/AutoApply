@@ -95,6 +95,9 @@ def describe(q, app, profile=None):
     from .question_keywords import unusable_label
     if unusable_label(q.label):
         mapped, policy = UNKNOWN_FIELD, 'REQUIRE_USER'
+    from .disclosures import employment_restriction
+    if employment_restriction(q.label):
+        mapped, policy = 'employment_restrictions', 'REQUIRE_USER'
     if mapped == 'eligibility_confirmation':
         policy = 'REQUIRE_USER'
     return _descriptor(q.label, mapped, q.kind, tuple(q.options), q.required, q.max_length, q.min_selections, q.max_selections, scope,

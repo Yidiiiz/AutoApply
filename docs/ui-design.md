@@ -65,3 +65,34 @@ Chat, Answers, Skills, minimized/dismissed states; dashboard at 1440/800/500px
 in both grayscale variants with unselected/mixed/all checkbox states and Settings.
 Tests check click hit-testing, bounds, overflow and JavaScript errors. These local
 fixtures do not establish appearance on a live employer page.
+
+
+T054 keeps company and 30px icon centers on the first header row, with the
+single-line title and connection indicator on the second. Main tabs are centered;
+run controls keep their conditional row. Settings uses the same outlined gear on
+the dashboard and sidebar. The canonical crescent path also supplies locally
+rendered 16/32/48/128px manifest PNGs in extension/icons; no new permission or
+asset dependency is required. Collapsed hover clips to its rounded container.
+
+Cover-letter generation is a small text utility. Structure feedback is a transient
+inline Sent immediately before its utility; errors keep that footer height and
+provide actionable detail in the existing alert. Checked Auto shows an internal
+lock. The stored preference survives final review, where Auto is disabled and the
+footer offers an explicit manual Submit. Automatic navigation never calls Submit.
+
+A manual final action reacquires a visible, enabled button and verifies URL, step,
+validation, and idle state. A click shows pending feedback, never success. Fresh
+visible employer confirmation produces a compact crescent/status, with reduced
+motion support. Tracking failure or an unmatched application is separately named,
+with Retry applied tracking. One Application submitted banner contains the moon and
+inline Undo tracking after successful tracking; no separate applied-success text or
+global progress success is shown. Undo retains site confirmation and explains that
+only tracking changed. Duplicate confirmation does not repeat success or retry a
+failed tracking write; retry remains explicit.
+
+Evidence is in .tmp/review/t054, using isolated local fixtures only. The dashboard
+favicon uses the same SVG path, with a narrow img-src data: allowance. Browser
+verification decodes and paints the declared image under the actual response CSP
+and records no policy violations. Other policy directives are preserved. The
+existing manifest PNGs remain required integration assets at 16/32/48/128 pixels;
+their headers, dimensions, manifest paths and visual sheet are checked.

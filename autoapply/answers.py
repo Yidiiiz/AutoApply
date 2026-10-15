@@ -148,6 +148,8 @@ def standard_answer(q, app, profile):
         return None
     path = paths.get(key, key)
     value = fact(profile, path)
+    if key == 'application_preferences.terms_acknowledgement' and value is None:
+        value = fact(profile, 'application_preferences.ordinary_policy_acknowledgement')
     if key in {'government_employment', 'independent_auditor_employment'}:
         value = False
     elif key == 'contact.permanent_address':
@@ -185,6 +187,9 @@ def validate_answer(q, value):
     if q.kind == "multiselect":
         if not isinstance(value, list) or not value and q.required:
             raise ValueError("Select one or more exact options as a JSON list")
+        none = [v for v in value if re.fullmatch(r'none(?: of (?:the )?above)?', normalize(v))]
+        if none and len(value) > 1:
+            raise ValueError('None is exclusive of other selections')
         if any(v not in q.options for v in value):
             raise ValueError("Answer contains an unavailable option")
         if len(set(value)) != len(value) or (q.min_selections is not None and len(value) < q.min_selections) or (q.max_selections is not None and len(value) > q.max_selections):
@@ -381,7 +386,7 @@ class AnswerResolver:
         if re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', normalize(q.label)):
             return Answer('', 'policy:empty_address_line_2') if not q.options else None
         # Negated ability/requirement wording must not reach affirmative fallbacks.
-        if re.search(r"\bnot (?:able|willing|authorized|eligible|require|need|agree|commit|have)\b|\b(?:unable|cannot)\b|\bcan t\b", normalize(q.label)):
+        if mapped_key != 'locations.ordered_preferences' and re.search(r"\bnot (?:able|willing|authorized|eligible|require|need|agree|commit|have)\b|\b(?:unable|cannot)\b|\bcan t\b", normalize(q.label)):
             return None
         if mapped_key == 'application_preferences.schedule_commitment' and re.search(r"\b(?:not|no|unable|cannot|never)\b|\bcan t\b", normalize(q.label)):
             return None
@@ -404,6 +409,18 @@ class AnswerResolver:
             return Answer(value, 'profile:' + mapped_key, evidence=[mapped_key])
         if mapped_key == 'work_authorization.us_authorized' and match(q.label) != mapped_key:
             return None
+        # Current explicit all-employer fact takes precedence over stale answer memory.
+        if mapped_key == 'employment_restrictions':
+            from .disclosures import restriction_existence
+            path = 'application_preferences.employment_restrictions'
+            supplied = fact(profile, path)
+            if isinstance(supplied, bool) and restriction_existence(q.label, app.get('company', '')):
+                value = fit_options('Yes' if supplied else 'No', q.options) if q.options else None
+                if value is not None and q.kind in {'select', 'radio', 'combobox'}:
+                    return Answer(value, 'profile:' + path, evidence=[path],
+                                  provenance={'rule': 'explicit-all-employer-restriction'})
+            if isinstance(supplied, bool):
+                return None
         row = self._memory.get((normalize(q.label), q.scope))
         from .concepts import REGISTRY
         from .concepts import ALIASES, DEMOGRAPHIC_PATHS, demographic_value
@@ -416,7 +433,7 @@ class AnswerResolver:
                               memory_data['provenance']['canonical_profile_revision'] == self._revision[0])
         compatible_override = (not stored or stored.get('source') != 'USER_PROVIDED' or
                                normalize(stored.get('value')) == normalize(json.loads(row['answer']) if row else None))
-        if row and row.get('question_signature') == descriptor.signature and compatible_profile and compatible_override:
+        if row and (mapped_key != 'employment_restrictions' or row.get('source') == 'USER_PROVIDED') and row.get('question_signature') == descriptor.signature and compatible_profile and compatible_override:
             value = json.loads(row['answer'])
             try:
                 validate_answer(q, value)
@@ -425,6 +442,46 @@ class AnswerResolver:
             else:
                 return Answer(value, 'verified_memory', provenance={'memory_id': row['id'],
                     'reference': json.loads(row.get('provenance') or '{}')})
+        # Substantive agreement/existence questions may only use exact scoped user memory.
+        if mapped_key == 'employment_restrictions':
+            return None
+        if policy == 'REQUIRE_USER' and mapped_key in {
+                'locations.ordered_preferences', 'application_preferences.role_preferences',
+                'application_preferences.internship_cohort', 'languages.other_proficient'}:
+            return None
+        from .dropdowns import ranked_location, ordered_locations, ORDERED_LOCATIONS_SETTING
+        if mapped_key == 'locations.ordered_preferences':
+            value = ranked_location(q.label, q.options, ordered_locations(
+                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)))
+            return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences']) if value else None
+        if mapped_key == 'application_preferences.role_preferences':
+            preferences = fact(profile, mapped_key)
+            if not isinstance(preferences, (list, tuple)) or q.kind != 'multiselect':
+                return None
+            choices = list(dict.fromkeys(fit_options(v, q.options) for v in preferences))
+            choices = [v for v in choices if v is not None]
+            try:
+                validate_answer(q, choices)
+            except (ValueError, TypeError):
+                return None
+            return Answer(choices, 'profile:' + mapped_key, evidence=[mapped_key]) if choices else None
+        if mapped_key == 'languages.other_proficient':
+            languages = fact(profile, 'languages')
+            # This grammar lists natural languages; programming skills supply no evidence.
+            if (languages and all(str(e.get('language', '')).casefold() == 'english' for e in languages)
+                    and all(normalize(o) in {'spanish', 'french', 'none of the above'} for o in q.options)
+                    and q.kind == 'multiselect'):
+                none = [o for o in q.options if normalize(o) == 'none of the above']
+                if len(none) == 1:
+                    return Answer(none, 'profile:languages', evidence=['languages'],
+                                  provenance={'rule': 'other-languages-english-only'})
+            return None
+        if mapped_key == 'application_preferences.internship_cohort':
+            value = fact(profile, mapped_key)
+            if normalize(value) == 'no preference':
+                choices = [o for o in q.options if normalize(o) in {'no preference', 'no preference i can join any cohort'}]
+                return Answer(choices[0], 'profile:' + mapped_key, evidence=[mapped_key]) if len(choices) == 1 else None
+            return None
         # Common factual questions (residence, ZIP, graduation date, prior employer)
         # come straight from the canonical profile, never a Discord prompt.
         if mapped_key in {'', 'UNKNOWN_FIELD', 'contact.country', 'contact.state', 'contact.postal_code',

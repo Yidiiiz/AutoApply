@@ -876,3 +876,29 @@ def test_t049_run_skip_cancel_reject_inflight_result(http_dashboard, config, db,
     assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(done=True)
     assert [i['state'] for i in ext(http_dashboard, 'GET', '/ext/run/status')[1]['items']] == ['skipped'] * 3
     assert all(db.application(i)['status'] == 'QUEUED' for i in ids)
+
+
+@pytest.mark.affirmative
+@pytest.mark.parametrize('case', list(range(16)))
+def test_t053_preserved_answer_coverage(config, db, http_dashboard, monkeypatch, case, request):
+    import test_t053_answers as source
+    profile=source.expedia_profile.__wrapped__(config)
+    if case==15: source.test_t054_current_profile_wins_over_stale_no_memory(config,db,profile,request.getfixturevalue('listing'))
+    elif case>=11:
+        company,supplied,expected=[('Expedia Group',True,'Yes'),('Another Employer',True,'Yes'),('Expedia Group',False,'No'),('Another Employer',False,'No')][case-11]
+        source.test_t054_explicit_all_employer_restrictions(config,db,profile,company,supplied,expected)
+    elif case==0: source.test_snapshot_labels_resolve_synthetic_facts(config,db,profile)
+    elif case==1: source.test_ranked_available_distinct_locations(config,db,profile)
+    elif case==2: source.test_restrictions_never_inferred_and_country_not_indiscriminate(config,db,profile)
+    elif case==3: source.test_extension_checkbox_group_and_optional_decline(http_dashboard,profile,monkeypatch)
+    elif case==4: source.test_ordered_preference_remember_pipeline(http_dashboard,config,profile)
+    elif case==10: source.test_unknown_choice_provider_unavailable_stays_pending(http_dashboard,profile,monkeypatch)
+    else:
+        proposal,expected=[
+            (dict(choices=['Python'],fact_ids=['skills'],needs_input=False),['Python']),
+            (dict(choices=['Spanish'],fact_ids=['skills'],needs_input=False),None),
+            (dict(choices=['Python','None of the Above'],fact_ids=['skills'],needs_input=False),None),
+            (dict(choices=['Python'],fact_ids=['made_up'],needs_input=False),None),
+            (dict(choices=[],fact_ids=[],needs_input=True),None),
+        ][case-5]
+        source.test_unknown_choices_use_grounded_writer_and_validate(http_dashboard,profile,monkeypatch,proposal,expected)

@@ -34,6 +34,17 @@ def experience_key(label):
 
 
 def remember(db, config, q, value, question_id):
+    from .dropdowns import (location_ordinal, location_identity, ordered_locations,
+                            ORDERED_LOCATIONS_SETTING)
+    rank = location_ordinal(q.label)
+    if (rank and q.kind in {'radio', 'select', 'combobox'} and value in q.options
+            and location_identity(value) and q.policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}):
+        preferences = ordered_locations(config.profile, db.setting(ORDERED_LOCATIONS_SETTING))
+        preferences = [p for p in preferences if location_identity(p) != location_identity(value)]
+        preferences.insert(min(rank - 1, len(preferences)), value)
+        db.set_setting(ORDERED_LOCATIONS_SETTING, dict(value=preferences, source='USER_PROVIDED',
+                                                     question_id=question_id))
+        return True
     key = experience_key(q.label)
     if q.semantic_key not in {'','UNKNOWN_FIELD'}:
         return False

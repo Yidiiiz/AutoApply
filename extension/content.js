@@ -48,7 +48,7 @@
       sidebarHost.style.cssText = 'all:initial!important;position:fixed!important;inset:0 0 0 auto!important;width:min(400px,100vw)!important;height:100dvh!important;z-index:2147483647!important;display:block!important;';
       const shadow = sidebarHost.attachShadow({mode:'open'});
       const style = document.createElement('style');
-      style.textContent = ':host{color-scheme:dark} .panel{height:100%;background:Canvas;box-shadow:-8px 0 32px #0002;animation:slide .18s ease-out}iframe{border:0;width:100%;height:100%;display:block} .collapsed{position:fixed;right:0;top:40%;display:flex;align-items:center;background:#191919;color:#eee;border:0;outline:1px solid #555;border-radius:6px 0 0 6px;padding:0;box-shadow:0 2px 8px #0003}.collapsed button{min-height:30px;border:0;background:transparent;color:inherit;font:12px ui-sans-serif,system-ui;cursor:pointer;padding:0 8px}.collapsed button:hover{background:#303030}.collapsed button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}.restore svg{width:14px;height:14px;vertical-align:-2px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:1.5}@media(prefers-color-scheme:light){.collapsed{background:#fff;color:#202020;outline-color:#aaa}.collapsed button:hover{background:#e8e8e8}} [hidden]{display:none!important}@keyframes slide{from{transform:translateX(100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){.panel{animation:none}}';
+      style.textContent = ':host{color-scheme:dark} .panel{height:100%;background:Canvas;box-shadow:-8px 0 32px #0002;animation:slide .18s ease-out}iframe{border:0;width:100%;height:100%;display:block} .collapsed{position:fixed;right:0;top:40%;display:flex;align-items:center;background:#191919;color:#eee;border:0;outline:1px solid #555;border-radius:6px 0 0 6px;overflow:hidden;padding:0;box-shadow:0 2px 8px #0003}.collapsed button{min-height:30px;border:0;background:transparent;color:inherit;font:12px ui-sans-serif,system-ui;cursor:pointer;padding:0 8px}.collapsed button:hover{background:#303030}.collapsed button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}.restore svg{width:14px;height:14px;vertical-align:-2px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:1.5}@media(prefers-color-scheme:light){.collapsed{background:#fff;color:#202020;outline-color:#aaa}.collapsed button:hover{background:#e8e8e8}} [hidden]{display:none!important}@keyframes slide{from{transform:translateX(100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){.panel{animation:none}}';
       const panel = document.createElement('div'); panel.className = 'panel';
       const frame = document.createElement('iframe'); frame.src = chrome.runtime.getURL('sidepanel.html')+(tabId?'?tabId='+tabId:''); frame.title = 'AutoApply application assistant';
       panel.append(frame);
@@ -92,7 +92,7 @@
   function learn(event) {
     if(extensionFilling || !event.isTrusted) return;
     const record=Array.from(records.values()).find(r=>r.members.includes(event.target)||r.element.contains(event.target));
-    if(!record || ['file','password','hidden'].includes(record.field.kind)||!visible(record.element)) return;
+    if(!record || ['file','password','hidden'].includes(record.field.kind)||!interactiveVisible(record.element)) return;
     const value=valueOf(record), encoded=JSON.stringify(value);
     if(observedValues.get(record.field.key)===encoded) return;
     clearTimeout(editTimers.get(record.field.key));
@@ -104,15 +104,25 @@
   document.addEventListener('change',learn,true); document.addEventListener('blur',learn,true);
   document.addEventListener('click',event=>{
     const button=event.target.closest('button,input[type="submit"],[role="button"]');
-    if(event.isTrusted && button && visible(button) && (button.type==='submit'||/^(submit(?: application)?|apply(?: now| application)?)$/i.test(clean(button.textContent||button.value)))) {
-      chrome.runtime.sendMessage({type:'submit-intent'}).catch(()=>{});
+    if(event.isTrusted && button && visible(button) && (/^(submit(?: application)?|apply(?: now| application)?)$/i.test(clean(button.textContent||button.value)))) {
+      armSubmission();
+      chrome.runtime.sendMessage({type:'submit-intent',url:location.href}).catch(()=>{});
     }
   },true);
-  let confirmationTimer;
+  let confirmationTimer, submissionIntent;
+  function confirmationEvidence() {
+    const pattern=/thank you for applying|application (?:has been |was )?submitted|we have received your application|application received/i;
+    return Array.from(document.querySelectorAll('h1,h2,h3,#confirmation,[role="dialog"],[role="status"],[data-automation-id="congratulations"],main p'))
+      .filter(el=>visible(el)&&!el.closest("#autoapply-sidebar"))
+      .map(el=>clean(el.innerText)).find(value=>pattern.test(value)) || "";
+  }
+  function armSubmission() {submissionIntent={url:location.href,at:Date.now(),before:confirmationEvidence()};}
+
   function detectConfirmation() {
     const url=location.href;
     const strong=/greenhouse\.io|lever\.co/.test(location.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(location.pathname)||/ashbyhq\.com/.test(location.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(location.pathname);
-    const evidence=(document.body.innerText||'').match(/thank you for applying|application (?:has been |was )?submitted|we have received your application|application received/i)?.[0] || (document.querySelector('[data-automation-id="congratulations"]') ? 'Workday congratulations' : '');
+    const evidence=confirmationEvidence();
+    if(!strong && (!submissionIntent || Date.now()-submissionIntent.at>120000 || evidence===submissionIntent.before))return;
     const invalid=Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).some(el=>visible(el)&&(/error|required|invalid|missing|correct/i.test(text(el))||el.getAttribute('aria-invalid')==='true'));
     if(!invalid&&(strong||evidence)) chrome.runtime.sendMessage({type:'submission-confirmation',url,evidence:evidence||'Confirmation URL',strong:Boolean(strong)}).catch(()=>{});
   }
@@ -133,6 +143,43 @@
       if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
     }
     return true;
+  }
+
+  function interactiveVisible(element) {
+    if (visible(element)) return true;
+    if (!element.matches('input[type="checkbox"],input[type="radio"]') ||
+        !element.isConnected || element.disabled || element.readOnly || element.matches(':disabled') ||
+        element.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]') ||
+        element.getAttribute('aria-readonly')==='true') return false;
+    const rect=element.getBoundingClientRect(), style=getComputedStyle(element);
+    if(rect.width<=1 || rect.height<=1 || style.display==='none' || style.visibility==='hidden' ||
+        !visible(element.parentElement)) return false;
+    // Only the native input may be transparent. A visible associated visual is required.
+    return [...Array.from(element.labels || []), element.closest('label'),
+      element.parentElement.querySelector('[data-automation-id="checkbox"],[role="checkbox"]')]
+      .some(node=>node && visible(node) && (questionText(node) || node.getBoundingClientRect().width>1));
+  }
+  function choiceContainer(element) {
+    if (['current','fluent'].includes(sectionField(element))) return element;
+    return element.closest('[data-automation-id$="-CheckboxGroup"],[role="radiogroup"],fieldset,[data-automation-id^="formField"],[role="group"]');
+  }
+  function questionContainer(container) {
+    if(!container) return container;
+    for(let node=container;node && !node.matches('form,body');node=node.parentElement) {
+      if (Array.from(node.children).some(child=>child.matches('legend,label,[data-automation-id="formLabel"],[data-automation-id="richText"]') && usableLabel(questionText(child))) ||
+          usableLabel(referencedLabel(node,'aria-labelledby')) || usableLabel(node.getAttribute('aria-label'))) return node;
+    }
+    return container;
+  }
+  function currentControl(element) {
+    return element.isConnected ? element : element.id ? document.getElementById(element.id) || element :
+      document.querySelector('[data-autoapply-key="'+CSS.escape(element.dataset.autoapplyKey || '')+'"]') || element;
+  }
+  function refreshRecord(record) {
+    if(!record) return record;
+    record.element=currentControl(record.element);
+    record.members=record.members.map(currentControl);
+    return record;
   }
 
   function usableLabel(value) {
@@ -172,7 +219,8 @@
   }
 
   function groupLabel(container, fallback) {
-    return [...Array.from(container?.querySelectorAll('legend,[data-automation-id="formLabel"],[data-automation-id="richText"]') || []).map(questionText), container?.getAttribute('aria-label'),
+    container=questionContainer(container);
+    return [...Array.from(container?.querySelectorAll('legend,[data-automation-id="formLabel"],[data-automation-id="richText"],label') || []).filter(node=>!node.querySelector('input,select,textarea') && (node.tagName!=='LABEL' || !node.htmlFor)).map(questionText), container?.getAttribute('aria-label'),
       container ? referencedLabel(container, 'aria-labelledby') : '',
       text(container?.querySelector('h1,h2,h3,h4,[role="heading"]')), fallback].map(usableLabel).find(Boolean) || 'Unlabelled field';
   }
@@ -216,9 +264,9 @@
     const lists = ids.map(id => document.getElementById(id)).filter(Boolean);
     if (!lists.length) {
       lists.push(comboContainer(element));
-      if (openedCombos.has(element) || element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement) lists.push(...document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
+      if (openedCombos.has(element) || element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement) lists.push(...document.querySelectorAll('[data-automation-id="activeListContainer"],[data-automation-id="responsiveMonikerPrompt"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
     }
-    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="promptOption"]')).map(option=>option.closest('[data-automation-id="menuItem"][role="option"]') || option)))]
+    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="menuItem"],[data-automation-id="promptOption"]')).map(option=>option.closest('[data-automation-id="menuItem"]') || option)))]
       .filter(option => !option.closest('[data-automation-id="selectedItemList"]') && !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
         (text(option) || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
@@ -274,10 +322,11 @@
   }
   function comboSelection(element) {
     const container = comboContainer(element);
+    const hidden=clean(container.querySelector('input[type="hidden"]')?.value);
     return text(container.querySelector('[class*="singleValue"],[class*="single-value"]')) ||
-      clean(container.querySelector('input[type="hidden"]')?.value) ||
+      (hidden && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(hidden) ? hidden : '') ||
       text(container.querySelector('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"]')) ||
-      (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') && !/^(select|choose)( one)?(?:\.{3})?$/i.test(text(element)) ? text(element) : "");
+      (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') && !/^(select|choose)(\s*one)?(?:\.{3}|…)?$/i.test(text(element)) ? text(element) : "");
   }
   function referencedLabel(element, attribute) {
     return (element.getAttribute(attribute) || "").split(/\s+/)
@@ -419,7 +468,7 @@
     records = new Map();
     const fields = [];
     const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
-      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : visible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
+      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
@@ -427,6 +476,7 @@
     const repeated = new Set();
     const keys = new Set();
     for (const element of controls) {
+      if (["checkbox","radio"].includes(element.type) && !element.closest('form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]')) continue;
       if (grouped.has(element) || /honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
       let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') || element.getAttribute("data-automation-id") === "multiSelectInput" || isPrompt(element) ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : element.type || "text";
@@ -441,9 +491,9 @@
       }
       let container;
       if (["radio", "checkbox"].includes(kind)) {
-        container = element.closest(kind === "radio" ? '[role="radiogroup"],fieldset' : 'fieldset,[role="group"]');
-        members = controls.filter(other => (!['current','fluent'].includes(sectionField(element)) || other===element) && other.type === kind && other.form === element.form &&
-          (kind === "checkbox" && container ? container.contains(other) : element.name ? other.name === element.name : container && container.contains(other)));
+        container = choiceContainer(element);
+        members = controls.filter(other => other.type === kind && other.form === element.form &&
+          (kind === "checkbox" ? choiceContainer(other)===container : element.name ? other.name===element.name : choiceContainer(other)===container));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
         if (members.length > 1 || kind === "radio") fieldLabel = groupLabel(container, fieldLabel);
@@ -454,8 +504,9 @@
       keys.add(key);
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
+      container=questionContainer(container);
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
-        options, multiple: isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
+        options, multiple: kind==='checkbox' && members.length>1 || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
         section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
@@ -472,7 +523,7 @@
     }
     const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
     previousStep = workdayState();
-    return {page: pageInfo(), fields: retained, workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+    return {page: pageInfo(), fields: retained, next_action: navigationState(), workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
 
   async function collectOptions(keys) {
@@ -519,9 +570,9 @@
   function occupied({element, members, field}) {
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return Boolean(element.files.length || attachedFile(element));
-    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || clean(comboInput(element)?.value) || !comboInput(element) && !/^(select|choose|search)\b/i.test(text(element)) && text(element));
+    if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || !isPrompt(element) && clean(comboInput(element)?.value) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(comboInput(element)?.value)) || !comboInput(element) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(text(element)) && text(element));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
-      !option.disabled && option.value !== "" && !/^(choose|select)\b/i.test(clean(option.text)));
+      !option.disabled && option.value !== "" && !/^(choose|select)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(option.text)));
     return Boolean(clean(element.isContentEditable || !("value" in element) ? element.textContent : element.value));
   }
 
@@ -582,18 +633,23 @@
   }
 
   async function fillCombo(element, value) {
-    if (isPrompt(element)) return (await fillSkills(element, [value])).skipped === 0;
+    if (isPrompt(element) && isSkillsField(element)) return (await fillSkills(element, [value])).skipped === 0;
+    const initial=element;
+    const reacquire=()=>element=currentControl(initial);
     let committed = false;
     try {
+      reacquire();
       await openCombo(element);
+      if(isPrompt(element)) {searchCombo(element,value);promptEnter(comboInput(element));}
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
       const searches = [...new Set(monthValues(element, value) || [clean(value), prefix])];
-      let option = fieldChoice(element, await settledComboOptions(element, 350), value);
+      const options = await settledComboOptions(element, isPrompt(element) ? 1000 : 350);
+      let option = isPrompt(element) ? await promptOption(element,value) : fieldChoice(element, options, value);
       for (const search of option ? [] : searches) {
         if (!searchCombo(element, search)) break;
         // Keep waiting for a match even when an unrelated first page stays rendered.
-        option = await waitFor(() => fieldChoice(element, comboOptions(element), value), 2500);
+        option = await waitFor(() => isPrompt(element) ? comboOptions(element).find(o=>skillNormal(optionName(o))===skillNormal(value)) : fieldChoice(element, comboOptions(element), value), 2500);
         if (option) break;
       }
       if (!option){trace("dropdown","skipped",element,{reason:"no matching option",value});return false;}
@@ -604,12 +660,28 @@
         events(element);
         committed = element.value === selected;
       } else {
-        trace("dropdown","clicked",element,{target:selected,element_id:option.id});
-        option.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
-        option.click();
+        for (let attempt=0; attempt<3; attempt++) {
+          if (isPrompt(element)) {
+            option=comboOptions(element).find(row=>skillNormal(optionName(row))===skillNormal(value));
+            if (!option?.isConnected) break;
+          }
+          const target=isPrompt(element) ? option.querySelector('[data-automation-id="radioBtn"],input[type="radio"],[data-automation-id="checkboxPanel"],input[type="checkbox"],[role="checkbox"],[data-automation-id="checkbox"]') || option : option;
+          if (target.disabled || target.matches(':disabled') || target.getAttribute('aria-disabled')==='true') break;
+          const clicked=pointerClick(target,()=>!isPrompt(element) || comboOptions(element).find(row=>skillNormal(optionName(row))===skillNormal(value))===option);
+          trace('dropdown',clicked?'clicked':'activation interrupted',element,{target:selected,element_id:option.id});
+          if (clicked) break; // A pending commit must never be activated twice.
+          await settledComboOptions(element,1000);
+        }
+        let stableSince=0;
         committed = Boolean(await waitFor(() => {
+          reacquire();
           const selection = normal(comboSelection(element));
           const matchesSelected = Boolean(selection && normal(selected).includes(selection));
+          if(isPrompt(element)) {
+            if (!selectedSkills(element).some(pill=>skillNormal(pill)===skillNormal(value))) {stableSince=0;return false;}
+            if (!stableSince) stableSince=Date.now();
+            return Date.now()-stableSince>=200;
+          }
           // A different displayed option overrides other commit signals.
           if (selection && choices.some(choice => normal(choice) !== normal(selected) &&
             (normal(choice) === selection || !matchesSelected && normal(choice).includes(selection)))) return false;
@@ -661,8 +733,8 @@
     try {
     const summary = {completed: [], filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
     for (const answer of answers) {
-      const record = records.get(answer.key);
-      if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : visible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
+      const record = refreshRecord(records.get(answer.key));
+      if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
       const {element, members, field} = record;
       trace("field","found",element);
       if (isSkillsField(element)) { summary.skipped++; continue; }
@@ -732,11 +804,18 @@
           const values = Array.isArray(answer.value) ? answer.value : [answer.value];
           const matches = values.map(value => best(members, value, label));
           if (field.kind === "checkbox" && members.length === 1 && typeof answer.value === "boolean") {
-            if (element.checked !== answer.value) element.click(); events(element);
+            if (!await setCheckbox(element,answer.value)) {unresolved(false);continue;}
           } else {
             if (matches.some(member => !member) || field.kind === "radio" && matches.length !== 1) { unresolved(false); continue; }
-            if(answer.force && field.kind==="checkbox") for(const member of members) if(member.checked && !matches.includes(member)) member.click();
-            for (const member of matches) { if (!member.checked) member.click(); events(member); }
+            let verified=true;
+            if(answer.force && field.kind==="checkbox") for(const member of members) if(member.checked && !matches.includes(member)) verified = await setCheckbox(currentControl(member),false) && verified;
+            for (const member of matches) {
+              const current=currentControl(member);
+              if(field.kind==='checkbox') verified=await setCheckbox(current,true) && verified;
+              else {if(!current.checked) current.click();verified=Boolean(await waitFor(()=>currentControl(member).checked,500)) && verified;}
+            }
+            refreshRecord(record);
+            if(!verified || field.kind==='checkbox' && record.members.some(member=>Boolean(member.checked)!==values.includes(label(member)))) {unresolved(false);continue;}
           }
         } else {
           const value = String(await phoneValue(element, answer.value ?? "", field));
@@ -821,7 +900,7 @@
   }
   function entryGroups(container, kind) {
     const anchors = Array.from(container.querySelectorAll('input,textarea,select,[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
-      .filter(el => sectionField(el) === (kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title'));
+      .filter(el => interactiveVisible(el) && sectionField(el) === (kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title'));
     return [...new Set(anchors.map(anchor => {
       let group = anchor.parentElement;
       while (group.parentElement && group.parentElement !== container &&
@@ -880,7 +959,7 @@
     input.removeEventListener('keydown', stop);
   }
   async function promptOption(element, value) {
-    const exact = option => skillNormal(option.getAttribute('data-automation-label') || text(option)) === skillNormal(value);
+    const exact = option => skillNormal(optionName(option)) === skillNormal(value);
     if (!comboOptions(element).length) return null;
     const lists = new Set();
     for (const option of comboOptions(element)) {
@@ -889,13 +968,13 @@
       }
     }
     for (const list of lists) { list.scrollTop=0; list.dispatchEvent(new Event('scroll', {bubbles:true})); }
-    await pause(60);
+    await settledComboOptions(element,1000);
     for (let step=0; step<80; step++) {
       const option=comboOptions(element).find(exact);
       if (option) {
         option.scrollIntoView({block:'nearest'});
         // Scrolling a virtual list can replace the option node.
-        await pause(60);
+        await settledComboOptions(element,1000);
         const shown=comboOptions(element).find(exact);
         if (shown?.isConnected) return shown;
       }
@@ -905,9 +984,10 @@
         list.scrollTop += Math.max(40,list.clientHeight * 0.8);
         list.dispatchEvent(new Event('scroll', {bubbles:true}));
         moved ||= list.scrollTop > before;
+        trace('dropdown','scrolled',element,{scrollTop:list.scrollTop});
       }
       if (!moved) break;
-      await pause(60);
+      await settledComboOptions(element,1000);
     }
     return null;
   }
@@ -1024,6 +1104,13 @@
     const selected=skill=>selectedSkills(element).some(value=>skillNormal(value)===skillNormal(skill));
     async function add(skill,index,split=true) {
       if(cancelled()) return false;
+      if(/^c\s*\/\s*c\+\+$/i.test(skill)) {
+        const c=await add('C',index,false);
+        const cpp=await add('C++',index,false);
+        const success=c && cpp;
+        progress(index,skill,success?'added':'skipped');
+        return success;
+      }
       const alias=aliases[skillNormal(skill)];
       if(selected(skill) || alias && selected(alias)){trace('skills','skipped',element,{reason:'already selected',value:skill});progress(index,skill,'already added');return true;}
       let choice, status='added', ok=false;
@@ -1077,13 +1164,10 @@
       if(cancelled()) return false;
       if(!ok && split) {
         let parts=splitSkill(skill);
-        // Some catalogs represent the whole C/C++ skill as C++.
-        if(/^c\s*\/\s*c\+\+$/i.test(skill)) parts=['C++','C'];
         if(parts.length>1) {
           let success=false;
           for(const part of parts) {
             const partOK=await add(part,index,false);success ||= partOK;
-            if(partOK && /^c\s*\/\s*c\+\+$/i.test(skill) && part==='C++') break;
           }
           progress(index,skill,success?'added':'skipped');return success;
         }
@@ -1093,7 +1177,8 @@
       await pause(180);
       return ok;
     }
-    for(const [index,skill] of [...new Set(skills)].entries()) {
+    const unique=skills.filter((skill,index)=>skills.findIndex(other=>skillNormal(other)===skillNormal(skill))===index);
+    for(const [index,skill] of unique.entries()) {
       if(cancelled()) break;
       await add(skill,index+1);
     }
@@ -1115,14 +1200,15 @@
   }
   const checked = input => input.checked || input.getAttribute('aria-checked')==='true';
   async function setCheckbox(input, value) {
+    input=currentControl(input);
     if(Boolean(checked(input))===value) return true;
     input.click();
-    if(await waitFor(()=>Boolean(checked(input))===value,150)) return true;
+    if(await waitFor(()=>Boolean(checked(currentControl(input)))===value,150)) return true;
     const wrapper=input.closest('[data-automation-id^="formField"]') || input.parentElement;
     const targets=[...Array.from(input.labels||[]),input.closest('label'),wrapper.querySelector('[role="checkbox"]'),input.nextElementSibling].filter(el=>el && visible(el));
     for(const target of new Set(targets)) {
       pointerClick(target);
-      if(await waitFor(()=>Boolean(checked(input))===value,300)) return true;
+      if(await waitFor(()=>Boolean(checked(currentControl(input)))===value,300)) return true;
     }
     return false;
   }
@@ -1194,12 +1280,12 @@
           const group=groups[index], entry=entries[index];
           const current=Boolean(entry.current || entry.start_date && !entry.end_date);
           const skipEnd=current && ['experience','projects'].includes(kind);
-          const elements=Array.from(group.querySelectorAll('input,textarea,select,[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')).filter(visible);
-          const isOccupied=el=>occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.matches('[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')?'combobox':el.type||'text'}});
+          const elements=Array.from(group.querySelectorAll('input,textarea,select,[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')).filter(interactiveVisible);
+          const isOccupied=el=>occupied({element:el,members:[el],field:{kind:el.tagName==='SELECT'?'select':el.matches('[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])') || isPrompt(el)?'combobox':el.type||'text'}});
           const occupiedGroup=elements.some(el=>el.type!=='hidden' && (el.type!=='button' || el.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])')) && sectionField(el)!=='current' && !(kind==='education' && sectionField(el)==='degree' && el.closest('[data-automation-id="formField-degree"]')) && isOccupied(el));
           const anchorKey=kind==='education'?'school':kind==='languages'?'language':kind==='links'?'url':'title';
           const anchor=elements.find(el=>sectionField(el)===anchorKey);
-          const anchorValue=anchor?.matches('[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')?comboSelection(anchor) || comboInput(anchor)?.value:anchor?.value;
+          const anchorValue=anchor?.matches('[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')?comboSelection(anchor):isPrompt(anchor || document.body)?comboSelection(anchor):anchor?.value;
           const matchesEntry=Boolean(entry[anchorKey] && normal(anchorValue)===normal(entry[anchorKey]));
           if(current && skipEnd && (!occupiedGroup || matchesEntry) && !await ensureCurrent(group)) errors.push('I currently work here: could not verify checkbox and To date');
           for (const el of elements) {
@@ -1339,17 +1425,45 @@
     return [...new Set(Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"],[data-automation-id*="error" i]'))
       .filter(visible).map(node => text(node) || label(node)).filter(Boolean))];
   }
+  function navigationButton(final = false) {
+    const step=workdayState()?.step || '';
+    return Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"],[role="button"]')).find(node=>{
+      const caption=clean(node.textContent || node.value);
+      if(!interactiveVisible(node))return false;
+      if(final)return /^(submit|submit application)$/i.test(caption) &&
+        (/review/i.test(step) || node.getAttribute('data-automation-id')==='pageFooterNextButton');
+      // Workday reuses pageFooterNextButton for both Continue and Submit.
+      // Inspect action words, without treating stepper text such as Application
+      // Questions or generic jobApplication identifiers as final actions.
+      const finalAction=value=>/\b(?:submit|apply|final[ -]?submit)\b/i.test(clean(value)
+        .replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]/g,' '));
+      const labelledBy=clean(node.getAttribute('aria-labelledby')).split(' ').map(id=>text(document.getElementById(id))).join(' ');
+      const identity=[caption,node.getAttribute('aria-label'),labelledBy,node.title,
+        node.getAttribute('data-automation-id'),node.getAttribute('data-automation-label'),node.id,node.name];
+      return /^(next|save and continue|continue)$/i.test(caption) && !identity.some(finalAction);
+    });
+  }
+  function navigationState() {
+    const final=Boolean(navigationButton(true));
+    return {kind:final?'submit':navigationButton()?'next':'none',url:location.href,step:workdayState()?.step || ''};
+  }
+  async function manualSubmit(expected) {
+    const state=navigationState(), errors=validationErrors();
+    if(!expected || expected.url!==state.url || expected.step!==state.step || state.kind!=='submit' ||
+       errors.length || signInPage() || (await scan()).fields.some(f=>f.required&&!f.answered))
+      return {clicked:false,errors,message:'Application changed or needs review. Use the employer page.'};
+    const button=navigationButton(true);
+    if(!button)return {clicked:false,errors:[],message:'Submit is unavailable. Use the employer page.'};
+    armSubmission(); button.click();
+    return {clicked:true,errors:validationErrors()};
+  }
   async function nextPage(requireComplete = false) {
     const errors = validationErrors();
     if (requireComplete && errors.length) return {clicked: false, errors};
     if (signInPage()) return {clicked: false, errors: ['Sign in before continuing.']};
     if (requireComplete && (await scan()).fields.some(field => field.required && !field.answered)) return {clicked: false, errors: []};
-    const button = Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"],[role="button"]'))
-      .find(node => {
-        const caption = clean(node.textContent || node.value || node.getAttribute('aria-label'));
-        const identity = [caption, node.getAttribute('aria-label'), node.getAttribute('data-automation-id')].join(' ');
-        return visible(node) && !/submit|apply/i.test(identity) && /^(next|save and continue|continue)$/i.test(caption);
-      });
+    if(navigationState().kind==='submit')return {clicked:false,errors:[],message:'Final submit is yours'};
+    const button = navigationButton();
     if (!button) {
       const final = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]')).some(node =>
         visible(node) && /submit|apply/i.test([node.textContent, node.value, node.getAttribute('aria-label')].join(' ')));
@@ -1404,5 +1518,5 @@
     }
     return {host:location.hostname,nodes,truncated};
   }
-  globalThis.autoApplyContent = {beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, validationErrors};
+  globalThis.autoApplyContent = {beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
 })();

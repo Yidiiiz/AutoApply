@@ -863,7 +863,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-AutoApply-Key')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST')
         token = self.server.dashboard.token
-        self.send_header('Content-Security-Policy', "default-src 'none'; connect-src 'self'; "
+        self.send_header('Content-Security-Policy', "default-src 'none'; img-src data:; connect-src 'self'; "
                          f"script-src 'nonce-{token}'; style-src 'nonce-{token}'; "
                          "base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
         self.end_headers()

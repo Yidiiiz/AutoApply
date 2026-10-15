@@ -51,3 +51,52 @@ def choose_option(label, options, profile):
                 and (len(parts) == 2 or parts[2] in {'us', 'usa', 'united states', 'united states of america'})):
             matches.append(option)
     return matches[0] if len(matches) == 1 else None
+
+
+ORDERED_LOCATIONS_SETTING = 'known_answer_signature:ordered_location_preferences'
+
+
+def location_ordinal(label):
+    text = normalize(label)
+    match = re.match(r'^(?:what is |please (?:select|provide) )?(?:your )?(1st|2nd|3rd|first|second|third) location preference\b', text)
+    return {'1st': 1, 'first': 1, '2nd': 2, 'second': 2, '3rd': 3, 'third': 3}.get(match[1]) if match else None
+
+
+def location_identity(value):
+    """City plus state identity; broad discovery groups never define this order."""
+    from .profile_rules import STATES
+    text = normalize(value)
+    text = re.sub(r' (?:united states(?: of america)?|usa|us)$', '', text)
+    for short, full in STATES.items():
+        for suffix in (normalize(full), short.lower()):
+            if text.endswith(' ' + suffix):
+                city = text[:-len(suffix)].strip()
+                if city == 'new york city':
+                    city = 'new york'
+                return city, short
+    return None
+
+
+def ordered_locations(profile, saved=None):
+    base = profile.get('locations', {}).get('ordered_preferences') or []
+    learned = saved.get('value', []) if isinstance(saved, dict) and saved.get('source') == 'USER_PROVIDED' else []
+    result, seen = [], set()
+    for value in list(learned) + list(base):
+        identity = location_identity(value)
+        if identity and identity not in seen:
+            result.append(value)
+            seen.add(identity)
+    return result
+
+
+def ranked_location(label, options, preferences):
+    rank = location_ordinal(label)
+    if not rank:
+        return None
+    available = []
+    for preferred in preferences:
+        identity = location_identity(preferred)
+        matches = [o for o in options if identity and location_identity(o) == identity]
+        if len(matches) == 1 and matches[0] not in available:
+            available.append(matches[0])
+    return available[rank - 1] if len(available) >= rank else None

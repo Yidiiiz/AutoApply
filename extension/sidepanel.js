@@ -15,6 +15,8 @@ element('minimize').onclick=()=>send({type:'sidebar-control',state:'minimized'})
 element('undo-applied').onclick=()=>perform({type:'undo-applied'}).catch(showError);
 let skillsBusy=false, skillPlan, skillPlanKey, skillPlanPromise, selectedSkillNames=new Set(), chipStatuses={}, profileRevision="", mainBusy=false;
 const skillOverrides=new Map();
+let userExcludedSkills=new Set(), userAddedSkills=new Set();
+let autoPreferenceReady=false;
 let result, source, histories = (await chrome.storage.session.get("answerHistory")).answerHistory || {};
 let messages = [], aiBusy = false, chatBusy = false, downloadURL;
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
@@ -141,13 +143,20 @@ function render(value) {
   const detail = value.state === "needs_input" || value.waiting || value.state === "failed" ? value.detail || "" : "";
   // Compact ordinary completion/step narration; keep instructions and wait outcomes.
   const ordinary = !progress || /^Workday step:/i.test(progress) || progress === "Autofill finished. Review the page.";
-  element("progress").textContent = !ordinary ? progress : detail || (value.skillsBusy || skillsBusy ? "" : busy ? "Filling…" : value.summary ? (totals.join(" · ") || (pending ? "Review the questions below." : "Review the page.")) : "");
+  element("progress").textContent = value.siteConfirmed ? "" : !ordinary ? progress : detail || (value.skillsBusy || skillsBusy ? "" : busy ? "Filling…" : value.summary ? (totals.join(" · ") || (pending ? "Review the questions below." : "Review the page.")) : "");
   element("autofill").disabled = Boolean(value.busy || value.skillsBusy || mainBusy || skillsBusy);
   element("skills-activity").hidden=!(value.skillsBusy || skillsBusy);
   if(value.skillsBusy)element("skills-progress").textContent=skillPlan ? skillPlan.matched.length+" matched" : "";
   else if(value.skills)renderSkills(value.skills);
   else if(element("skills-progress").textContent==="Adding skills…")element("skills-progress").textContent="Skills need review";
-  element('next-page').disabled = false;
+  const final=value.next_action?.kind==='submit';
+  element('next-page').textContent=value.submitting?'Submitting...':final?'Submit':'Next page';
+  element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || final && (busy || value.waiting));
+  element('auto-advance').disabled=final || !autoPreferenceReady;
+  element('auto-advance').parentElement.title=final?'Final submission requires your explicit click':'Keep Auto enabled for following pages; stops for validation and final submission';
+  element('submission-status').hidden=!value.siteConfirmed;
+  element('tracking-status').textContent=value.trackingError || value.trackingNote || '';
+  element('retry-tracking').hidden=!value.trackingError;
   element('cancel-form-wait').hidden = !value.waiting;
   element("cover-letter").disabled = Boolean(value.busy || value.coverBusy);
   element("cover-progress").textContent = value.coverBusy || value.coverQuestions?.length || /error|needs review/i.test(value.coverProgress || "") ? value.coverProgress || "" : "";
@@ -163,7 +172,7 @@ function render(value) {
   element('answer-section-results').textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
-  element("autofill").textContent=value.busy?"Filling…":"Autofill";
+  element("autofill").textContent=value.busy || mainBusy?"Filling…":"Autofill";
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
   element("needs-writing").replaceChildren();
   // Expose generated PDF without persisting blob URLs across panel instances.
@@ -248,9 +257,9 @@ element('settings-back').onclick = closeSettings;
 element('settings-view').onkeydown = event => { if(event.key === 'Escape') { event.preventDefault(); closeSettings(); } };
 element("autofill").onclick = async () => {
   if(mainBusy || skillsBusy) return;
-  mainBusy=true;element('autofill').disabled=true;
+  mainBusy=true;element('autofill').disabled=true;element('autofill').textContent='Filling…';
   try {if(!element('skills-panel').hidden){await connection();await loadSkillPlan();await saveSkillSelection();}await perform({type:'autofill'});}
-  catch(error){showError(error);}finally{mainBusy=false;element('autofill').disabled=false;}
+  catch(error){showError(error);}finally{mainBusy=false;element('autofill').disabled=Boolean(result?.busy || result?.skillsBusy || skillsBusy);element('autofill').textContent=result?.busy?'Filling…':'Autofill';}
 };
 element("cover-letter").onclick = () => perform({type: "cover-letter"}).catch(showError);
 element("generate").onclick = () => write(false);
@@ -296,15 +305,31 @@ chrome.storage.onChanged.addListener((changes, area) => {
 renderRun((await chrome.storage.session.get("chromeRun")).chromeRun);
 send({type: "run-status-refresh"}).then(renderRun).catch(showError);
 
-element('next-page').onclick=()=>perform({type:'next-page'}).catch(showError);
+element('next-page').onclick=async event=>{
+  if(!event.isTrusted)return;
+  const final=result?.next_action?.kind==='submit';
+  element('next-page').disabled=true;
+  try{await perform({type:final?'manual-submit':'next-page',tabId:result?.tabId,expected:result?.next_action});}
+  catch(error){showError(error);render(result);element('error').textContent=error.message;}
+};
+element('retry-tracking').onclick=()=>perform({type:'retry-submission-tracking'}).catch(showError);
 element('cancel-form-wait').onclick=()=>perform({type:'cancel-form-wait'}).catch(showError);
 element('auto-advance').onchange=()=>send({type:'auto-advance-preference',enabled:element('auto-advance').checked}).then(value=>{if(value.error)throw Error(value.error);}).catch(showError);
-send({type:'auto-advance-preference'}).then(value=>{element('auto-advance').checked=Boolean(value.enabled);}).catch(showError);
+send({type:'auto-advance-preference'}).then(value=>{if(value.error)throw Error(value.error);autoPreferenceReady=true;element('auto-advance').checked=Boolean(value.enabled);element('auto-advance').disabled=result?.next_action?.kind==='submit';}).catch(showError);
 
 function helperRequest(request) { if (request && (!tabId || request.tabId===tabId)) {result=request.result;openHelper(request.field);} }
 chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.helperRequest)helperRequest(changes.helperRequest.newValue);});
 helperRequest((await chrome.storage.session.get('helperRequest')).helperRequest);
-element('send-structure').onclick=async()=>{try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);element('snapshot-status').textContent='Page structure sent.';}catch(error){element('snapshot-status').textContent=error.message;}};
+let snapshotTimer, snapshotFade, snapshotError;
+element('send-structure').onclick=async()=>{
+  const status=element('snapshot-status');clearTimeout(snapshotTimer);clearTimeout(snapshotFade);status.className='';status.textContent='';status.title='';
+  if(snapshotError && element('error').textContent===snapshotError)element('error').textContent='';
+  element('send-structure').disabled=true;
+  try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);status.textContent='Sent';
+    snapshotTimer=setTimeout(()=>{status.className='sent-fade';snapshotFade=setTimeout(()=>{status.textContent='';status.className='';},300);},2500);
+  }catch(error){status.textContent='Failed';status.title=error.message;snapshotError=error.message+' Try Send page structure again.';element('error').textContent=snapshotError;}
+  finally{element('send-structure').disabled=false;}
+};
 
 
 function showSkills(available) {
@@ -317,7 +342,7 @@ function stableSkillContext() {
 }
 async function saveSkillSelection() {
   if(!skillPlan)return;
-  const selection={context:stableSkillContext(),excluded:skillPlan.matched.filter(s=>!selectedSkillNames.has(s)),added:[...selectedSkillNames].filter(s=>!skillPlan.matched.includes(s))};
+  const selection={context:stableSkillContext(),excluded:[...userExcludedSkills],added:[...userAddedSkills]};
   skillOverrides.set(selection.context,selection);
   await send({type:'skill-selection',selection});
 }
@@ -334,11 +359,16 @@ async function loadSkillPlan() {
       const stored=await send({type:'skill-selection'});
       if(skillPlanKey!==key)return;
       skillPlan=plan;const saved=skillOverrides.get(context) || (stored?.selection?.context===context?stored.selection:undefined);
-      selectedSkillNames=new Set([...plan.matched.filter(s=>!saved?.excluded.includes(s)),...(saved?.added || [])]);
-      chipStatuses={};renderSkillPlan();element('skills-progress').textContent=plan.matched.length+' matched';
+      userExcludedSkills=new Set(saved?.excluded || []);userAddedSkills=new Set(saved?.added || []);
+      selectedSkillNames=new Set([...plan.matched,...plan.other].filter(s=>!userExcludedSkills.has(s)).concat([...userAddedSkills]));
+      chipStatuses={};if(result?.skills)renderSkills(result.skills);else renderSkillPlan();element('skills-progress').textContent=plan.matched.length+' matched';
     }catch(error){if(skillPlanKey===key){skillPlanKey=undefined;element('skills-progress').textContent=error.message;}}
   })();
   return skillPlanPromise;
+}
+function changeSkill(skill,include) {
+  if(include) {selectedSkillNames.add(skill);userExcludedSkills.delete(skill);if(![...skillPlan.matched,...skillPlan.other].includes(skill))userAddedSkills.add(skill);}
+  else {selectedSkillNames.delete(skill);userExcludedSkills.add(skill);userAddedSkills.delete(skill);}
 }
 function changedSkills(){renderSkillPlan();saveSkillSelection().catch(showError);}
 function renderSkillPlan() {
@@ -347,14 +377,14 @@ function renderSkillPlan() {
   for(const skill of selectedSkillNames) {
     const chip=node('span','');chip.className='skill-chip';chip.dataset.status=chipStatuses[skill] || 'pending';
     const status=node('small',chipStatuses[skill] || 'pending');status.className='skill-status';
-    const remove=button('×',()=>{selectedSkillNames.delete(skill);changedSkills();});
+    const remove=button('×',()=>{changeSkill(skill,false);changedSkills();});
     remove.setAttribute('aria-label','Remove '+skill);remove.disabled=skillsBusy;
     chip.append(node('span',skill),status,remove);matched.append(chip);
   }
   if(!matched.children.length) matched.append(node('p','No skills selected. Include skills below.'));
   const missing=element('missing-skills');missing.replaceChildren();
   for(const skill of skillPlan.missing) {
-    const include=button((selectedSkillNames.has(skill)?'✓ ':'+ ')+skill,()=>{selectedSkillNames.add(skill);changedSkills();});
+    const include=button((selectedSkillNames.has(skill)?'✓ ':'+ ')+skill,()=>{changeSkill(skill,true);changedSkills();});
     include.setAttribute('aria-label','Include '+skill);include.disabled=skillsBusy || selectedSkillNames.has(skill);missing.append(include);
   }
   if(!missing.children.length) missing.append(node('p','No missing skills identified.'));
@@ -363,16 +393,20 @@ function renderSkillPlan() {
     const label=node('label',''),input=document.createElement('input');input.type='checkbox';input.checked=checked;input.disabled=skillsBusy;input.onchange=()=>action(input.checked);label.append(input,node('span',name));other.append(label);
   }
   check('Add all',skillPlan.other.length>0 && skillPlan.other.every(skill=>selectedSkillNames.has(skill)),checked=>{
-    for(const skill of skillPlan.other) {if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);}changedSkills();
+    for(const skill of skillPlan.other) changeSkill(skill,checked);changedSkills();
   });
   const manual=button('Type to add skills',()=>{element('manual-skills').hidden=false;element('manual-skill-input').focus();});other.append(manual);
-  for(const skill of skillPlan.other) check(skill,selectedSkillNames.has(skill),checked=>{if(checked) selectedSkillNames.add(skill);else selectedSkillNames.delete(skill);changedSkills();});
+  for(const skill of skillPlan.other) check(skill,selectedSkillNames.has(skill),checked=>{changeSkill(skill,checked);changedSkills();});
   if(!skillPlan.other.length) other.append(node('p','All profile skills are in the main list.'));
 }
 function renderSkills(value) {
   element('skills-progress').textContent=value.busy ? (skillPlan ? skillPlan.matched.length+" matched" : "") : result?.skills && skillPlan ? skillPlan.matched.length+' matched' : value.progress || '';
   element('skills-activity').hidden=!value.busy && !result?.skillsBusy && !skillsBusy;
-  chipStatuses={...chipStatuses,...value.items};renderSkillPlan();
+  chipStatuses={...chipStatuses,...value.items};
+  for(const [skill,status] of Object.entries(value.items || {})) {
+    if(['added','already added','alias used','AI picked'].includes(status)) selectedSkillNames.delete(skill);
+  }
+  renderSkillPlan();
 }
 async function runSkills() {
   if(skillsBusy || mainBusy) return;
@@ -390,5 +424,5 @@ async function runSkills() {
 }
 for(const id of ['autofill-skills']) element(id).onclick=runSkills;
 element('cancel-skills').onclick=()=>send({type:'cancel-skills'}).catch(showError);
-element('manual-skill-add').onclick=()=>{const input=element('manual-skill-input');if(input.value.trim()){selectedSkillNames.add(input.value.trim());input.value='';changedSkills();}};
+element('manual-skill-add').onclick=()=>{const input=element('manual-skill-input');if(input.value.trim()){changeSkill(input.value.trim(),true);input.value='';changedSkills();}};
 send({type:'skills-available'}).then(value=>{if(!result?.page)result={...result,...value};showSkills(Boolean(value.skills_available));}).catch(()=>{});

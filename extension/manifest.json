@@ -30,7 +30,13 @@
   ],
   "options_page": "options.html",
   "action": {
-    "default_title": "Open AutoApply"
+    "default_title": "Open AutoApply",
+    "default_icon": {
+      "16": "icons/moon-16.png",
+      "32": "icons/moon-32.png",
+      "48": "icons/moon-48.png",
+      "128": "icons/moon-128.png"
+    }
   },
   "commands": {
     "autofill": {
@@ -60,5 +66,11 @@
         "<all_urls>"
       ]
     }
-  ]
+  ],
+  "icons": {
+    "16": "icons/moon-16.png",
+    "32": "icons/moon-32.png",
+    "48": "icons/moon-48.png",
+    "128": "icons/moon-128.png"
+  }
 }

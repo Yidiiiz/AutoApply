@@ -35,6 +35,26 @@ def concept(label):
     if unusable_label(label):
         return None
     text = question_text(label)
+    from .disclosures import employment_restriction
+    if employment_restriction(label):
+        return 'employment_restrictions'
+    from .dropdowns import location_ordinal
+    if location_ordinal(label):
+        return 'locations.ordered_preferences'
+    if re.search(r'\bperman(?:ent|ant) address\b', text):
+        return 'contact.permanent_address'
+    if text == 'i agree':
+        return 'application_preferences.terms_acknowledgement'
+    if re.fullmatch(r'if you would like us to view your linkedin profile provide your profile url i e https www linkedin com in yourname', text):
+        return 'links.linkedin'
+    if re.fullmatch(r'please confirm which internship cohort you prefer to join based on your school timeline', text):
+        return 'application_preferences.internship_cohort'
+    if re.fullmatch(r'if applying for a software development or mobile development stack role please select your role preferences preference does not determine final stack placement', text):
+        return 'application_preferences.role_preferences'
+    if re.fullmatch(r'are you proficient in any other languages below select all that apply', text):
+        return 'languages.other_proficient'
+    if re.fullmatch(r'what is the country of residence for the university you anticipate graduating from|(?:what is )?(?:the )?country (?:of|for) (?:your |my )?(?:current )?(?:university|school)(?: of residence)?', text):
+        return 'education.country'
     link = re.fullmatch(r"(?:please )?(?:(?:include|provide|enter|share) (?:your )?|(?:what is )?your )?(linkedin|github|portfolio|personal website)(?: profile)?(?: url| link)?", text)
     if link:
         return {"linkedin":"links.linkedin", "github":"links.github", "portfolio":"links.personal_website", "personal website":"links.personal_website"}[link[1]]
@@ -157,6 +177,8 @@ for path in set(LABELS.values()) | {
     'citizenship.citizen_since_birth', 'education.currently_enrolled',
     'education.good_academic_standing', 'education.credit_hours_by_start',
     'contact.phone_device_type', 'contact.permanent_address', 'qualifications.age_18_or_older',
+    'education.country', 'locations.ordered_preferences', 'application_preferences.role_preferences',
+    'application_preferences.internship_cohort',
     'application_preferences.discovery_source', 'application_preferences.office_five_days',
     'application_preferences.willing_to_work_any_location', 'locations.willing_to_relocate',
     'demographics.gender', 'demographics.gender_identity', 'demographics.race',
@@ -175,7 +197,8 @@ for path in set(LABELS.values()) | {
 for key in ('sponsorship_combined', 'prior_employment', 'conflict_of_interest',
             'government_connections', 'privacy_ack', 'sms_recruiting', 'technical_interests',
             'start_date', 'government_employment', 'independent_auditor_employment',
-            'military_service', 'required_demographic_processing_consent'):
+            'military_service', 'required_demographic_processing_consent',
+            'employment_restrictions', 'languages.other_proficient'):
     REGISTRY[key] = Concept(key, (), None, 'policy', scopes=('application', 'employer'),
                             factual_fallback=False, special_policy=True)
 

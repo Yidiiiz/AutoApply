@@ -102,3 +102,61 @@ async def test_skill_provider_has_short_timeout(monkeypatch):
     monkeypatch.setattr(provider, '_generate_response', delayed)
     with pytest.raises(asyncio.TimeoutError):
         await provider.generate_response({'task':'skill_choose','timeout_seconds':0.01})
+
+
+async def test_choice_deadline_cancels_real_provider_process(monkeypatch):
+    import asyncio
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
+    provider = CodexWritingProvider(dict(name='test', billing='included'), None, None)
+    monkeypatch.setattr(provider, 'ensure_ready', AsyncMock())
+    process = Mock()
+    process.communicate = AsyncMock(side_effect=lambda *_: None)
+    async def stalled(*args):
+        await asyncio.Event().wait()
+    process.communicate = stalled
+    process.wait = AsyncMock()
+    monkeypatch.setattr('autoapply.codex_writer.asyncio.create_subprocess_exec', AsyncMock(return_value=process))
+    with pytest.raises(asyncio.TimeoutError):
+        await provider.generate_response(dict(task='choice_interpret', timeout_seconds=.01))
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.parametrize('result', [dict(choices=['Python'], fact_ids=['skills'], needs_input=False),
+                                  dict(choices=[], fact_ids=[], needs_input=True)])
+async def test_choice_actual_provider_prompt_schema(monkeypatch, result):
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name: 'fixture-codex')
+    provider=CodexWritingProvider(dict(name='test',billing='included'),None,None)
+    monkeypatch.setattr(provider,'ensure_ready',AsyncMock())
+    prompts=[]
+    async def process(args,folder,prompt=None):
+        prompts.append(prompt)
+        Path(args[args.index('-o')+1]).write_text(json.dumps(result),encoding='utf-8')
+    monkeypatch.setattr(provider,'run',process)
+    request=dict(task='choice_interpret',profile=dict(skills=['Python']),options=['Python','Rust'],multiple=False)
+    assert await provider.generate_response(request)==result
+    assert 'first person' not in prompts[0] and 'Do not write prose' in prompts[0]
+    assert all(key in prompts[0] for key in ['choices','fact_ids','needs_input','exact offered option'])
+    assert json.loads(prompts[0].split('\n')[-1])==request
+
+
+async def test_ordinary_question_timeout_is_unchanged(monkeypatch):
+    import asyncio
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which', lambda name:'fixture-codex')
+    provider=CodexWritingProvider(dict(name='test',billing='included'),None,None)
+    async def ordinary(request):
+        await asyncio.sleep(.02)
+        return {'answer':'ordinary'}
+    monkeypatch.setattr(provider,'_generate_response',ordinary)
+    assert await provider.generate_response(dict(task='question_answer',timeout_seconds=.001))=={'answer':'ordinary'}
+
+
+async def test_choice_actual_provider_rejects_invalid_output(monkeypatch):
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which',lambda name:'fixture-codex')
+    provider=CodexWritingProvider(dict(name='test',billing='included'),None,None)
+    monkeypatch.setattr(provider,'ensure_ready',AsyncMock())
+    async def output(args,folder,prompt=None):
+        Path(args[args.index('-o')+1]).write_text('not JSON',encoding='utf-8')
+    monkeypatch.setattr(provider,'run',output)
+    with pytest.raises(ProviderUnavailable,match='invalid JSON'):
+        await provider.generate_response(dict(task='choice_interpret',profile={'skills':['Python']},options=['Python']))
