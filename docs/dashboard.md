@@ -6,9 +6,9 @@ Load the repository's `extension/` directory as an unpacked extension at
 `chrome://extensions` with Developer mode enabled. Open **Pairing settings**,
 enter the dashboard URL and the Chrome extension pairing key from
 **Settings → Dashboard**, then save and test the connection. The extension's
-toolbar action opens a side panel; **Autofill this page** or **Alt+Shift+F** fills
+toolbar action opens an in-page sidebar; **Autofill** or **Alt+Shift+F** fills
 the current application and its accessible embedded frames. It preserves existing
-values, attaches the resume, and lists unresolved questions. Orange outlines mark
+values, attaches the resume, and lists unresolved questions. Gray outlines mark
 required fields needing review. Submission remains manual. AI writing, chat, cover-letter generation and paired
 Chrome runs remain available.
 See [the extension README](../extension/README.md) for setup and fixture checks.
@@ -64,7 +64,7 @@ summary toast; Last run reopens results.
 
 The toolbar and Alt+Shift+S toggle an in-page, shadow-root isolated sidebar.
 Alt+Shift+F opens it and fills. Each tab remembers open, closed or minimized state.
-Fill, Answers, Ask AI and Chat retain the answer helper, refinement history,
+Fill, Answers and Chat (with an Answer helper subtab) retain refinement history,
 cover-letter questions, downloads, pairing and run pause controls. Answers can be
 edited inline; ordinary field edits on the page are learned automatically. Passwords,
 files and hidden/honeypot fields are excluded; essays stay in this page's Answers
@@ -109,8 +109,9 @@ The dashboard opens on **Queue**. Rare worker controls remain under **Worker**,
 inside **Legacy worker controls**. Its 56px fixed
 navbar shows worker status (Idle, Running, Paused or Stopping) and a 32px
 **Reload data** circular-arrow icon, which only reloads dashboard data. It spins
-while loading and shows elapsed seconds, then a ticking **Updated Ns ago** label
-with the absolute completion time on hover. Reduced-motion preferences stop the spin. Tabs are ordered **Queue**, **Applications**, **Answers**, **Settings**, **Worker**.
+while loading, with the absolute completion time on hover afterward.
+Reduced-motion preferences stop the spin. Tabs are ordered **Queue**,
+**Applications**, **Answers**, **Worker**, then the **Settings** gear at top right.
 Applications has a remembered **Needs you**, **Failed**, **Applied** segmented switch
 with counts; its navbar badge shows the Needs you count. Applied includes Not eligible.
 Select a tab with the mouse or Left/Right arrow keys;
@@ -657,7 +658,7 @@ category overrides are never consulted to answer application questions.
 
 
 Queue and Needs you rows have Select for Chrome checkboxes. Select top N adds
-applications in the current filtered order. Run in Chrome (N) starts the selected
+applications in the current filtered order. Run (N) starts the selected
 queue; the status panel shows each result and Cancel run skips unfinished items.
 Pair the extension in Settings. If it has not polled for 15 seconds, the panel
 shows an Open Chrome hint. Discovery uses an MV3 alarm (at most 30 seconds while
@@ -714,15 +715,15 @@ The extension Chat tab includes Chat and Answer helper. Written fields offer Ask
 
 The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Send page structure in the footer sends only form metadata (no input values or file contents) through the paired `POST /ext/snapshot` endpoint. Snapshots are capped at 1 MB and saved under `data/private/snapshots/<host>-<timestamp>.json` on demand for markup debugging.
 
-Skills tag fields use the separate **Autofill skills** action in Fill or the sticky footer. It searches and selects one skill at a time, reports progress and added/skipped counts, and supports cancellation. Main autofill reports “Skills: run Autofill skills”. On Workday, current roles verify the checkbox and hidden/disabled To dates. The CC-305 Self Identify form uses the profile name and disability preference, English, and today’s local date (MM/DD/YYYY); Employee ID stays empty.
+Main Autofill handles matched skills automatically. The Skills disclosure offers retry, exclusions and cancellation. It searches and verifies one skill at a time. On Workday, current roles verify the checkbox and hidden/disabled To dates. The CC-305 Self Identify form uses the profile name and disability preference, English, and today’s local date (MM/DD/YYYY); Employee ID stays empty.
 
 ### Extension skills
 
-The Fill tab shows a skills plan when a tag input is available. Matched profile skills are selected by default; remove a chip to leave it out. Include missing description skills individually, or choose other profile skills from the dropdown (Add all includes all other skills). Both Autofill skills buttons run the selected list and show progress on each chip.
+The Fill tab shows a skills plan when a tag input is available. Matched profile skills are selected by default; remove a chip to leave it out. Include missing description skills individually, or choose other profile skills from the dropdown (Add all includes all other skills). The retry action runs the selected list and shows progress on each chip.
 
 Workday searches one skill at a time and reads its document-level results popup. Exact names and saved aliases take priority; the paired backend can choose a catalog option with a bounded AI request. Validated choices are saved as skill aliases for future forms. Unmatched combined skills are split into parts, and existing pills are preserved. If AI is unavailable, choices remain empty and the plan uses profile skills explicitly present in the description. Final submission remains manual.
 
-Autofill, section, and skills runs automatically send bounded diagnostics to the paired local `POST /ext/trace` endpoint. Traces retain up to 2000 steps (1 MB maximum), with the newest 30 JSON files in `data/private/traces/`. The sidebar footer shows the last saved filename. Diagnostics record extension-set values and structural option metadata; passwords, file contents, and pre-existing user input values are excluded.
+Autofill, section, and skills runs automatically send bounded diagnostics to the paired local `POST /ext/trace` endpoint. Traces retain up to 2000 steps (1 MB maximum), with the newest 30 JSON files in `data/private/traces/`. Trace filenames are not narrated in the sidebar. Diagnostics record extension-set values and structural option metadata; passwords, file contents, and pre-existing user input values are excluded.
 
 ## T049 sidebar and skills
 
@@ -749,8 +750,21 @@ The Skills disclosure offers selected exclusions, other profile skills, Add all,
 then Type to add skills, a compact retry action and cancellation. Explicit choices
 survive another sidebar mount for the same URL/description context. Opening the
 sidebar does not fill any skills. The duplicate Type to Add Skills prompt is
-hidden from Needs your input; other unknown questions remain actionable.
+hidden from pending and completed Answers; actual questionnaire answers remain actionable.
 
-Next page and the compact Auto-advance switch sit at the bottom, followed by the
+Autofill, Next page and the attached Auto switch sit at the bottom, followed by the
 text-only Send page structure link. Workday step narration and saved-trace notices
 are hidden; step detection and automatic trace collection remain active.
+
+## Lunar sidebar and dashboard
+
+The gear opens embedded pairing settings. Save/Test use the same validation as
+the Chrome options fallback; Back or Escape returns to the previous tool, chat
+and draft. Keys stay masked. Minimize retains a draggable moon control; its X
+dismisses it until reopened through the Chrome action or keyboard.
+
+Autofill shares the persistent footer with Next page and its Auto switch. Helper
+output and refinement stay hidden until an answer exists. Queue groups filter,
+layout, select-count and Run in one responsive action bar. More holds discovery
+and listing checks; Settings is the top-right gear. See [UI design](ui-design.md)
+for palette, keyboard behavior and local screenshot evidence.

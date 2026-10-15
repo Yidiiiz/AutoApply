@@ -53,7 +53,8 @@
         "sidepanel.js",
         "sidepanel.css",
         "shared.css",
-        "api.js"
+        "api.js",
+        "pairing.js"
       ],
       "matches": [
         "<all_urls>"

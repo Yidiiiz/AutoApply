@@ -1,4 +1,5 @@
 import {api} from "./api.js";
+import {initializePairing} from "./pairing.js";
 
 const element = id => document.getElementById(id);
 const tabId=Number(new URL(location.href).searchParams.get('tabId'))||undefined;
@@ -51,9 +52,10 @@ function inputFor(field) {
   input.setAttribute("aria-label", field.label);
   return input;
 }
+function managedSkillSearch(field) { return /^type to add skills\s*[.:?]?$/i.test(field.label?.trim() || "") && (field.kind === "combobox" || Boolean(result?.skills_available) && ["text", "search"].includes(field.kind)); }
 function prompts() {
   element("needs-input").replaceChildren();
-  const pending=(result?.pending || []).filter(field=>!result?.skills_available || !/^type to add skills\b/i.test(field.label));
+  const pending=(result?.pending || []).filter(field=>!managedSkillSearch(field));
   element("needs-input-heading").hidden=!pending.length;
   for (const field of pending) {
     const row = node("div", ""); row.className = "prompt";
@@ -102,6 +104,7 @@ function completedAnswers(){
   const container=element('completed-answers');container.replaceChildren();
   const generated=Object.entries(histories).filter(([key])=>key.startsWith(applicationKey()+':')).map(([key,h])=>({key:'ai:'+key,label:key.slice(applicationKey().length+1),kind:'textarea',value:h.versions[h.index]?.answer||'',source:'AI',generated:true}));
   for(const field of [...(result?.completed||[]),...(result?.aiAnswers||[]).filter(item=>!result?.completed?.some(f=>f.label===item.label&&f.source==='AI')).map(item=>({...item,generated:true,key:'ai:'+applicationKey()+':'+item.label})),...generated.filter(item=>!result?.completed?.some(f=>f.label===item.label&&f.source==='AI')&&!result?.aiAnswers?.some(f=>f.label===item.label))]){
+    if(managedSkillSearch(field)) continue;
     const card=node('div','');card.className='answer-card';
     const label=node('p',field.label);label.className='field-label';
     const value=node('p',Array.isArray(field.value)?field.value.join(', '):String(field.value??''));value.className='answer-value';
@@ -130,6 +133,7 @@ function render(value) {
   element("error").textContent = value.error || "";
   element("company").textContent = value.matched?.company || value.page?.company || "Current application";
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
+  element("company").title = element("company").textContent; element("job").title = element("job").textContent;
   const busy = Boolean(value.busy || value.skillsBusy || skillsBusy || value.writing?.length && /^Writing:/.test(value.writingProgress || ""));
   const totals = [value.summary?.filled ? `${value.summary.filled} field${value.summary.filled===1 ? "" : "s"} filled` : "", value.skills?.added ? `${value.skills.added} skill${value.skills.added===1 ? "" : "s"} added` : ""].filter(Boolean);
   const pending = value.pending?.length || value.coverQuestions?.length;
@@ -159,7 +163,7 @@ function render(value) {
   element('answer-section-results').textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
-  element("autofill").textContent=value.busy?"Filling…":"Autofill this page";
+  element("autofill").textContent=value.busy?"Filling…":"Autofill";
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
   element("needs-writing").replaceChildren();
   // Expose generated PDF without persisting blob URLs across panel instances.
@@ -184,6 +188,7 @@ async function pageContext() {
 }
 function renderAnswer() {
   const current = history(), answer = current.versions[current.index];
+  element("helper-result").hidden = !answer?.answer?.trim();
   element("version").textContent = `${answer ? current.index + 1 : 0} / ${current.versions.length}`;
   element("answer").value = answer?.answer || "";
   element("words").textContent = answer ? `${answer.words} words · ${answer.chars} characters` : "";
@@ -196,9 +201,9 @@ function renderAnswer() {
   element("fill-answer").disabled = aiBusy || !answer || result?.busy;
 }
 async function write(refine) {
-  if (aiBusy || !question()) return;
+  if (aiBusy || !question() || refine && !history().versions[history().index]?.answer) return;
   const key = question(), current = history(), previous = current.versions[current.index];
-  aiBusy = true; renderAnswer(); element("ai-status").textContent = "Writing... This can take up to 3 minutes.";
+  aiBusy = true; renderAnswer(); element("ai-status").textContent = "Writing…";
   try {
     const requestContext=await pageContext(), appKey=applicationKey();
     const answer = await api("/ext/write", {...requestContext, question: key,
@@ -206,7 +211,7 @@ async function write(refine) {
       instruction: refine ? element("refinement").value : source?.label === key && source.max_length != null ? `Use at most ${source.max_length} characters.` : "",
       previous: refine ? previous.answer : ""});
     current.versions.push(answer); current.index = current.versions.length - 1; histories[appKey+":"+key] = current;
-    await chrome.storage.session.set({answerHistory: histories}); element("ai-status").textContent = "Ready."; completedAnswers();
+    await chrome.storage.session.set({answerHistory: histories}); element("ai-status").textContent = ""; completedAnswers();
   } catch (error) { element("ai-status").textContent = error.message; }
   finally { aiBusy = false; renderAnswer(); }
 }
@@ -226,14 +231,21 @@ async function chat() {
   if (!text || chatBusy) return;
   chatBusy = true; element("send").disabled = element("clear-chat").disabled = true;
   messages.push({role: "user", text, time:Date.now()}); element("chat-input").value = ""; renderMessages();
-  element("chat-status").textContent = "Thinking... This can take up to 3 minutes.";
+  element("chat-status").textContent = "Thinking…";
   try {
     const reply = await api("/ext/chat", {...await pageContext(), messages: messages.slice(-12).map(({role,text})=>({role,text}))});
     messages.push({role: "assistant", text: reply.reply, time:Date.now()}); element("chat-status").textContent = "";
   } catch (error) { messages.pop(); element("chat-input").value = text; renderMessages(); element("chat-status").textContent = error.message; }
   finally { chatBusy = false; renderMessages(); element("send").disabled = element("clear-chat").disabled = false; }
 }
-element("settings").onclick = () => chrome.runtime.openOptionsPage();
+let pairingReady;
+element("settings").onclick = () => {
+  element('assistant-view').hidden = true; element('settings-view').hidden = false;
+  element('settings-back').focus(); pairingReady ||= initializePairing(element('settings-view')).then(ready => { if(!ready) pairingReady = undefined; });
+};
+function closeSettings() { element('settings-view').hidden = true; element('assistant-view').hidden = false; element('settings').focus(); }
+element('settings-back').onclick = closeSettings;
+element('settings-view').onkeydown = event => { if(event.key === 'Escape') { event.preventDefault(); closeSettings(); } };
 element("autofill").onclick = async () => {
   if(mainBusy || skillsBusy) return;
   mainBusy=true;element('autofill').disabled=true;
@@ -256,7 +268,7 @@ chrome.runtime.onMessage.addListener(message => { if (message.type === "autofill
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && tabId && changes.tabResults) render(changes.tabResults.newValue?.[tabId]);
   if (area === "session" && !tabId && changes.lastResult) render(changes.lastResult.newValue);
-  if (area === "local") connection();
+  if (area === "local" && (changes.server || changes.key)) connection();
 });
 const initial=await chrome.storage.session.get(["lastResult","tabResults"]);
 render(tabId?initial.tabResults?.[tabId]:initial.lastResult); completedAnswers(); renderAnswer(); connection();

@@ -1647,7 +1647,7 @@ def test_tab_markup_accessibility_themes_polling_and_csp(http_dashboard):
     tabs = [a for t, a in parsed.elements if a.get('role') == 'tab']
     panels = {a['id']: a for t, a in parsed.elements if a.get('role') == 'tabpanel'}
     assert len([a for t, a in parsed.elements if a.get('role') == 'tablist']) == 1
-    assert [a['id'] for a in tabs] == ['tab-priority', 'tab-applications', 'tab-answers', 'tab-settings', 'tab-run']
+    assert [a['id'] for a in tabs] == ['tab-priority', 'tab-applications', 'tab-answers', 'tab-run', 'tab-settings']
     assert [a['aria-selected'] for a in tabs] == ['true', 'false', 'false', 'false', 'false']
     assert [a['tabindex'] for a in tabs] == ['0', '-1', '-1', '-1', '-1']
     assert 'hidden' not in panels['panel-priority']
@@ -1663,7 +1663,7 @@ def test_tab_markup_accessibility_themes_polling_and_csp(http_dashboard):
     assert "u.protocol!=='https:'&&u.protocol!=='http:'" in page
     assert 'Open application #' in page
     assert 'Review #ID' not in page and '!submitted ID' not in page  # Removed legacy narration.
-    assert 'prefers-color-scheme:dark' in page and ':focus-visible' in page and '--surface:' in page
+    assert 'prefers-color-scheme:light' in page and ':focus-visible' in page and '--surface:' in page
     assert 'dataset.label' in page and '@media(max-width:480px)' in page
     assert f"script-src 'nonce-{dashboard.token}'" in headers['Content-Security-Policy']
     for tag in ('style', 'script'):
@@ -1951,9 +1951,9 @@ const originalReload=reload;reload=async()=>[];
  // Reload is data-only and displays elapsed and absolute completion time.
  reload=async()=>[true,true,true,true,true];refreshBusy=false;lastReloadAt=0;
  let finishReload;reload=()=>new Promise(resolve=>{finishReload=resolve;});
- const reloading=reloadData();reloadStarted=Date.now()-2000;updateReloadTime();assert.equal(reloadState.textContent,'Reloading... 2s');
- finishReload([true,true,true,true,true]);await reloading;assert.equal(reloadState.textContent,'Updated 0s ago');assert.ok(reloadState.title);
- lastReloadAt=Date.now()-12000;updateReloadTime();assert.equal(reloadState.textContent,'Updated 12s ago');
+ const reloading=reloadData();reloadStarted=Date.now()-2000;updateReloadTime();assert.equal(reloadState.textContent,'Reloading…');
+ finishReload([true,true,true,true,true]);await reloading;assert.equal(reloadState.textContent,'');assert.ok(reloadState.title);assert.ok(reloadButton.title.includes(reloadState.title));
+ lastReloadAt=Date.now()-12000;updateReloadTime();assert.equal(reloadState.textContent,'');assert.ok(reloadState.title);
  // Discovery uses the server result and persists completion metadata.
  searchBusy=true;searchStarted=Date.now()-72000;updateSearchTime();assert.equal(discoveryLabel.textContent,'Searching... 1m 12s');
  finishSearch({status:'succeeded',started_at:'2026-10-08T17:36:01.446586Z',finished_at:'2026-10-08T17:38:06.446586Z',result:{new:7}});
@@ -2143,7 +2143,7 @@ def test_javascript_chrome_selection_status_cancel_and_cover_popup(tmp_path):
 const sample=[1,2,3].map(application_id=>({application_id,url:'https://fixture.test/'+application_id,company:'Fixture',title:'Intern'}));
 render({rows:sample,sweep:{}});renderManual({applications:[{...sample[0],application_id:4}]});
 const check=chromeCheckbox(sample[0]).children[0];check.checked=true;check.listeners.change();
-assert.deepEqual([...chromeSelected],[1]);assert.equal(document.getElementById('chrome-run-priority').textContent,'Run in Chrome (1)');
+assert.deepEqual([...chromeSelected],[1]);assert.equal(document.getElementById('chrome-run-priority').textContent,'Run (1)');assert.equal(document.getElementById('chrome-run-priority').attributes['aria-label'],'Run in Chrome (1)');
 const controls=document.getElementById('chrome-selection-priority');controls.children[0].children[0].value='2';controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
 const head=document.getElementById('rows')._head,all=head._chromeSelection.children[0];
 assert.equal(all.attributes['aria-label'],'Select all visible for Chrome in Queue');assert.equal(all.indeterminate,true);
@@ -2235,11 +2235,12 @@ def test_t049_queue_timings(dashboard, config, db, listing):
 
 
 @pytest.mark.browser
-def test_t049_dashboard_screenshots(http_dashboard, config, db, listing):
-    from playwright.sync_api import sync_playwright
-    queue(db, config, listing, 8)
+def test_t051_dashboard_screenshots(http_dashboard, config, db, listing):
+    from playwright.sync_api import sync_playwright, expect
+    ids = queue(db, config, listing, 9)
+    db.set_setting('duplicate_submission_guard:'+str(ids[-1]), dict(source='USER_REPORTED',permanent=True,marked_at='2026-10-15T00:00:00+00:00'))
     server, dashboard = http_dashboard
-    output = Path('.tmp/review/t049')
+    output = Path('.tmp/review/t051')
     output.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel='chromium', headless=True)
@@ -2262,15 +2263,52 @@ def test_t049_dashboard_screenshots(http_dashboard, config, db, listing):
             page.on('pageerror', lambda error: errors.append(str(error)))
             for theme in ('light','dark'):
                 page.emulate_media(color_scheme=theme)
-                for width in (1440,800):
+                for width in (1440,800,500):
                     page.set_viewport_size(dict(width=width,height=900))
                     page.goto('http://127.0.0.1:8765/#priority')
                     page.locator('#rows .item').first.wait_for()
                     page.wait_for_function("document.getElementById('refresh').disabled===false")
                     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     assert page.locator('main').evaluate('e=>e.scrollWidth<=e.clientWidth')
-                    assert page.locator('#rows .item').first.evaluate("e=>{const boxes=[...e.children].filter(c=>getComputedStyle(c).display!=='none').map(c=>c.getBoundingClientRect());return boxes.every((b,i)=>!i || boxes[i-1].right<=b.left+1)}")
+                    assert width<=600 or page.locator('#rows .item').first.evaluate("e=>{const boxes=[...e.children].filter(c=>getComputedStyle(c).display!=='none').map(c=>c.getBoundingClientRect());return boxes.every((b,i)=>!i || boxes[i-1].right<=b.left+1)}")
+                    gear=page.locator('#tab-settings')
+                    gear_box=gear.bounding_box()
+                    assert gear_box['y']>=0 and gear_box['y']+gear_box['height']<=56
+                    assert gear_box['x']+gear_box['width']<=width
+                    assert gear.evaluate("e=>e.contains(document.elementFromPoint(e.getBoundingClientRect().x+16,e.getBoundingClientRect().y+16))")
+                    assert page.locator('.queue-action-bar').evaluate('e=>e.scrollWidth<=e.clientWidth')
+                    expect(page.locator('#chrome-run-priority')).to_be_disabled()
+                    expect(page.locator('#rows .item .rank').first).to_be_visible()
+                    assert page.locator('#rows .item').first.evaluate("e=>{const b=[...e.children].filter(c=>getComputedStyle(c).display!=='none').map(c=>c.getBoundingClientRect());return b.every((r,i)=>b.every((s,j)=>i===j || Math.min(r.right,s.right)-Math.max(r.left,s.left)<=1 || Math.min(r.bottom,s.bottom)-Math.max(r.top,s.top)<=1))}")
                     page.screenshot(path=str(output / f'dashboard-{width}-{theme}.png'))
+                    checks=page.locator('#rows .item .chrome-check input')
+                    checks.first.check()
+                    expect(page.locator('#rows .list-head .chrome-check input')).to_have_js_property('indeterminate',True)
+                    expect(page.locator('#chrome-run-priority')).to_be_enabled()
+                    page.screenshot(path=str(output / f'dashboard-selected-{width}-{theme}.png'))
+                    page.locator('#rows .list-head .chrome-check input').check()
+                    expect(page.locator('#rows .list-head .chrome-check input')).to_be_checked()
+                    page.screenshot(path=str(output / f'dashboard-all-{width}-{theme}.png'))
+                    page.locator('#rows .list-head .chrome-check input').uncheck()
+                    assert not any(p.startswith(('/api/settings','/api/answers')) for p in calls)
+                    gear.click()
+                    expect(gear).to_have_attribute('aria-selected','true')
+                    page.locator('#settings-nav button').first.wait_for()
+                    page.screenshot(path=str(output / f'dashboard-settings-{width}-{theme}.png'))
+                    page.locator('#tab-priority').click()
+                    page.locator('#tab-priority').press('End')
+                    expect(gear).to_be_focused()
+                    expect(gear).to_have_attribute('aria-selected','true')
+                    page.locator('#tab-applications').click()
+                    page.locator('#segment-applied').click()
+                    disabled=page.locator('#applied .applied-check input').first
+                    expect(disabled).to_be_checked()
+                    expect(disabled).to_be_disabled()
+                    columns=page.locator('#applied').evaluate("e=>[getComputedStyle(e.querySelector('.list-head')).gridTemplateColumns,getComputedStyle(e.querySelector('.item')).gridTemplateColumns]")
+                    assert columns[0]==columns[1], (width,columns)
+                    page.screenshot(path=str(output / f'dashboard-disabled-{width}-{theme}.png'))
+                    page.locator('#tab-priority').click()
+                    calls.clear()
             assert not errors
             assert not any(p.startswith(('/api/settings','/api/answers')) for p in calls)
         finally:

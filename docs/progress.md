@@ -313,3 +313,95 @@ Integrate all preserved T049 plus T050 changes into chrome-extension, restart
 with .venv Python, verify HTTP and real readonly queue timings, then ask user to
 reload the extension and refresh the employer tab. No final submission or push.
 Budget after the explicitly authorized reset:1 launch used,19 remaining.
+
+
+## T051 supervisor review ? draft preserved, 2026-10-15
+
+The user requested a further monochrome lunar UI simplification. Worker run
+7b069e8e78ca4e209ed338fbc2f7a0d2 preserved all edits in codex-work but stopped
+on the provider usage limit before its structured result. The immutable runner
+report is blocked (auth_or_quota), no out-of-scope changes, 18 launches remaining.
+Supervisor recorded blocked; no budget reset, subsequent worker, commit, merge
+or dashboard restart was attempted. Main remains b8daa36.
+
+Supervisor inspected actual in-page iframe screenshots at 360x600/400x800,
+empty/generated helper, embedded settings, minimized control and dashboard at
+1440/500px. Header/footer controls fit; screenshots use synthetic fixture data.
+Focused worker checks include settings/helper/collapsed controls, drag persistence,
+Workday skills activation, cancel/skip, and dashboard layout. They are supporting
+evidence, not the missing structured result or a claim of full-suite completion.
+
+Independent supervisor extension/API and dashboard/autonomy suites are running.
+The whitespace check currently fails for one extra blank line at the end of
+extension/sidepanel.css; supervisor did not edit source outside the required
+worker workflow. Source and .tmp/review/t051 artifacts are retained for correction.
+Live employer appearance remains unverified. Next: record independent outcomes;
+resume one narrow corrective worker only after explicit user authorization to
+clear the quota stop, preserve the draft, fix actual remaining failures, return
+a valid result, run required checks, review, commit/fast-forward and restart.
+
+Independent dashboard/autonomy result: **351 passed, 1 failed in222.18s**.
+Failure: tests/test_dashboard.py::test_page_display_helpers_and_no_reserved_notice_gap
+requires dashboard_ui.py ASCII-only source. The new literal Unicode ellipsis in
+updateReloadTime must use an ASCII source escape/entity or simple ASCII copy.
+Keep the source contract test intact. Extension/API suite remains running.
+
+Final independent extension/API result: **299 passed in776.79s** using
+.venv Python, -p no:cacheprovider, --basetemp .tmp/t051-independent-extension.
+Dashboard/autonomy:351 passed,1 ASCII-source failure as recorded above.
+Required diff check still fails on the extra trailing blank line. No source edits
+were made by the supervisor. Final review remains blocked and no commit/merge
+was performed. Two narrow corrections are now concrete; after explicit quota-stop
+reset authorization, bind T051 attempt2 previous_report_id to
+7b069e8e78ca4e209ed338fbc2f7a0d2, preserve this draft, correct ASCII reload copy
+and EOF whitespace, obtain valid worker result and clean required checks before
+acceptance/integration. Screenshots reviewed: header/footer fit at360x600; helper
+empty/generated; embedded settings; lunar minimized X; responsive dashboard with
+monochrome checked/mixed states. Main dashboard remains available on8765 atb8daa36.
+
+
+## T052 narrow corrective completion - 2026-10-15
+
+Preserved the entire dirty T051 draft and its historical review above. Corrected
+only the literal reload ellipsis in dashboard_ui.py to the ASCII JavaScript
+escape \u2026 (the raw PAGE string preserves the same displayed character) and
+removed one extra EOF newline from extension/sidepanel.css. Existing tests and
+behavior assertions are unchanged. No consequential missing implementation was
+found in the inspected UI/pairing changes.
+
+Focused local checks using .venv Python:
+- pytest tests/test_dashboard.py::test_page_display_helpers_and_no_reserved_notice_gap
+  tests/test_dashboard.py::test_javascript_display_formatting_and_renderers -q
+  -p no:cacheprovider --basetemp .tmp/t052-focused: **2 passed in 0.34s**.
+  This includes shipped JavaScript syntax, reload busy/completion state and titles.
+- Dashboard Python AST/ASCII check and node --check for all six extension JS files
+  passed; git diff --check passed.
+
+Reinspected preserved synthetic screenshots iframe-360x600-dark.png and
+dashboard-selected-500-light.png under .tmp/review/t051: header/footer controls
+and narrow queue/settings controls fit. No visual behavior changed in T052.
+Full configured extension/dashboard/diff checks remain for the independent runner;
+they were deliberately not repeated. Initial shell-tool setup failures prevented
+process creation; local Node child-process execution completed the checks above.
+No tests remain environment-blocked. No agents, runtime/config/budget changes,
+private data, live services, dashboard startup, submissions, staging, commits,
+pushes or deployment were used.
+
+## T051/T052 final supervisor acceptance ? 2026-10-15
+
+User explicitly authorized clearing the quota stop and one corrective worker.
+The prior blocked T051 review is immutable, so the runner rejected attempt2
+without launching a worker. A newly authorized T052 task cited the blocked report
+in context and preserved all draft files; no prior report or decision was edited.
+T052 run88c036829f8d4419ad3edb9be02a9dbd returned valid completed status.
+Supervisor verified its three changed paths against baseline hashes and inspected
+combined source changes and actual iframe/narrow/dashboard screenshots. Required
+independent runner checks: **299 extension/API passed in807.95s**,
+**352 dashboard/autonomy passed in205.30s**, diff passed; no scope violations.
+Runner review accepted. The ASCII-only source contract and other tests were retained.
+
+Integrate the combined preserved UI and correction by commit in codex-work and
+fast-forward chrome-extension, restart the dashboard with .venv Python, and verify
+HTTP, rendered queue layout and queue latency. Live employer appearance still
+requires extension reload and employer-tab refresh. No final submission or push.
+Budget after explicit reset:1 launch used,19 remaining.

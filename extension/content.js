@@ -45,34 +45,39 @@
     if (!sidebarHost) {
       sidebarHost = document.createElement('div');
       sidebarHost.id = 'autoapply-sidebar';
-      sidebarHost.style.cssText = 'all:initial!important;position:fixed!important;inset:0 0 0 auto!important;width:min(380px,100vw)!important;height:100dvh!important;z-index:2147483647!important;display:block!important;';
+      sidebarHost.style.cssText = 'all:initial!important;position:fixed!important;inset:0 0 0 auto!important;width:min(400px,100vw)!important;height:100dvh!important;z-index:2147483647!important;display:block!important;';
       const shadow = sidebarHost.attachShadow({mode:'open'});
       const style = document.createElement('style');
-      style.textContent = ':host{color-scheme:light dark} .panel{height:100%;background:Canvas;box-shadow:-8px 0 32px #0002;animation:slide .18s ease-out}iframe{border:0;width:100%;height:100%;display:block} .restore{position:fixed;right:0;top:40%;border:1px solid #71717a;border-radius:8px 0 0 8px;padding:12px 8px;background:Canvas;color:CanvasText;cursor:pointer;font:13px ui-sans-serif,system-ui} [hidden]{display:none!important}@keyframes slide{from{transform:translateX(100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){.panel{animation:none}}';
+      style.textContent = ':host{color-scheme:dark} .panel{height:100%;background:Canvas;box-shadow:-8px 0 32px #0002;animation:slide .18s ease-out}iframe{border:0;width:100%;height:100%;display:block} .collapsed{position:fixed;right:0;top:40%;display:flex;align-items:center;background:#191919;color:#eee;border:0;outline:1px solid #555;border-radius:6px 0 0 6px;padding:0;box-shadow:0 2px 8px #0003}.collapsed button{min-height:30px;border:0;background:transparent;color:inherit;font:12px ui-sans-serif,system-ui;cursor:pointer;padding:0 8px}.collapsed button:hover{background:#303030}.collapsed button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}.restore svg{width:14px;height:14px;vertical-align:-2px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:1.5}@media(prefers-color-scheme:light){.collapsed{background:#fff;color:#202020;outline-color:#aaa}.collapsed button:hover{background:#e8e8e8}} [hidden]{display:none!important}@keyframes slide{from{transform:translateX(100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){.panel{animation:none}}';
       const panel = document.createElement('div'); panel.className = 'panel';
       const frame = document.createElement('iframe'); frame.src = chrome.runtime.getURL('sidepanel.html')+(tabId?'?tabId='+tabId:''); frame.title = 'AutoApply application assistant';
       panel.append(frame);
-      const restore = document.createElement('button'); restore.className='restore'; restore.textContent='AutoApply'; restore.setAttribute('aria-label','Restore AutoApply sidebar');
+      const restore = document.createElement('button'); restore.className='restore'; restore.innerHTML='<svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A9 9 0 0 1 8.5 4 9 9 0 1 0 20 15.5Z"/></svg> AutoApply'; restore.setAttribute('aria-label','Restore AutoApply sidebar');
+      const collapsed = document.createElement('div'); collapsed.className='collapsed';
+      const dismiss = document.createElement('button'); dismiss.className='dismiss'; dismiss.textContent='×';
+      dismiss.setAttribute('aria-label','Dismiss minimized AutoApply'); dismiss.title='Dismiss AutoApply';
+      dismiss.onclick=event=>{event.stopPropagation();sidebar('closed');chrome.runtime.sendMessage({type:'sidebar-state',state:'closed'}).catch(()=>{});};
+      collapsed.append(restore,dismiss);
       const positionKey = 'flagPosition:' + location.hostname;
-      const clamp = top => Math.max(0, Math.min(innerHeight - restore.offsetHeight, top));
+      const clamp = top => Math.max(0, Math.min(innerHeight - collapsed.offsetHeight, top));
       let drag, dragged = false;
-      chrome.storage.local.get(positionKey).then(saved => { if (Number.isFinite(saved[positionKey])) restore.style.top = clamp(saved[positionKey]) + 'px'; });
+      chrome.storage.local.get(positionKey).then(saved => { if (Number.isFinite(saved[positionKey])) collapsed.style.top = clamp(saved[positionKey]) + 'px'; });
       restore.style.touchAction = 'none';
-      restore.onpointerdown = event => { drag = {y:event.clientY, top:restore.getBoundingClientRect().top}; dragged=false; restore.setPointerCapture(event.pointerId); };
-      restore.onpointermove = event => { if (!drag) return; if (Math.abs(event.clientY-drag.y)>3) dragged=true; if (dragged) restore.style.top=clamp(drag.top+event.clientY-drag.y)+'px'; };
-      restore.onpointerup = () => { if (dragged) chrome.storage.local.set({[positionKey]:clamp(restore.getBoundingClientRect().top)}); drag=null; };
+      restore.onpointerdown = event => { drag = {y:event.clientY, top:collapsed.getBoundingClientRect().top}; dragged=false; restore.setPointerCapture(event.pointerId); };
+      restore.onpointermove = event => { if (!drag) return; if (Math.abs(event.clientY-drag.y)>3) dragged=true; if (dragged) collapsed.style.top=clamp(drag.top+event.clientY-drag.y)+'px'; };
+      restore.onpointerup = () => { if (dragged) chrome.storage.local.set({[positionKey]:clamp(collapsed.getBoundingClientRect().top)}); drag=null; };
       restore.onpointercancel = () => { drag=null; };
-      window.addEventListener('resize', () => { if (restore.style.top) restore.style.top=clamp(parseFloat(restore.style.top))+'px'; });
-      restore.onclick=()=>{if(dragged){dragged=false;return;}sidebar('open');chrome.runtime.sendMessage({type:'sidebar-state',state:'open'}).catch(()=>{});};
-      shadow.append(style,panel,restore); document.documentElement.append(sidebarHost);
+      window.addEventListener('resize', () => { if (collapsed.style.top) collapsed.style.top=clamp(parseFloat(collapsed.style.top))+'px'; });
+      restore.onclick=event=>{if(dragged && event.detail!==0){dragged=false;return;}dragged=false;sidebar('open');chrome.runtime.sendMessage({type:'sidebar-state',state:'open'}).catch(()=>{});};
+      shadow.append(style,panel,collapsed); document.documentElement.append(sidebarHost);
       sidebarHost.dataset.state='closed';
     }
     const state = mode === 'toggle' ? sidebarHost.dataset.state === 'open' ? 'closed' : 'open' : mode;
     sidebarHost.dataset.state=state;
     sidebarHost.style.setProperty('display',state==='closed'?'none':'block','important');
-    sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(380px,100vw)','important');
+    sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(400px,100vw)','important');
     sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
-    sidebarHost.shadowRoot.querySelector('.restore').hidden=state!=='minimized';
+    sidebarHost.shadowRoot.querySelector('.collapsed').hidden=state!=='minimized';
     return state;
   }
   function valueOf({element,members,field,savedDate}) {
@@ -672,7 +677,7 @@
         trace("field","verified",element,{verified:false,reason:"not committed or unresolved"});
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
         summary[writing ? "writing" : "pending"].push({...field});
-        if (field.required) mark(record, "#d99022");
+        if (field.required) mark(record, "#999999");
       };
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
       if (answer.status === "NEEDS_INPUT") { unresolved(false); continue; }
@@ -748,7 +753,7 @@
               (!/^\d+$/.test(value) || Number(element.value) !== Number(value))) { unresolved(false); continue; }
         }
         trace("field","verified",element,{verified:true,...(field.kind!=="file"?{value:answer.value,observed:String(valueOf(record))===String(answer.value)?valueOf(record):"committed selection"}:{})});
-        mark(record, "#68a879");
+        mark(record, "#888888");
         summary.filled++;
         const value=valueOf(record); observedValues.set(field.key,JSON.stringify(value));
         summary.completed.push({...field,value,source:answer.source||"AI"});
@@ -1363,7 +1368,7 @@
       const host = document.createElement('span'); host.className='autoapply-ask-ai';
       host.style.cssText='display:block; margin:4px 0 8px;';
       const shadow=host.attachShadow({mode:'open'}), style=document.createElement('style'), button=document.createElement('button');
-      style.textContent='button{font:11px system-ui;padding:3px 8px;border:1px solid #aaa;border-radius:5px;background:#fff;color:#444;cursor:pointer}';
+      style.textContent='button{font:11px system-ui;padding:3px 8px;border:1px solid #555;border-radius:5px;background:#191919;color:#eee;cursor:pointer}button:focus-visible{outline:2px solid currentColor;outline-offset:2px}@media(prefers-color-scheme:light){button{background:#fff;color:#333;border-color:#aaa}}';
       button.textContent='Ask AI'; button.type='button';
       button.onclick=async () => {
         await scan();

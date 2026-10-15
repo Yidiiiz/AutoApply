@@ -273,8 +273,8 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     assert page.locator("#resume").evaluate("e => [e.files.length, e.files[0].name, e.files[0].type]") == [1, "fixture-resume.pdf", "application/pdf"]
     assert page.locator("#resume").evaluate("async e => Array.from(new Uint8Array(await e.files[0].arrayBuffer()))") == list(RESUME)
     for selector in ("#missing", "#cover", "#too-long"):
-        assert page.locator(selector).evaluate("e => e.style.outline") == "rgb(217, 144, 34) solid 2px"
-    assert page.locator("#name").evaluate("e => e.style.outline") == "rgb(104, 168, 121) solid 2px"
+        assert page.locator(selector).evaluate("e => e.style.outline") == "rgb(153, 153, 153) solid 2px"
+    assert page.locator("#name").evaluate("e => e.style.outline") == "rgb(136, 136, 136) solid 2px"
     assert page.evaluate("[submitClicks,nextClicks,submissions]") == [0, 0, 0]
     assert page.frames[1].evaluate("submissions") == 0
     events = page.evaluate("fieldEvents")
@@ -2074,9 +2074,9 @@ def test_t049_one_click_skills_and_layout(loaded_extension, extension_server, th
     expect(panel.locator('#cancel-skills')).to_be_visible()
     expect(panel.locator('#needs-input')).to_contain_text('Which local fixture project')
     assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
-    boxes=[panel.locator(selector).bounding_box() for selector in ('#company','#job','#run-controls')]
-    assert boxes[0]['x']+boxes[0]['width']<=boxes[2]['x']+1
-    assert boxes[1]['y']>=boxes[2]['y']+boxes[2]['height']-1
+    boxes=[panel.locator(selector).bounding_box() for selector in ('#company','#job','#run-controls','#settings')]
+    assert boxes[0]['x']+boxes[0]['width']<=boxes[3]['x']+1
+    assert boxes[1]['y']+boxes[1]['height']<=boxes[2]['y']+1
     expect(panel.locator('#progress')).to_be_empty()
     expect(panel.locator('#skills-progress')).to_have_text('1 matched')
     footer=panel.locator('.page-navigation').bounding_box()
@@ -2219,4 +2219,200 @@ def test_t050_actionable_status_and_compact_outcomes(loaded_extension, extension
         assert footer['y'] + footer['height'] <= 800
         if name in {'sign-in', 'cancelled', 'error', 'settled'}:
             panel.screenshot(path=str(output / f'{name}-360-{theme}.png'))
+    assert not errors
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_t051_actual_iframe_settings_helper_and_collapsed_control(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate("config=>chrome.storage.local.set(config)", dict(server=server, key=KEY))
+    page = context.new_page()
+    page.emulate_media(color_scheme=theme)
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(server + '/t046.html')
+    tab_id = worker.evaluate("async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id", page.url)
+    worker.evaluate("id=>globalThis.autoApplySidebar(id,'open')", tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#settings').wait_for()
+    panel = next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    panel.wait_for_load_state()
+    base = dict(tabId=tab_id, url=page.url, skills_available=True,
+                page=dict(company='Fixture International Research and Engineering Company with a long name',
+                          title='Software Engineering Intern, Developer Tools and Distributed Systems with a long title', description='Local tools'),
+                fields=[], pending=[dict(key='search',label='Type to Add Skills',kind='combobox'),
+                                    dict(key='real',label='Which skills would you like to develop?',kind='textarea')],
+                completed=[dict(key='search',label='Type to Add Skills',kind='combobox',value='Python'),
+                           dict(key='actual',label='Type to Add Skills?',kind='textarea',value='Real questionnaire answer'),
+                           dict(key='real',label='Programming skills',kind='text',value='Python',source='profile')], writing=[])
+    worker.evaluate("value=>chrome.storage.session.set({tabResults:{[value.tabId]:value},chromeRun:{active:true,index:1,total:8,current:{application_id:42}}})", base)
+    expect(panel.locator('#company')).to_have_text(base['page']['company'])
+    expect(panel.locator('#skills-progress')).to_have_text('1 matched')
+    output = ROOT / '.tmp/review/t051'
+    output.mkdir(parents=True, exist_ok=True)
+
+    def bounds():
+        assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        assert panel.evaluate("""() => {
+            const header=document.querySelector('header').getBoundingClientRect(),footer=document.querySelector('footer').getBoundingClientRect();
+            const controls=['settings','minimize','close','run-pause','run-cancel','run-skip','autofill','next-page','auto-advance','send-structure'];
+            return header.top>=0 && header.bottom<footer.top && footer.bottom<=innerHeight && controls.every(id=>{
+                const e=document.getElementById(id),b=e.getBoundingClientRect();
+                return b.width>0 && b.height>0 && b.left>=0 && b.right<=innerWidth && b.top>=0 && b.bottom<=innerHeight && e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));
+            });
+        }""")
+
+    for width, height in ((360,800),(400,800),(360,600)):
+        page.set_viewport_size(dict(width=width,height=height))
+        expect(panel.locator('#run-controls')).to_be_visible()
+        bounds()
+        assert panel.evaluate('innerWidth') == width
+        page.screenshot(path=str(output/f'iframe-{width}x{height}-{theme}.png'))
+        pages = len(context.pages)
+        panel.locator('#settings').click()
+        expect(panel.locator('#server')).to_be_enabled()
+        expect(panel.locator('#assistant-view')).to_be_hidden()
+        assert len(context.pages) == pages
+        assert panel.locator('#key').get_attribute('type') == 'password'
+        expect(panel.locator('#server')).to_have_value(server)
+        panel.locator('#server').fill(server+'?unexpected=1')
+        panel.get_by_role('button',name='Save',exact=True).click()
+        expect(panel.locator('#status')).to_contain_text('without credentials, query or fragment')
+        assert worker.evaluate("async()=> (await chrome.storage.local.get('server')).server") == server
+        panel.locator('#server').fill(server)
+        panel.locator('#key').fill('   ')
+        panel.get_by_role('button',name='Save',exact=True).click()
+        expect(panel.locator('#status')).to_have_text('Enter your dashboard pairing key.')
+        assert worker.evaluate("async()=> (await chrome.storage.local.get('key')).key") == KEY
+        panel.locator('#key').fill(KEY)
+        panel.locator('#test').click()
+        expect(panel.locator('#status')).to_have_text('Connected — Fixture Student')
+        page.screenshot(path=str(output/f'settings-{width}x{height}-{theme}.png'))
+        panel.locator('#settings-back').click()
+        bounds()
+    panel.locator('#tab-answers').click()
+    expect(panel.locator('#completed-answers')).to_contain_text('Programming skills')
+    expect(panel.locator('#completed-answers')).to_contain_text('Real questionnaire answer')
+    assert panel.locator('#completed-answers .field-label').all_text_contents() == ['Type to Add Skills?', 'Programming skills']
+    page.screenshot(path=str(output/f'answers-{theme}.png'))
+    panel.locator('#tab-fill').click()
+    assert panel.locator('#needs-input .prompt').count() == 1
+    expect(panel.locator('#needs-input')).to_contain_text('Which skills would you like to develop?')
+    panel.locator('#skills-menu > summary').click()
+    panel.locator('#other-skills > summary').click()
+    labels = panel.locator('#other-skill-options').inner_text()
+    assert labels.index('Add all') < labels.index('Type to add skills')
+    page.screenshot(path=str(output/f'skills-{theme}.png'))
+    panel.locator('#tab-chat').click()
+    panel.locator('#subtab-helper').click()
+    expect(panel.locator('#helper-result')).to_be_hidden()
+    expect(panel.locator('#refinement')).to_be_hidden()
+    expect(panel.locator('#version')).to_be_hidden()
+    page.screenshot(path=str(output/f'helper-empty-{theme}.png'))
+    panel.locator('#question').fill('Why local tools?')
+    panel.locator('#settings').click()
+    panel.locator('#key').fill('wrong-fixture-key')
+    panel.get_by_role('button',name='Save',exact=True).click()
+    expect(panel.locator('#status')).to_have_text('Pairing saved.')
+    panel.locator('#settings-back').click()
+    panel.locator('#generate').click()
+    expect(panel.locator('#ai-status')).to_contain_text('Pairing key rejected')
+    expect(panel.locator('#helper-result')).to_be_hidden()
+    expect(panel.locator('#generate')).to_be_enabled()
+    panel.locator('#settings').click()
+    panel.locator('#key').fill(KEY)
+    panel.locator('#test').click()
+    expect(panel.locator('#status')).to_have_text('Connected — Fixture Student')
+    panel.locator('#settings-back').click()
+    fixture_delay(worker, hold=['write'])
+    panel.locator('#generate').click()
+    expect(panel.locator('#generate')).to_be_disabled()
+    expect(panel.locator('#ai-status')).to_contain_text('Writing')
+    expect(panel.locator('#helper-result')).to_be_hidden()
+    fixture_delay(worker, release=['write'])
+    expect(panel.locator('#answer')).to_have_value('I enjoy building useful local tools.')
+    expect(panel.locator('#refinement')).to_be_visible()
+    panel.locator('#refinement').fill('Shorter')
+    panel.locator('#refine').click()
+    expect(panel.locator('#version')).to_have_text('2 / 2')
+    expect(panel.locator('#answer')).to_have_value('Refined fixture answer.')
+    page.set_viewport_size(dict(width=360,height=800))
+    panel.locator('#ask-section').evaluate('e=>e.scrollTop=0')
+    page.screenshot(path=str(output/f'helper-generated-{theme}.png'))
+    page.set_viewport_size(dict(width=360,height=600))
+    panel.locator('#settings').click()
+    panel.locator('#server').fill(server+'/')
+    panel.get_by_role('button',name='Save',exact=True).click()
+    expect(panel.locator('#status')).to_have_text('Pairing saved.')
+    panel.locator('#settings-back').press('Escape')
+    expect(panel.locator('#subtab-helper')).to_have_attribute('aria-selected','true')
+    expect(panel.locator('#version')).to_have_text('2 / 2')
+    panel.locator('#question').fill('Another question')
+    expect(panel.locator('#helper-result')).to_be_hidden()
+    panel.locator('#question').fill('Why local tools?')
+    expect(panel.locator('#version')).to_have_text('2 / 2')
+    panel.locator('#subtab-chat').click()
+    panel.locator('#chat-input').fill('Help with local tools')
+    panel.locator('#send').click()
+    expect(panel.locator('.bubble.assistant')).to_have_count(1)
+    panel.locator('#chat-input').fill('Unsent draft')
+    panel.locator('#settings').click()
+    panel.locator('#test').click()
+    expect(panel.locator('#status')).to_have_text('Connected — Fixture Student')
+    panel.locator('#settings-back').click()
+    expect(panel.locator('#subtab-chat')).to_have_attribute('aria-selected','true')
+    expect(panel.locator('#chat-input')).to_have_value('Unsent draft')
+    expect(panel.locator('.bubble.assistant')).to_have_count(1)
+    bounds()
+    composer=panel.locator('.chat-composer').bounding_box()
+    assert composer['y']+composer['height']<=panel.locator('footer').bounding_box()['y']
+    page.screenshot(path=str(output/f'chat-{theme}.png'))
+    panel.locator('#auto-advance').check()
+    expect(panel.locator('#auto-advance')).to_be_checked()
+    page.screenshot(path=str(output/f'auto-enabled-{theme}.png'))
+    panel.locator('#minimize').click()
+    restore=page.get_by_role('button',name='Restore AutoApply sidebar')
+    expect(restore).to_be_visible()
+    page.screenshot(path=str(output/f'minimized-{theme}.png'))
+    box=restore.bounding_box()
+    page.mouse.move(box['x']+5,box['y']+5)
+    page.mouse.down()
+    page.mouse.move(box['x']+5,box['y']+75,steps=5)
+    page.mouse.up()
+    assert restore.bounding_box()['y']>box['y']+40
+    saved=worker.evaluate("async()=> (await chrome.storage.local.get('flagPosition:127.0.0.1'))['flagPosition:127.0.0.1']")
+    assert saved>=0
+    restore.focus()
+    restore.press('Enter')
+    expect(panel.locator('#auto-advance')).to_be_checked()
+    panel.locator('#minimize').click()
+    page.get_by_role('button',name='Dismiss minimized AutoApply').click()
+    expect(page.locator('#autoapply-sidebar')).to_be_hidden()
+    page.screenshot(path=str(output/f'dismissed-{theme}.png'))
+    worker.evaluate("id=>globalThis.autoApplySidebar(id,'toggle')",tab_id)
+    expect(panel.locator('#chat-input')).to_have_value('Unsent draft')
+    expect(panel.locator('#auto-advance')).to_be_checked()
+    # Preference remains when another assistant document is initialized.
+    other=context.new_page()
+    other.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    expect(other.locator('#auto-advance')).to_be_checked()
+    panel.locator('#close').click()
+    expect(page.locator('#autoapply-sidebar')).to_be_hidden()
+    worker.evaluate("id=>globalThis.autoApplySidebar(id,'toggle')",tab_id)
+    expect(panel.locator('#chat-input')).to_have_value('Unsent draft')
+    assert page.evaluate('searches') == []
+    other.goto(f'chrome-extension://{extension_id}/options.html')
+    expect(other.locator('#server')).to_be_enabled()
+    other.set_viewport_size(dict(width=360,height=600))
+    other.emulate_media(color_scheme=theme)
+    other.screenshot(path=str(output/f'fallback-options-{theme}.png'))
+    panel.locator('#minimize').click()
+    page.get_by_role('button',name='Dismiss minimized AutoApply').click()
+    expect(page.locator('#autoapply-sidebar')).to_be_hidden()
+    assert worker.evaluate("async id=>(await chrome.storage.session.get('sidebarTabs')).sidebarTabs[id]",tab_id) == 'closed'
+    page.reload()
+    expect(page.locator('#autoapply-sidebar')).to_be_hidden()
+    worker.evaluate("id=>globalThis.autoApplySidebar(id,'toggle')",tab_id)
+    expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
+    assert not any(path=='/ext/answers' for path,_,_ in requests)
     assert not errors
