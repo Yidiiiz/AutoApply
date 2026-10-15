@@ -405,3 +405,11 @@ fast-forward chrome-extension, restart the dashboard with .venv Python, and veri
 HTTP, rendered queue layout and queue latency. Live employer appearance still
 requires extension reload and employer-tab refresh. No final submission or push.
 Budget after explicit reset:1 launch used,19 remaining.
+
+Integration completed: ffa0d81 committed in codex-work and fast-forwarded into
+chrome-extension. Dashboard restarted with .venv Python on127.0.0.1:8765.
+HTTP200 serves lunar UI; cached Queue reads0.003s and0.021s. Readonly browser
+review at1440/500px:50 visible rows, no horizontal overflow, top-right gear
+visible, zero JavaScript errors. Screenshot .tmp/review/t052-integrated/queue-1440-dark.png
+was visually inspected. No employer actions, final submissions or push occurred.
+Reload extension and refresh already-open employer tabs to activate the new UI.
