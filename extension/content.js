@@ -523,7 +523,7 @@
     }
     const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
     previousStep = workdayState();
-    return {page: pageInfo(), fields: retained, next_action: navigationState(), workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
+    return {page: pageInfo(), fields: retained, page_identity: snapshotIdentity(), next_action: navigationState(), workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
 
   async function collectOptions(keys) {
@@ -1497,6 +1497,27 @@
     .observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden','style','class']});
   setTimeout(syncWritingButtons,80);
 
+  // Passive reads only: diagnostics must never replace the scanner's live handles.
+  function snapshotIdentity() {
+    const shape=JSON.stringify([location.href, workdayState()?.step, ...Array.from(document.querySelectorAll('form,fieldset,legend,h1,h2,h3,label,input,select,textarea,[role="combobox"],[role="radiogroup"]'))
+      .filter(element => !element.closest('#autoapply-sidebar,.autoapply-ask-ai'))
+      .slice(0,10000).map(element => [element.tagName, element.id.slice(0,2000), element.getAttribute('name')?.slice(0,2000), element.getAttribute('type'), element.getAttribute('aria-label')?.slice(0,2000),
+        Boolean(element.getClientRects().length), element.matches('legend,h1,h2,h3,label') ? text(element).slice(0,2000) : ''])]);
+    // This passive change detector is compact in session results and works on HTTP
+    // fixtures too. The dedupe key is separately SHA-256 hashed by the worker.
+    let first=2166136261,second=5381;
+    for(let i=0;i<shape.length;i++){first=Math.imul(first^shape.charCodeAt(i),16777619);second=Math.imul(second,33)^shape.charCodeAt(i);}
+    return [shape.length,first>>>0,second>>>0].join(':');
+  }
+  function unresolvedStructure(identity, fields) {
+    if (identity !== snapshotIdentity() || signInPage() || extensionFilling) return null;
+    if (!fields.every(field => {
+      const record=records.get(field.key);
+      return record && record.element.isConnected && record.field.label===field.label &&
+        (record.field.kind==='file' || interactiveVisible(record.element)) && !occupied(record);
+    })) return null;
+    return pageStructure();
+  }
   function pageStructure() {
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
     const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,[role],[data-automation-id],[contenteditable="true"]';
@@ -1518,5 +1539,5 @@
     }
     return {host:location.hostname,nodes,truncated};
   }
-  globalThis.autoApplyContent = {beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
 })();

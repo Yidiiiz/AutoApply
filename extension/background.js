@@ -1,4 +1,5 @@
 import {api} from "./api.js";
+import {snapshotCollector} from "./snapshots.js";
 
 async function showSidebar(tabId, mode='open') {
   const tab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
@@ -13,6 +14,7 @@ let running = false;
 const activeResults = new Map(), writingTasks = new Map();
 const manualActionTabs = new Set();
 const skillSelections = new Map();
+const snapshots=snapshotCollector({api,report,delay:ms=>delay(ms),current:result=>activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId) && !pendingSteps.has(result.tabId)});
 function skillContext(result) {
   const page=result.page || {};
   return JSON.stringify([result.url?.split(/[?#]/)[0],page.description || '']);
@@ -84,7 +86,7 @@ async function scan(tabId) {
   await chrome.storage.session.set({jobContexts});
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
-  return {tabId: tab.id, url: tab.url, page, fields, next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
+  return {tabId: tab.id, url: tab.url, page, fields, pageIdentities:Object.fromEntries(frames.map(frame=>[frame.frameId,{identity:frame.result.page_identity,documentId:frame.documentId}])), next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
 const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
@@ -262,6 +264,7 @@ async function rescanRevealed(result) {
     const added = scanned.fields.filter(field=>!known.has(field.key) && !field.answered);
     for (const name of ['pending','writing']) result[name] = result[name].filter(field=>scanned.fields.some(item=>item.key===field.key&&!item.answered));
     result.fields = scanned.fields;
+    result.pageIdentities = scanned.pageIdentities;
     if (!added.length) continue;
     const all = result.fields;
     result.fields = added;
@@ -336,9 +339,10 @@ export async function autofill(tabId, application, advanceCount = 0) {
     const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
       result.summary.errors.push(error.message);
       return report(result);
-    }).finally(() => { if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
+    }).finally(() => { result.writingSettled=true; if(activeResults.get(result.tabId)===result)report(result); snapshots.capture(result); if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
     writingTasks.set(result.tabId, task);
   }
+  else snapshots.capture(result);
   if (!cancelledTabs.has(result.tabId) && !result.error && !result.waiting && advanceCount < 10 && (await advancePreference()).enabled && await clickNext(result, true)) {
     if (cancelledTabs.has(result.tabId)) return result;
     pendingSteps.delete(result.tabId);
@@ -422,15 +426,19 @@ async function action(message) {
   if (message.type === "autofill") return autofill(message.tabId);
   if (message.type === "page-context") return scan(message.tabId);
   if (message.type === 'auto-advance-preference') return advancePreference(message.enabled);
+  if (message.type === 'snapshot-preference') return snapshots.preference(message.enabled);
   if (message.type === 'cancel-form-wait') {
     const {lastResult} = await chrome.storage.session.get('lastResult');
     const id = message.tabId || lastResult?.tabId; cancelWait(id);
     const result = activeResults.get(id); if (result) {result.waiting=false;result.progress='Form waiting cancelled.';return report(result);} return {};
   }
   if (message.type === 'page-snapshot') {
-    const scanned=await scan(message.tabId);
-    const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId},func:()=>globalThis.autoApplyContent.pageStructure()});
-    return api('/ext/snapshot',frame.result);
+    const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
+    const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent.pageStructure()});
+    const saved=await api('/ext/snapshot',frame.result);
+    const current=activeResults.get(tab.id);
+    if(saved.ok && current?.url===tab.url){current.snapshotFeedback=undefined;await report(current);}
+    return saved;
   }
   if(message.type==='retry-submission-tracking') {
     const {tabResults={},autofillTabs={}}=await chrome.storage.session.get(['tabResults','autofillTabs']);
@@ -536,6 +544,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (message.type !== "workday-step" || sender.id !== chrome.runtime.id ||
       !sender.tab?.id || sender.frameId !== 0) return;
   if (activeResults.get(sender.tab.id)?.busy || cancelledTabs.has(sender.tab.id)) return;
+  const previous=activeResults.get(sender.tab.id);
+  if(previous){previous.stalePage=true;previous.snapshotFeedback=undefined;report(previous);}
   pendingSteps.add(sender.tab.id);
   clearTimeout(stepDrain);
   stepDrain = setTimeout(drainSteps, 100);
@@ -546,7 +556,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference"].includes(message.type)) return;
   if(['manual-submit','retry-submission-tracking'].includes(message.type) && (sender.url?.split('?')[0]!==chrome.runtime.getURL('sidepanel.html') ||
      sender.tab?.id && !sender.tab.url?.startsWith(chrome.runtime.getURL('')) && sender.tab.id!==message.tabId ||
      new URL(sender.url).searchParams.has('tabId') && Number(new URL(sender.url).searchParams.get('tabId'))!==message.tabId))return;
@@ -741,7 +751,13 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       await showSidebar(tabId,'open');
       await chrome.storage.session.set({helperRequest:{tabId,field,result}}); return;
     }
-    if(message.type==='sidebar-ready'){if(sidebarTabs[tabId])await showSidebar(tabId,sidebarTabs[tabId]);return;}
+    if(message.type==='sidebar-ready'){
+      const previous=activeResults.get(tabId)||tabResults[tabId];
+      if(previous && !previous.busy && (previous.url!==sender.tab.url || previous.pageIdentities?.[0]?.documentId!==sender.documentId)) {
+        previous.stalePage=true;previous.snapshotFeedback=undefined;await report(previous);
+      }
+      if(sidebarTabs[tabId])await showSidebar(tabId,sidebarTabs[tabId]);return;
+    }
     if(message.type==='sidebar-state'){sidebarTabs[tabId]=message.state;await chrome.storage.session.set({sidebarTabs});return;}
     const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];
     if(message.type==='user-answer'){

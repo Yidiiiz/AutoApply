@@ -127,7 +127,44 @@ function completedAnswers(){
   }
   if(!container.children.length){const empty=node('p','Answers you fill or save will appear here.');empty.className='empty';container.append(empty);}
 }
-let savedTimer;
+let savedTimer, snapshotTimer, snapshotFade, snapshotError, snapshotOwner, snapshotContext;
+let snapshotBusy=false, snapshotPreferenceReady=false;
+const snapshotLedger=await chrome.storage.session.get(['snapshotFeedbackSeen','snapshotFeedbackRecovered']);
+const snapshotSeen=new Set(snapshotLedger.snapshotFeedbackSeen || []), snapshotRecovered=new Set(snapshotLedger.snapshotFeedbackRecovered || []);
+const snapshotKey=value=>JSON.stringify([value?.tabId,value?.url]);
+function clearSnapshotStatus(){
+  clearTimeout(snapshotTimer);clearTimeout(snapshotFade);
+  const status=element('snapshot-status');status.className='';status.textContent='';status.title='';status.removeAttribute('aria-label');
+  if(snapshotError && element('error').textContent===snapshotError)element('error').textContent='';
+  snapshotError=undefined;snapshotOwner=undefined;
+}
+function snapshotSent(owner){
+  clearSnapshotStatus();snapshotOwner=owner;
+  const status=element('snapshot-status');status.textContent='Sent';
+  snapshotTimer=setTimeout(()=>{status.className='sent-fade';snapshotFade=setTimeout(clearSnapshotStatus,300);},2500);
+}
+function renderSnapshotFeedback(value){
+  const context=snapshotKey(value);
+  if(snapshotContext!==context){clearSnapshotStatus();snapshotContext=context;}
+  if(!snapshotPreferenceReady)return;
+  const feedback=value.snapshotFeedback;
+  const fresh=feedback && !snapshotSeen.has(feedback.id);
+  if(fresh){snapshotSeen.add(feedback.id);chrome.storage.session.set({snapshotFeedbackSeen:[...snapshotSeen].slice(-100)});}
+  const enabled=element('auto-send-structure').checked;
+  if(snapshotOwner==='auto' && (!enabled || !feedback))clearSnapshotStatus();
+  if(!snapshotBusy && snapshotOwner!=='manual' && enabled && feedback && !snapshotRecovered.has(feedback.id)){
+    if(feedback.sent){if(fresh)snapshotSent('auto');}
+    else {clearSnapshotStatus();snapshotOwner='auto';const status=element('snapshot-status');status.textContent='Failed';status.title='Structure not sent. Try Send page structure.';status.setAttribute('aria-label',status.title);}
+  }
+  if(snapshotOwner==='manual' && snapshotError)element('error').textContent=snapshotError;
+}
+function renderFillButton(value) {
+  const button=element('autofill');
+  button.textContent=value?.busy || mainBusy ? 'Filling…' : 'Autofill';
+  const settled=value?.summary && !value.stalePage && !value.busy && !mainBusy && !value.skillsBusy && !value.coverBusy &&
+    (!value.writing?.length || value.writingSettled) && !value.waiting && !value.error;
+  if(settled){const count=document.createElement('span');count.className='fill-count';const n=value.summary.filled || 0;count.textContent=n+' field'+(n===1?'':'s')+' filled';button.append(count);}
+}
 function render(value) {
   if (!value || tabId && value.tabId !== tabId) return;
   result = value;
@@ -137,7 +174,7 @@ function render(value) {
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
   element("company").title = element("company").textContent; element("job").title = element("job").textContent;
   const busy = Boolean(value.busy || value.skillsBusy || skillsBusy || value.writing?.length && /^Writing:/.test(value.writingProgress || ""));
-  const totals = [value.summary?.filled ? `${value.summary.filled} field${value.summary.filled===1 ? "" : "s"} filled` : "", value.skills?.added ? `${value.skills.added} skill${value.skills.added===1 ? "" : "s"} added` : ""].filter(Boolean);
+  const totals = [value.skills?.added ? `${value.skills.added} skill${value.skills.added===1 ? "" : "s"} added` : ""].filter(Boolean);
   const pending = value.pending?.length || value.coverQuestions?.length;
   const progress = value.progress || "";
   const detail = value.state === "needs_input" || value.waiting || value.state === "failed" ? value.detail || "" : "";
@@ -172,7 +209,8 @@ function render(value) {
   element('answer-section-results').textContent=sectionText;
   prompts(); completedAnswers();
   element("applied-status").hidden=!value.applied;
-  element("autofill").textContent=value.busy || mainBusy?"Filling…":"Autofill";
+  renderFillButton(value);
+  renderSnapshotFeedback(value);
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
   element("needs-writing").replaceChildren();
   // Expose generated PDF without persisting blob URLs across panel instances.
@@ -259,7 +297,7 @@ element("autofill").onclick = async () => {
   if(mainBusy || skillsBusy) return;
   mainBusy=true;element('autofill').disabled=true;element('autofill').textContent='Filling…';
   try {if(!element('skills-panel').hidden){await connection();await loadSkillPlan();await saveSkillSelection();}await perform({type:'autofill'});}
-  catch(error){showError(error);}finally{mainBusy=false;element('autofill').disabled=Boolean(result?.busy || result?.skillsBusy || skillsBusy);element('autofill').textContent=result?.busy?'Filling…':'Autofill';}
+  catch(error){showError(error);}finally{mainBusy=false;element('autofill').disabled=Boolean(result?.busy || result?.skillsBusy || skillsBusy);renderFillButton(result);}
 };
 element("cover-letter").onclick = () => perform({type: "cover-letter"}).catch(showError);
 element("generate").onclick = () => write(false);
@@ -320,15 +358,20 @@ send({type:'auto-advance-preference'}).then(value=>{if(value.error)throw Error(v
 function helperRequest(request) { if (request && (!tabId || request.tabId===tabId)) {result=request.result;openHelper(request.field);} }
 chrome.storage.onChanged.addListener((changes,area)=>{if(area==='session'&&changes.helperRequest)helperRequest(changes.helperRequest.newValue);});
 helperRequest((await chrome.storage.session.get('helperRequest')).helperRequest);
-let snapshotTimer, snapshotFade, snapshotError;
+const autoStructure=element('auto-send-structure');
+send({type:'snapshot-preference'}).then(value=>{if(value.error)throw Error(value.error);autoStructure.checked=value.enabled;autoStructure.disabled=false;snapshotPreferenceReady=true;render(result);}).catch(showError);
+autoStructure.onchange=async()=>{
+  const enabled=autoStructure.checked;autoStructure.disabled=true;
+  try{const value=await send({type:'snapshot-preference',enabled});if(value.error)throw Error(value.error);autoStructure.checked=value.enabled;render(result);}
+  catch(error){autoStructure.checked=!enabled;showError(error);}finally{autoStructure.disabled=false;}
+};
+chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local' && changes.autoSendStructure){autoStructure.checked=changes.autoSendStructure.newValue!==false;render(result);}});
 element('send-structure').onclick=async()=>{
-  const status=element('snapshot-status');clearTimeout(snapshotTimer);clearTimeout(snapshotFade);status.className='';status.textContent='';status.title='';
-  if(snapshotError && element('error').textContent===snapshotError)element('error').textContent='';
+  const context=snapshotKey(result), recovered=result?.snapshotFeedback?.id;clearSnapshotStatus();snapshotBusy=true;snapshotOwner='manual';
   element('send-structure').disabled=true;
-  try{const response=await send({type:'page-snapshot'});if(response.error)throw Error(response.error);status.textContent='Sent';
-    snapshotTimer=setTimeout(()=>{status.className='sent-fade';snapshotFade=setTimeout(()=>{status.textContent='';status.className='';},300);},2500);
-  }catch(error){status.textContent='Failed';status.title=error.message;snapshotError=error.message+' Try Send page structure again.';element('error').textContent=snapshotError;}
-  finally{element('send-structure').disabled=false;}
+  try{const response=await send({type:'page-snapshot'});if(response.error || !response.ok)throw Error(response.error || 'Structure was not saved.');if(context===snapshotKey(result)){if(recovered){snapshotRecovered.add(recovered);await chrome.storage.session.set({snapshotFeedbackRecovered:[...snapshotRecovered].slice(-100)});}snapshotSent('manual');}
+  }catch(error){if(context===snapshotKey(result)){const status=element('snapshot-status');status.textContent='Failed';status.title=error.message;snapshotOwner='manual';snapshotError=error.message+' Try Send page structure again.';status.setAttribute('aria-label',snapshotError);element('error').textContent=snapshotError;}}
+  finally{snapshotBusy=false;element('send-structure').disabled=false;}
 };
 
 

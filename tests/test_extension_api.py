@@ -694,6 +694,30 @@ def test_t039_snapshot_paired_sanitized(http_dashboard, config):
     assert ext(http_dashboard,'POST','/ext/snapshot',dict(payload,nodes=[],extra='x'*1048576))[0] == 400
 
 
+def test_t056_snapshot_diagnostic_whitelist_and_bounds(http_dashboard, config):
+    payload = dict(host='fixture.test', nodes=[], diagnostic=dict(
+        reason='unresolved_fields', value='PRIVATE', answers=['PRIVATE'], profile={'name': 'PRIVATE'},
+        fields=[dict(label='Fixture question', kind='radio', options=['Yes', 'No'], value='PRIVATE', answer='PRIVATE', arbitrary='PRIVATE')]))
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', payload)
+    assert status == 200
+    saved = json.loads((config.private / 'snapshots' / result['filename']).read_text(encoding='utf-8'))
+    assert saved['diagnostic'] == dict(reason='unresolved_fields', fields=[dict(label='Fixture question', kind='radio', options=['Yes', 'No'])])
+    assert 'PRIVATE' not in json.dumps(saved)
+    for fields in ([{}], [dict(label='q', kind=[])], [dict(label='q', kind='password')], [dict(label='q', kind='text', options=['x'] * 21)],
+                   [dict(label='q', kind='text')] * 51, 'invalid'):
+        assert ext(http_dashboard, 'POST', '/ext/snapshot', dict(payload, diagnostic=dict(reason='unresolved_fields', fields=fields)))[0] == 400
+    payload['diagnostic']['fields'] = [dict(label='q' * 1000, kind='select', options=['o' * 1000])]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', payload)
+    assert status == 200
+    saved = json.loads((config.private / 'snapshots' / result['filename']).read_text(encoding='utf-8'))
+    assert len(saved['diagnostic']['fields'][0]['label']) == 300
+    assert len(saved['diagnostic']['fields'][0]['options'][0]) == 200
+    # Legacy payloads and unknown future metadata retain the original saved shape.
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', dict(payload, diagnostic=dict(reason='arbitrary', value='PRIVATE')))
+    saved = json.loads((config.private / 'snapshots' / result['filename']).read_text(encoding='utf-8'))
+    assert status == 200 and set(saved) == {'host', 'nodes', 'truncated'}
+
+
 @pytest.mark.parametrize('required', [False, True])
 def test_t041_boilerplate_needs_input(http_dashboard, required):
     fields = [dict(key=str(i), label=label, kind='select', required=required,

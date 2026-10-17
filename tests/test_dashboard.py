@@ -2444,3 +2444,69 @@ def test_t054_dashboard_gear_and_favicon_source(http_dashboard, config, db, list
             assert not errors
         finally:
             browser.close()
+
+
+def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing):
+    from playwright.sync_api import sync_playwright, expect
+    queue(db, config, listing, 3)
+    server, _ = http_dashboard
+    output = Path('.tmp/review/t056')
+    output.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel='chromium', headless=True)
+        try:
+            page = browser.new_page()
+            errors, calls = [], []
+            finished = False
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("window.cspViolations=[];document.addEventListener('securitypolicyviolation',e=>cspViolations.push(e.effectiveDirective));")
+            def respond(route):
+                incoming = route.request
+                if not incoming.url.startswith('http://127.0.0.1:8765/'):
+                    route.abort(); return
+                target = incoming.url.removeprefix('http://127.0.0.1:8765')
+                calls.append((incoming.method, target))
+                # Discovery is a fixture; never launch a source scan.
+                if target == '/api/refresh' and incoming.method == 'POST':
+                    route.fulfill(json=dict(id='fixture-discovery')); return
+                if target == '/api/refresh/fixture-discovery':
+                    route.fulfill(json=dict(id='fixture-discovery', status='done' if finished else 'running',
+                                           result=dict(new=3), started_at='2026-10-16T20:00:00Z', finished_at='2026-10-16T20:00:02Z')); return
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    status, body, headers = pool.submit(request, server, incoming.method, target, incoming.all_headers(), incoming.post_data).result()
+                route.fulfill(status=status, body=body if isinstance(body, (str, bytes)) else json.dumps(body), headers=headers)
+            page.route('**/*', respond)
+            for theme in ('light', 'dark'):
+                page.emulate_media(color_scheme=theme, reduced_motion='reduce')
+                for width in (1440, 500):
+                    page.set_viewport_size(dict(width=width, height=900))
+                    page.goto('http://127.0.0.1:8765/#priority')
+                    page.locator('#rows .item').first.wait_for()
+                    button = page.get_by_role('button', name='Find new listings', exact=True)
+                    expect(button).to_be_visible()
+                    assert page.locator('.queue-more').count() == 0
+                    assert page.get_by_text('More', exact=True).count() == 0
+                    assert button.evaluate("e=>{const b=e.getBoundingClientRect();return b.width===32&&b.right<=innerWidth&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}")
+                    assert page.locator('#discovery-label').count() == 1
+                    if not page.locator('.listing-checks').evaluate('e=>e.open'):
+                        page.locator('.listing-checks summary').click()
+                    expect(page.locator('#sweep')).to_be_visible()
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    assert page.locator('main').evaluate('e=>e.scrollWidth<=e.clientWidth')
+                    page.screenshot(path=str(output/f'dashboard-{width}-{theme}.png'))
+                    finished = False
+                    button.click()
+                    busy = page.locator('#refresh-discovery')
+                    expect(busy).to_be_disabled()
+                    expect(busy).to_have_attribute('aria-busy', 'true')
+                    expect(busy).to_have_attribute('aria-label', __import__('re').compile('Searching'))
+                    page.screenshot(path=str(output/f'dashboard-busy-{width}-{theme}.png'))
+                    finished = True
+                    expect(busy).to_be_enabled(timeout=10000)
+                    expect(busy).to_have_attribute('aria-busy', 'false')
+                    expect(busy).to_have_attribute('aria-label', 'Find new listings')
+                    expect(page.locator('#discovery-state')).to_contain_text('3 new listings')
+            assert sum(method == 'POST' and path == '/api/refresh' for method, path in calls) == 4
+            assert page.evaluate('cspViolations') == [] and not errors
+        finally:
+            browser.close()

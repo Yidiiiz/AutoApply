@@ -374,9 +374,9 @@ Refresh uses the same `Engine.scan(force=True)` discovery path as
 application processing loop. Source discovery may open a source browser when
 LinkedIn or Handshake discovery is enabled in existing configuration.
 The page polls the job once per second and updates the list when discovery ends.
-**Find new listings** is separate from Reload data: it calls `POST /api/refresh`
-and scans job sources, which can take minutes. During discovery it shows
-**Searching... 1m 12s**. Completion shows the local finish time, duration and
+**Find new listings** is a directly visible search-plus icon in the Queue action bar, with an accessible name, title and busy state. Listing checks remain in a small disclosure; there is no More menu. It is separate from Reload data: it calls `POST /api/refresh`
+and scans job sources, which can take minutes. During discovery the icon is busy;
+its accessible name and tooltip include **Searching... 1m 12s**. Completion shows the local finish time, duration and
 `result.new` listing count. The last completion metadata persists in localStorage
 through page reloads; unavailable polling retries without starting another search.
 Only one refresh may run per dashboard. A busy worker lock returns HTTP 409 with
@@ -713,7 +713,30 @@ Chrome runs show a compact progress line with an icon cancel action. The line cl
 
 The extension Chat tab includes Chat and Answer helper. Written fields offer Ask AI, and generated answers stay editable in Answers for that application. Use job description controls whether the saved posting text and link are sent as AI reference context. Scrollbars follow the light or dark theme.
 
-The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Send page structure in the footer sends only form metadata (no input values or file contents) through the paired `POST /ext/snapshot` endpoint. Snapshots are capped at 1 MB and saved under `data/private/snapshots/<host>-<timestamp>.json` on demand for markup debugging.
+The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Send page structure in the footer sends only form metadata (no input values or file contents) through the paired `POST /ext/snapshot` endpoint. Snapshots are capped at 1 MB and saved under `data/private/snapshots/<host>-<timestamp>.json` for markup debugging.
+
+The small accessible switch beside **Send page structure** enables automatic
+captures and defaults on. Its preference persists in extension local storage.
+After known profile/choice resolution and all writing settle, the background
+captures remaining unknown or failed fields even with the sidebar closed.
+Completed fields, optional skips, active writing, sign-in/waiting, cancellation,
+skipped items and stale page/step results do not trigger captures. Diagnostics
+never guess missing personal facts: those questions remain for you.
+
+Automatic captures use passive reads without replacing live field handles.
+A SHA-256 signature covers the tab, URL/step, sanitized structure and unresolved
+field metadata; up to 100 signatures persist in session storage across worker
+restarts. Each signature gets at most two send attempts, with one short retry.
+Changed steps or unresolved sets can capture again. Failures do not block filling;
+the footer offers **Send page structure** for an explicit, repeatable retry.
+Turning the switch off stops automatic captures; manual Send stays available.
+
+Optional snapshot diagnostics retain only `reason: unresolved_fields` and up to
+50 field labels/kinds/option lists (labels 300 characters, at most 20 options of
+200 characters each). Values, answers, private profile data and arbitrary metadata
+are discarded. Existing snapshots remain readable. Snapshots are queued for the
+next active review session. They cannot wake the supervisor and do not launch
+code workers or promise automatic fixes.
 
 Main Autofill handles matched skills automatically. The Skills disclosure offers retry, exclusions and cancellation. It searches and verifies one skill at a time. On Workday, current roles verify the checkbox and hidden/disabled To dates. The CC-305 Self Identify form uses the profile name and disability preference, English, and today’s local date (MM/DD/YYYY); Employee ID stays empty.
 
@@ -765,8 +788,8 @@ dismisses it until reopened through the Chrome action or keyboard.
 
 Autofill shares the persistent footer with Next page and its Auto switch. Helper
 output and refinement stay hidden until an answer exists. Queue groups filter,
-layout, select-count and Run in one responsive action bar. More holds discovery
-and listing checks; Settings is the top-right gear. See [UI design](ui-design.md)
+layout, select-count and Run in one responsive action bar. Find new listings is a direct icon button; a compact disclosure holds
+listing checks; Settings is the top-right gear. See [UI design](ui-design.md)
 for palette, keyboard behavior and local screenshot evidence.
 
 

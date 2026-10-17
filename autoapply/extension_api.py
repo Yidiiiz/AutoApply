@@ -311,7 +311,23 @@ def snapshot(dashboard, payload):
             row.pop('text', None)
         row['visible'] = node.get('visible') is True
         sanitized.append(row)
-    data = json.dumps(dict(host=host, nodes=sanitized, truncated=payload.get('truncated') is True), ensure_ascii=False)
+    saved = dict(host=host, nodes=sanitized, truncated=payload.get('truncated') is True)
+    diagnostic = payload.get('diagnostic')
+    if isinstance(diagnostic, dict) and diagnostic.get('reason') == 'unresolved_fields':
+        fields = diagnostic.get('fields')
+        if not isinstance(fields, list) or len(fields) > 50:
+            raise SettingsRejected('Diagnostic fields must be a list of at most 50 items')
+        bounded = []
+        kinds = {'text', 'textarea', 'select', 'radio', 'checkbox', 'combobox', 'file', 'date', 'number', 'email', 'tel', 'url'}
+        for field in fields:
+            if not isinstance(field, dict) or not isinstance(field.get('kind'), str) or field['kind'] not in kinds or not isinstance(field.get('label'), str):
+                raise SettingsRejected('Invalid diagnostic field')
+            options = field.get('options', [])
+            if not isinstance(options, list) or len(options) > 20 or not all(isinstance(option, str) for option in options):
+                raise SettingsRejected('Diagnostic options must contain at most 20 strings')
+            bounded.append(dict(label=field['label'][:300], kind=field['kind'], options=[option[:200] for option in options]))
+        saved['diagnostic'] = dict(reason='unresolved_fields', fields=bounded)
+    data = json.dumps(saved, ensure_ascii=False)
     if len(data.encode('utf-8')) > 1024 * 1024:
         raise SettingsRejected('Snapshot exceeds 1 MB')
     directory = dashboard.config.private / 'snapshots'

@@ -24,10 +24,10 @@ header{flex:none;padding:10px 12px;background:var(--surface)}
 #applied-status{margin-left:auto;flex:none}
 #applied-status button{font-size:11px;padding:0 4px}
 .tabs{display:flex;gap:12px;margin:0 12px;border-bottom:1px solid var(--line);flex:none}
-.tabs button{min-height:32px;height:32px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:0 4px;font-size:12px}
+.tabs button{min-height:36px;height:36px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:0 4px;font-size:14px}
 .tabs [aria-selected=true]{color:var(--text);border-bottom-color:var(--accent)}
 .tabs.subtabs{margin:0;gap:4px;align-self:flex-start;border:0}
-.subtabs button{height:28px;min-height:28px;padding:0 10px;border:0;border-radius:4px}
+.subtabs button{font-size:12px;height:28px;min-height:28px;padding:0 10px;border:0;border-radius:4px}
 .subtabs [aria-selected=true]{background:var(--hover)}
 .tab-panel{flex:1;min-height:0;min-width:0;overflow-y:auto;padding:12px}
 .tab-panel>h2{font-size:13px;margin:4px 0 8px}
@@ -104,10 +104,10 @@ summary{cursor:pointer;font-size:12px;font-weight:500}
 .next-group #next-page{border:0;background:transparent;min-height:32px;padding:0 10px;font-size:12px}
 .next-group:has(input:checked){background:var(--hover);border-color:var(--muted)}
 .auto-toggle{min-height:32px;display:flex;align-items:center;gap:4px;margin:0;padding:0 8px 0 2px;font-size:11px;cursor:pointer}
-.auto-toggle input{appearance:none;width:25px;height:15px;min-height:0;padding:2px;border-radius:12px;background:var(--line);cursor:pointer}
-.auto-toggle input::before{content:'';display:block;width:9px;height:9px;border-radius:50%;background:var(--muted)}
-.auto-toggle input:checked{background:var(--accent);border-color:var(--accent)}
-.auto-toggle input:checked::before{transform:translateX(10px);background:var(--on-accent)}
+.auto-toggle input,.structure-toggle input{appearance:none;position:relative;flex:none;margin:0;border:0;width:28px;height:16px;min-height:0;padding:0;border-radius:12px;background:var(--line);cursor:pointer}
+.auto-toggle input::before,.structure-toggle input::before{content:'';position:absolute;left:3px;top:3px;display:block;width:10px;height:10px;border-radius:50%;background:var(--muted)}
+.auto-toggle input:checked,.structure-toggle input:checked{background:var(--accent);border-color:var(--accent)}
+.auto-toggle input:checked::before,.structure-toggle input:checked::before{transform:translateX(12px);background:var(--on-accent)}
 #send-structure{font-size:10px;min-height:20px}
 #snapshot-status{font-size:11px;overflow-wrap:anywhere}
 #snapshot-status:empty{display:none}
@@ -129,7 +129,7 @@ summary{cursor:pointer;font-size:12px;font-weight:500}
 #snapshot-status{font-size:10px;transition:opacity .3s}
 #snapshot-status.sent-fade{opacity:0}
 .auto-toggle{position:relative}
-.auto-lock{position:absolute;left:5px;top:11px;width:9px;height:10px;fill:none;stroke:var(--on-accent);stroke-width:1.4;pointer-events:none;display:none}
+.auto-lock{position:absolute;left:17px;top:50%;transform:translateY(-50%);width:10px;height:10px;fill:none;stroke:var(--accent);stroke-width:1.4;pointer-events:none;display:none}
 .auto-toggle:has(input:checked) .auto-lock{display:block}
 .auto-toggle:has(input:disabled){opacity:.5;cursor:default}
 #submission-status{flex:none;display:flex;align-items:center;gap:7px;padding:8px 12px;font-size:12px;animation:moon-rise .6s ease-out}
@@ -138,3 +138,6 @@ summary{cursor:pointer;font-size:12px;font-weight:500}
 #tracking-status:empty{display:none}
 @keyframes moon-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){#submission-status{animation:none}#snapshot-status{transition:none}}
+
+.structure-toggle{display:flex;align-items:center;margin:0;min-height:24px;cursor:pointer}.structure-toggle input{width:24px;height:14px}.structure-toggle input::before{width:8px;height:8px}.structure-toggle input:checked::before{transform:translateX(10px)}
+#autofill{font-size:12px;line-height:15px;min-height:36px}#autofill .fill-count{display:block;font-size:10px;font-weight:400;line-height:12px}

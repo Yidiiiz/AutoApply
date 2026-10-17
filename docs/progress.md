@@ -648,3 +648,108 @@ Do not claim initialcoldstartup is alwaysfast. Integratedreadonlybrowser checked
 clean aftercommit; privateprofile/factchanges remainignored, binaryicons included.
 User must reloadextension and refreshapplicationtabs forliveacceptance. No push
 or livefinalsubmission.
+
+
+## T056: direct discovery and automatic unresolved structure capture - 2026-10-16
+
+Queue now exposes Find new listings directly as a titled, accessible search-plus
+icon. More is removed; listing-check information remains in a compact disclosure.
+The discovery-label hook, backend action, busy state and completion metadata remain.
+The disclosure overlays its details without squeezing selection controls at 500px.
+
+The extension's small switch beside Send page structure defaults on and persists
+locally. Background-owned captures run after deterministic/choice resolution and
+writing settle, including with the actual sidebar closed. Passive reads preserve
+live field handles. URL, document, page/step identity, cancellation/skip and current
+result/problem checks reject stale work. Success, optional skips, sign-in/waiting
+and in-progress writing do not capture. A bounded session ledger stores 100 SHA-256
+signatures, with at most two attempts per problem across reruns/worker restarts.
+Changed steps and unresolved sets can capture again. Failures leave filling usable
+and offer manual Send; manual Send remains repeatable with inline-left Sent/fade,
+visible errors, and no rescan. No personal-answer matching rules were changed.
+
+The existing private snapshot endpoint optionally retains a whitelisted reason
+and at most 50 labels/kinds, each with at most 20 options. Labels/options are
+bounded to 300/200 characters; values, answers, profile and arbitrary metadata
+are discarded. The combined UTF-8 payload stays below the original 1 MB limit,
+including multibyte metadata. Legacy snapshots remain compatible. Snapshots await
+the next active review session; they cannot wake a supervisor or start code fixes.
+
+Main tabs use 14px/36px while helper subtabs remain 12px/28px. Settled field counts
+appear only inside the rerunnable Autofill button; scan/new-document/step states
+clear old totals. The Next switch has no visible Auto text; its lock is centered
+in the checked knob. Preference, keyboard focus and disabled final review remain.
+Final submission still requires an explicit user action.
+
+Focused .venv Python verification, all fixture-only:
+- T056 plus the existing paired snapshot sanitation test: 7 passed in 34.53s.
+  Covers real MV3 worker/iframe capture, metadata, dedupe, preference persistence,
+  manual repeat/retry, closed-sidebar delayed writing, failure feedback, narrow
+  layouts, final-review guard, new-page count reset and discovery busy/CSP behavior.
+- Existing Autofill, delayed writer/cover, source labels, actionable statuses,
+  explicit manual Submit/confirmation, manual structure, dashboard renderer and
+  markup/CSP regressions: 10 passed in 41.45s.
+- Final Workday SPA refill variants, collector lifecycle, API metadata whitelist
+  and dashboard renderer checks: 5 passed in 34.96s. Lifecycle also checks restart,
+  signature cap, stale URL/document/step/cancel/skip/off races, bounded failure
+  retry, settled writing failure and multibyte payload size.
+- JavaScript syntax for all four changed modules, Python AST, dashboard ASCII and
+  git diff --check passed. Ruff was unavailable in the existing .venv; no package
+  was installed. Full configured extension/dashboard suites remain for the runner.
+
+Visually inspected actual sidebar fixture screenshots in .tmp/review/t056/:
+filled-360-on-{light,dark}.png, filled-400-off-light.png,
+final-review-360-light.png and final-review-400-dark.png. They show the filled
+button, larger tabs, Send switch, centered lock and disabled final-review switch.
+Also inspected dashboard-500-light.png and dashboard-busy-1440-dark.png after the
+compact disclosure correction. Tests generate both themes at 360/400x600 and
+1440/500px, hit-test controls, assert no horizontal overflow, and record no page
+JavaScript or dashboard CSP violations. These fixtures establish no live employer
+appearance or fill outcome.
+
+No workers, orchestration/runtime/budget/auth changes, main private applicant data,
+live employer/Discord calls, employer submissions, dashboard process changes,
+staging, commits, pushes or deployment were used. The initially clean worktree
+had no pre-existing tracked edits; all new source changes remain within scope.
+
+
+T056 attempt 2: scoped supervisor feedback correction
+
+Preserved the entire existing T056 draft. Removed the standalone automatic
+snapshot notice and its CSS. Automatic and manual success now share short Sent
+inline left of Send page structure, fading at 2.5 seconds and clearing at 2.8.
+Capture event IDs survive collector restarts; bounded session seen/recovery
+markers prevent saved-signature reruns, result broadcasts, preference changes
+and recovered automatic failures from replaying feedback. Automatic off hides
+its feedback. Compact automatic Failed retains accessible retry detail; manual
+ongoing/failure feedback takes precedence, and manual success clears errors and
+restarts its own fade. Feedback is scoped to the current tab/page.
+
+Focused local .venv checks only: lifecycle plus light actual-sidebar and
+writing/failure/manual-recovery tests passed (3 passed, 22.29s). After adding
+explicit 360x600 automatic-switch on/off and inline-Sent screenshots, the changed
+light sidebar test passed again (1 passed, 12.28s). JavaScript syntax checks for
+sidepanel.js, snapshots.js and background.js and git diff --check passed. The
+first browser setup attempt hit Windows temp-directory permissions; rerunning
+with a workspace-local --basetemp and cache disabled resolved it without changing
+runner configuration. Full extension/dashboard/diff checks remain for the runner.
+
+Visually reviewed refreshed .tmp/review/t056/feedback-sent-360-light.png,
+capture-360-off-light.png and capture-360-on-light.png. Sent is inline, the
+standalone above-footer line is absent, and both switch states fit at 360x600.
+No dashboard redesign or dashboard process changes were made in this correction;
+prior dashboard evidence remains recorded above. No workers, live services,
+applicant-data edits, staging, commits, pushes, deployment or budget changes.
+
+
+### T056 supervisor acceptance - 2026-10-16
+
+Accepted runner 5aba3c8838ec4b988e05d27f1bef0fc4 after source/report review and
+actual narrow sidebar plus dashboard screenshots. Required extension/API checks:
+344 passed in891.88s; dashboard354 passed in204.80s; diff check passed. Prior
+attempt53412de7a84743b6b652d7aac457b7e8 was reviewed needs_followup and its
+full checks deliberately cancelled early to remove the permanent capture status
+line; no failing or incomplete checks were accepted. Final feedback is inline
+Sent with fade, unknown structure capture defaults on with persisted opt-out,
+and final submission remains explicit manual only. No live employer submission,
+private-data commit or push. Integrated browser/startup smoke follows locally.

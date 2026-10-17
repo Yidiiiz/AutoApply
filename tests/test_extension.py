@@ -19,6 +19,208 @@ KEY = "fixture-pairing-key"
 RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 
 
+def test_t056_snapshot_collector_lifecycle():
+    """Run the shipped collector with Chrome-shaped storage and passive-frame stubs."""
+    import subprocess
+    script = r'''
+import assert from 'node:assert/strict';
+import {snapshotCollector} from './extension/snapshots.js';
+const local={}, session={};let sends=[],reads=0,live=true,url='https://fixture.test/apply',fail=false,onRead=()=>{},onStore=()=>{},identity='step1',doc='document1',large=false;
+const area=data=>({get:async()=>structuredClone(data),set:async values=>{Object.assign(data,structuredClone(values));if(data===session)onStore();}});
+globalThis.chrome={storage:{local:area(local),session:area(session)},tabs:{get:async()=>({url})},scripting:{executeScript:async request=>{
+  reads++;onRead();assert.match(String(request.func),/unresolvedStructure/);assert.doesNotMatch(String(request.func),/\.scan\(/);
+  return [{documentId:doc,result:request.args[0]===identity?{host:'fixture.test',nodes:large?Array.from({length:600},()=>({tag:'label',text:'x'.repeat(2000)})):[{tag:'legend',text:identity}],truncated:false}:null}];
+}}};
+const make=()=>({tabId:1,url:'https://fixture.test/apply',pageIdentities:{0:{identity,documentId:'document1'}},pending:[{key:'0:aa-1',label:'Unknown credential',kind:'radio',options:['Yes','No'],value:'PRIVATE'}],writing:[],summary:{filled:6,errors:[]}});
+let reports=0;
+const deps={current:()=>live,report:async()=>reports++,delay:async()=>{},api:async(path,payload)=>{assert.equal(path,'/ext/snapshot');sends.push(payload);if(fail)throw Error('offline');return {ok:true};}};
+let collector=snapshotCollector(deps);
+assert.equal((await collector.preference()).enabled,true);
+const first=make();await collector.capture(first);const event=first.snapshotFeedback;assert.equal(event.sent,true);assert.ok(event.id);assert.equal(sends.length,1);assert.equal(reports,1);assert.ok(!JSON.stringify(sends).includes('PRIVATE'));
+await Promise.all([collector.capture(make()),collector.capture(make())]);assert.equal(sends.length,1);
+collector=snapshotCollector(deps);const replay=make();await collector.capture(replay);assert.equal(sends.length,1);assert.deepEqual(replay.snapshotFeedback,event); // restart
+identity='step2';await collector.capture(make());assert.equal(sends.length,2); // same URL, changed step
+let result=make();result.pending.push({key:'0:aa-2',label:'New unknown',kind:'text'});await collector.capture(result);assert.equal(sends.length,3);
+await collector.preference(false);reads=0;await collector.capture(make());assert.equal(reads,0);assert.equal(sends.length,3);
+collector=snapshotCollector(deps);assert.equal((await collector.preference()).enabled,false);await collector.preference(true);
+for(const changes of [{stalePage:true},{busy:true},{skillsBusy:true},{coverBusy:true},{waiting:true},{sign_in:true},{error:'failed scan'},{pending:[]},{writing:[{key:'0:w',label:'Essay',kind:'textarea'}]}]) {
+  await collector.capture(Object.assign(make(),changes));assert.equal(sends.length,3);
+}
+live=false;await collector.capture(make());live=true;
+url='https://fixture.test/other';await collector.capture(make());url='https://fixture.test/apply';
+doc='new-document';await collector.capture(make());doc='document1';
+result=make();result.pageIdentities[0].identity='old-step';await collector.capture(result);assert.equal(sends.length,3);
+identity='cancel-read';onRead=()=>{live=false;};await collector.capture(make());onRead=()=>{};live=true;assert.equal(sends.length,3);
+identity='skip-read';result=make();onRead=()=>{result.pending=[];};await collector.capture(result);onRead=()=>{};assert.equal(sends.length,3);
+identity='disable-save';onStore=()=>{local.autoSendStructure=false;};await collector.capture(make());onStore=()=>{};await collector.preference(true);assert.equal(sends.length,3);
+identity='stale-save';onStore=()=>{identity='next-step';};await collector.capture(make());onStore=()=>{};assert.equal(sends.length,3);
+identity='failure';fail=true;result=make();await collector.capture(result);assert.equal(sends.length,5);assert.equal(result.snapshotFeedback.sent,false);
+await collector.capture(make());collector=snapshotCollector(deps);await collector.capture(make());assert.equal(sends.length,5);
+fail=false;identity='writing-settled';result=make();result.writing=[{key:'0:w',label:'Essay',kind:'textarea'}];result.summary.errors=['writer failed'];
+await collector.capture(result);assert.equal(sends.length,5);result.writingSettled=true;await collector.capture(result);assert.equal(sends.length,6);
+for(let i=0;i<102;i++){identity='bounded'+i;await collector.capture(make());}assert.equal(session.structureCaptures.length,100);
+assert.ok(session.structureCaptures.every(item=>Object.keys(item).sort().join(',')==='attempts,feedback,sent,signature'));
+large=true;identity='large';result=make();result.pending=Array.from({length:50},(_,i)=>({key:'0:'+i,label:'\u754c'.repeat(300),kind:'select',options:Array(20).fill('\u754c'.repeat(200))}));
+await collector.capture(result);const payload=sends.at(-1);assert.ok(payload.truncated);assert.ok(new TextEncoder().encode(JSON.stringify(payload)).length<1000000);
+console.log('snapshot lifecycle assertions passed');
+'''
+    result = subprocess.run(['node', '--input-type=module'], input=script, cwd=ROOT, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_server, theme):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    page.emulate_media(color_scheme=theme, reduced_motion='reduce')
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/t056.html*', lambda route: route.fulfill(path=str(FIXTURES/'t056.html'), content_type='text/html'))
+    page.goto(server+'/t056.html')
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(tab=>tab.url===url).id', page.url)
+    value = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert value['summary']['filled'] == 6
+    assert len(value['pending']) == 2 and not value['writing']
+    panel = next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    snapshots = lambda: [payload for path, _, payload in requests if path == '/ext/snapshot']
+    assert len(snapshots()) == 1
+    expect(panel.locator('#auto-snapshot-notice')).to_have_count(0)
+    page.set_viewport_size(dict(width=360, height=600))
+    (ROOT/'.tmp/review/t056').mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(ROOT/'.tmp/review/t056'/f'feedback-sent-360-{theme}.png'))
+    assert panel.evaluate("()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left&&Math.abs(s.y+s.height/2-b.y-b.height/2)<2;}")
+    # Repeated actual result broadcasts cannot restart the fade deadline.
+    for _ in range(4):
+        worker.evaluate('async id=>{const {tabResults}=await chrome.storage.session.get("tabResults");await chrome.runtime.sendMessage({type:"autofill-result",result:tabResults[id]});}', tab_id)
+        page.wait_for_timeout(600)
+    expect(panel.locator('#snapshot-status')).to_be_empty(timeout=1000)
+    worker.evaluate('async id=>{const {tabResults}=await chrome.storage.session.get("tabResults");await chrome.runtime.sendMessage({type:"autofill-result",result:tabResults[id]});}', tab_id)
+    expect(panel.locator('#snapshot-status')).to_be_empty()
+    diagnostic = snapshots()[0]['diagnostic']
+    assert {field['kind'] for field in diagnostic['fields']} == {'radio', 'checkbox'}
+    assert next(field for field in diagnostic['fields'] if field['kind'] == 'radio')['options'] == ['Yes', 'No']
+    assert 'Optional fixture note' not in json.dumps(diagnostic)
+    assert 'Fixture Student' not in json.dumps(snapshots())
+    expect(panel.locator('#autofill .fill-count')).to_have_text('6 fields filled')
+    assert 'fields filled' not in panel.locator('#progress').inner_text()
+    expect(panel.locator('#auto-send-structure')).to_be_checked()
+    output = ROOT/'.tmp/review/t056'
+    output.mkdir(parents=True, exist_ok=True)
+    def shot(name):
+        assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        assert panel.evaluate('''()=>['autofill','next-page','auto-advance','auto-send-structure','send-structure','settings'].every(id=>{
+          const e=document.getElementById(id),b=e.getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.bottom<=innerHeight&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));})''')
+        page.screenshot(path=str(output/f'{name}-{theme}.png'))
+    for width in (360, 400):
+        page.set_viewport_size(dict(width=width, height=600))
+        expect(panel.locator('#tab-fill')).to_have_css('font-size', '14px')
+        expect(panel.locator('#tab-fill')).to_have_css('height', '36px')
+        assert panel.locator('.auto-toggle').inner_text() == ''
+        shot(f'filled-{width}-off')
+        if width == 360:
+            panel.locator('#auto-send-structure').uncheck()
+            shot('capture-360-off')
+            panel.locator('#auto-send-structure').check()
+            expect(panel.locator('#snapshot-status')).to_be_empty()
+            shot('capture-360-on')
+        panel.locator('#auto-advance').check()
+        assert panel.evaluate('''()=>{const input=document.getElementById('auto-advance'),lock=document.querySelector('.auto-lock'),b=input.getBoundingClientRect(),l=lock.getBoundingClientRect();
+          const knob=getComputedStyle(input,'::before');return Math.abs(l.x+l.width/2-(b.x+15+5))<.6&&Math.abs(l.y+l.height/2-(b.y+b.height/2))<.6&&knob.transform.includes('12');}''')
+        shot(f'filled-{width}-on')
+        panel.locator('#auto-advance').uncheck()
+    # Closing the actual iframe leaves the worker responsible for diagnostics.
+    panel.locator('#close').click()
+    worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    panel = next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    expect(panel.locator('#snapshot-status')).to_be_empty()
+    assert len(snapshots()) == 1
+    page.locator('form').evaluate("e=>e.insertAdjacentHTML('beforeend','<label>New unknown personal fact <input required name=newfact></label>')")
+    worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    assert len(snapshots()) == 2
+    panel.locator('#auto-send-structure').uncheck()
+    expect(panel.locator('#auto-send-structure')).to_be_enabled()
+    panel.evaluate('location.reload()')
+    expect(panel.locator('#auto-send-structure')).not_to_be_checked()
+    page.locator('h1').evaluate("e=>e.textContent='Changed step'")
+    worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert len(snapshots()) == 2
+    # Manual Send remains repeatable and must not invoke the scanner.
+    worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{globalThis.savedScan=autoApplyContent.scan;autoApplyContent.scan=()=>{throw Error('diagnostics rescanned')};}})", tab_id)
+    for _ in range(2):
+        panel.locator('#send-structure').click()
+        expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    assert len(snapshots()) == 4
+    assert panel.evaluate("()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left;}")
+    worker.evaluate('id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=globalThis.savedScan;}})', tab_id)
+    # Final-review preference stays checked, disabled, and manual-only.
+    panel.locator('#auto-advance').check()
+    value.update(next_action=dict(kind='submit'), writing=[], pending=[])
+    worker.evaluate('value=>chrome.storage.session.set({tabResults:{[value.tabId]:value}})', value)
+    expect(panel.locator('#auto-advance')).to_be_disabled()
+    expect(panel.locator('#auto-advance')).to_be_checked()
+    expect(panel.locator('#next-page')).to_have_text('Submit')
+    shot('final-review-400')
+    page.set_viewport_size(dict(width=360, height=600))
+    shot('final-review-360')
+    page.goto(server+'/t056.html?step=next')
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel = next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    expect(panel.locator('#autofill .fill-count')).to_have_count(0)
+    # A new scan clears old totals immediately, with no duplicate progress count.
+    worker.evaluate('value=>chrome.storage.session.set({tabResults:{[value.tabId]:value}})', dict(tabId=tab_id, url=page.url, busy=True))
+    expect(panel.locator('#autofill')).to_have_text('Filling…')
+    expect(panel.locator('#autofill .fill-count')).to_have_count(0)
+    assert not errors
+
+
+def test_t056_writing_settles_and_snapshot_failure_manual_retry(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    page.route('**/t056.html', lambda route: route.fulfill(path=str(FIXTURES/'t056.html'), content_type='text/html'))
+    page.goto(server+'/t056.html')
+    page.locator('form').evaluate("e=>e.insertAdjacentHTML('beforeend','<label>Why this role?<textarea required name=essay></textarea></label>')")
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(tab=>tab.url===url).id', page.url)
+    fixture_delay(worker, hold=['write'])
+    worker.evaluate('''()=>{globalThis.realFetch=fetch;globalThis.snapshotAttempts=0;globalThis.fetch=(url,...args)=>String(url).endsWith('/ext/snapshot')?(snapshotAttempts++,Promise.reject(new TypeError('fixture offline'))):realFetch(url,...args);}''')
+    value = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert value['writing']
+    panel = next(frame for frame in page.frames if frame.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    assert worker.evaluate('snapshotAttempts') == 0
+    expect(panel.locator('#autofill .fill-count')).to_have_count(0)
+    panel.locator('#close').click()
+    fixture_delay(worker, release=['write'])
+    expect(page.locator('[name=essay]')).to_have_value('I enjoy building useful local tools.')
+    expect(panel.locator('#snapshot-status')).to_have_text('Failed', timeout=15000)
+    expect(panel.locator('#snapshot-status')).to_have_attribute('aria-label', 'Structure not sent. Try Send page structure.')
+    assert worker.evaluate('snapshotAttempts') == 2
+    expect(panel.locator('#snapshot-status')).to_have_text('Failed')
+    expect(panel.locator('#autofill .fill-count')).to_have_text('7 fields filled')
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    # Auto off hides automatic feedback; enabling restores its actionable failure.
+    panel.locator('#auto-send-structure').uncheck()
+    expect(panel.locator('#snapshot-status')).to_be_empty()
+    panel.locator('#auto-send-structure').check()
+    expect(panel.locator('#snapshot-status')).to_have_text('Failed')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#error')).to_contain_text('Try Send page structure again.')
+    worker.evaluate('async id=>{const {tabResults}=await chrome.storage.session.get("tabResults");await chrome.runtime.sendMessage({type:"autofill-result",result:tabResults[id]});}', tab_id)
+    expect(panel.locator('#error')).to_contain_text('Try Send page structure again.')
+    worker.evaluate('()=>{globalThis.fetch=realFetch;}')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#error')).to_be_empty()
+    expect(panel.locator('#snapshot-status')).to_be_empty(timeout=4500)
+    panel.evaluate('location.reload()')
+    expect(panel.locator('#snapshot-status')).to_be_empty()
+    assert len([1 for path, _, _ in requests if path == '/ext/snapshot']) == 1
+
+
 @pytest.fixture
 def extension_server():
     requests = []
@@ -302,7 +504,7 @@ def test_unpacked_extension_autofill(loaded_extension, extension_server):
     expect(panel.locator("#connection")).to_have_attribute("aria-label", "Connected — Fixture Student")
     assert panel.locator("#company").inner_text() == "Fixture Company"
     assert panel.locator("#job").inner_text() == "Fixture Intern"
-    expect(panel.locator("#progress")).to_have_text("14 fields filled")
+    expect(panel.locator("#autofill .fill-count")).to_have_text("14 fields filled")
     assert "Unresolved" in panel.locator("#needs-input").inner_text()
     expect(panel.locator("#cover-questions")).to_contain_text("Which project")
     # Refill through the actual runtime message path, with the fixture tab active.
@@ -817,7 +1019,7 @@ def test_workday_spa_refills_without_navigation(loaded_extension, extension_serv
     expect(page.locator('#year')).to_have_value('2024')
     expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
     expect(page.locator('#filename')).to_have_text('fixture-resume.pdf')
-    expect(panel.locator('#progress')).to_contain_text('fields filled')
+    expect(panel.locator('#autofill .fill-count')).to_contain_text('fields filled')
     expect(panel.locator('#company')).to_have_text('Run Company' if run_tab else 'Fixture Company')
     answers = [p for endpoint, _, p in requests if endpoint == '/ext/answers']
     assert {p['application_id'] for p in answers} == {7 if run_tab else 42}
@@ -1052,7 +1254,7 @@ def test_autofill_returns_before_delayed_writing_and_cover(loaded_extension, ext
     expect(panel.locator("#cover-progress")).to_be_empty()
     expect(panel.get_by_role('link', name='Download cover letter')).to_be_visible()
     expect(panel.locator("#cover-letter")).to_be_enabled()
-    expect(panel.locator("#progress")).to_have_text(re.compile(r"^\d+ fields filled$"))
+    expect(panel.locator("#autofill .fill-count")).to_have_text(re.compile(r"^\d+ fields filled$"))
     assert page.locator("#cover").evaluate("e => e.files[0].name") == "fixture-cover.pdf"
     final = worker.evaluate("async id => (await chrome.storage.session.get('tabResults')).tabResults[id]", tab_id)
     assert final["summary"]["needs_writing"] == []
@@ -1182,7 +1384,7 @@ def test_saved_source_labels(loaded_extension):
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
     expect(panel.locator('.source-pill')).to_have_text(['Profile','Saved','Saved','Saved (similar)','AI','You'])
     assert panel.locator('#section-results').text_content() == ''
-    expect(panel.locator('#progress')).to_have_text('6 fields filled')
+    expect(panel.locator('#autofill .fill-count')).to_have_text('6 fields filled')
     assert panel.locator('#answer-section-results').text_content() == 'Experience: 2 added'
 
 
@@ -2240,8 +2442,8 @@ def test_t050_actionable_status_and_compact_outcomes(loaded_extension, extension
                   'Fix the page validation errors before continuing.'),
         ('settled', dict(progress='Autofill finished. Review the page.',
                         writingProgress='Answer filled: Why this role?', coverProgress='Cover letter attached'),
-                    '4 fields filled'),
-        ('step', dict(progress='Workday step: My Experience'), '4 fields filled'),
+                    'Review the page.'),
+        ('step', dict(progress='Workday step: My Experience'), 'Review the page.'),
     ]:
         worker.evaluate("value => chrome.storage.session.set({tabResults:{[value.tabId]:value}})", dict(base, **changes))
         expect(panel.locator('#progress')).to_have_text(expected)
@@ -2255,6 +2457,7 @@ def test_t050_actionable_status_and_compact_outcomes(loaded_extension, extension
             expect(panel.locator('#writing-progress')).to_have_text(changes['writingProgress'])
             expect(panel.locator('#cover-progress')).to_have_text(changes['coverProgress'])
         if name == 'settled':
+            expect(panel.locator('#autofill .fill-count')).to_have_text('4 fields filled')
             expect(panel.locator('#writing-progress')).to_be_empty()
             expect(panel.locator('#cover-progress')).to_be_empty()
             expect(panel.locator('#error')).to_be_empty()

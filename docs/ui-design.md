@@ -30,8 +30,8 @@ The sidebar is a bounded flex column in its actual shadow iframe, up to 400px
 wide. Long company/job names truncate visually with full title/accessibility text;
 gear, minimize and close never shrink. Active-run controls appear only when
 relevant. Tabs and content have independent scroll space. Autofill and Next page
-share the persistent bottom row, with an attached Auto switch and a final tiny
-Send page structure utility. Auto retains the per-profile preference and all
+share the persistent bottom row, with an attached unlabeled auto-advance switch and a final tiny
+Send page structure utility with an accessible automatic-diagnostics switch. Auto-advance retains the per-profile preference and all
 existing validation, cancellation and final-submit guards. Actionable sign-in,
 wait, cancellation, retry, upload and writing errors stay visible.
 
@@ -52,8 +52,8 @@ above the footer at short heights.
 
 Dashboard navigation and content share a centered 1200px width. Settings is a
 32px gear at the top right and remains in the tab keyboard sequence. Queue uses
-one wrapping filter/layout/selection/Run bar; More contains discovery and listing
-checks. Run is disabled with a selection hint when empty. Sorting, pagination,
+one wrapping filter/layout/selection/Run bar; Find new listings is a direct titled
+icon button, with listing checks in a compact disclosure. Run is disabled with a selection hint when empty. Sorting, pagination,
 manual review, applied undo, history, settings and answers remain accessible.
 Reload feedback is shown while busy with an absolute completion time on hover;
 there is no per-second idle timestamp update. Answers and Settings remain lazy.
@@ -96,3 +96,23 @@ verification decodes and paints the declared image under the actual response CSP
 and records no policy violations. Other policy directives are preserved. The
 existing manifest PNGs remain required integration assets at 16/32/48/128 pixels;
 their headers, dimensions, manifest paths and visual sheet are checked.
+
+
+T056 main Fill/Answers/Chat tabs are 14px and 36px high; helper subtabs retain
+12px/28px sizing. Settled field totals appear only inside the rerunnable Autofill
+button. Scans show Filling immediately; navigation clears previous totals. The
+Next page switch keeps its accessible name, focus outline and saved preference;
+its on-state lock is centered in the knob, with no visible Auto label. Final
+review still disables auto-advance and requires an explicit Submit click.
+
+The small switch beside Send page structure defaults on and persists locally.
+The background captures settled unknown/failed fields, including after writing,
+using passive structure reads. Automatic and manual success share the short Sent
+inline left of Send page structure, fading after 2.5 seconds and clearing at 2.8.
+Stable capture events and session seen markers prevent rerenders, saved-signature
+reruns and preference changes from replaying success. Automatic failure stays as
+compact Failed with accessible retry detail; manual recovery clears the error.
+Turning automatic capture off hides its feedback; manual Send remains available.
+There is no separate above-footer success line. These
+snapshots await the next active review session; they never wake a supervisor or
+start automatic code fixes. Local fixture evidence is in .tmp/review/t056/.
