@@ -753,3 +753,14 @@ line; no failing or incomplete checks were accepted. Final feedback is inline
 Sent with fade, unknown structure capture defaults on with persisted opt-out,
 and final submission remains explicit manual only. No live employer submission,
 private-data commit or push. Integrated browser/startup smoke follows locally.
+
+Integrated ba901cb by fast-forward into chrome-extension; restarted main dashboard
+with its .venv Python in a hidden persistent process. HTTP200 serves direct
+discovery icon and no More menu. Read-only main browser checked1440/500px,
+50 visible rows, discovery hit test, no overflow and no JS/CSP errors; private
+screenshots .tmp/review/t056-integrated. First cold Queue exceeded the UI30s
+deadline and left a timeout banner before rows arrived. This existing coldstartup
+performance limitation is NOT fixed by T056. Warm freshbrowser smoke bothwidths
+has no timeout; measured rebuild0.719s, cached0.005s (later0.036/0.005s). Dashboard
+remains running on8765. Reload unpacked extension and refresh employer tabs for
+new build. No employer interaction/submission, private data commit or push.
