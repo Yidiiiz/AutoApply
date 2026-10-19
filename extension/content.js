@@ -1,5 +1,12 @@
-(() => {
+(function initialize() {
+  const singleton=Symbol.for('autoapply.content');
+  if(globalThis[singleton]){globalThis.autoApplyContent=globalThis[singleton];return;}
   if (globalThis.autoApplyContent) return;
+  if(!document.body){
+    const pending=Symbol.for('autoapply.pending');
+    if(!globalThis[pending]){globalThis[pending]=true;document.addEventListener('DOMContentLoaded',()=>{globalThis[pending]=false;initialize();},{once:true});}
+    return;
+  }
   let nextKey = 0, extensionFilling = 0;
   const traces = [];
   function beginTrace(kind) {
@@ -43,6 +50,8 @@
   function sidebar(mode = 'toggle', tabId) {
     if (window !== window.top) return;
     if (!sidebarHost) {
+      const old=document.getElementById('autoapply-sidebar');
+      if(old?.shadowRoot?.querySelector('iframe')?.src.startsWith(chrome.runtime.getURL('sidepanel.html')))old.remove();
       sidebarHost = document.createElement('div');
       sidebarHost.id = 'autoapply-sidebar';
       sidebarHost.style.cssText = 'all:initial!important;position:fixed!important;inset:0 0 0 auto!important;width:min(400px,100vw)!important;height:100dvh!important;z-index:2147483647!important;display:block!important;';
@@ -128,7 +137,6 @@
   }
   new MutationObserver(()=>{clearTimeout(confirmationTimer);confirmationTimer=setTimeout(detectConfirmation,300);}).observe(document.body,{childList:true,subtree:true,characterData:true});
   setTimeout(detectConfirmation,300);
-  if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
   let records = new Map();
   const clean = value => String(value || "").replace(/\s+/g, " ").trim();
   const text = element => clean(element?.textContent);
@@ -161,6 +169,8 @@
   }
   function choiceContainer(element) {
     if (['current','fluent'].includes(sectionField(element))) return element;
+    const jazz=element.closest('.form-group');
+    if(jazz?.querySelector('label[id^="resumator-questionnaire-"]'))return jazz;
     return element.closest('[data-automation-id$="-CheckboxGroup"],[role="radiogroup"],fieldset,[data-automation-id^="formField"],[role="group"]');
   }
   function questionContainer(container) {
@@ -215,12 +225,28 @@
       if (node === container) break;
     }
     sources.push(element.getAttribute('placeholder'));
-    return sources.map(usableLabel).find(Boolean) || 'Unlabelled field';
+    const found=sources.map(usableLabel).find(Boolean);
+    if(!found || /^(?:address|contact address)\s*\*?$/i.test(found)) {
+      const semantic=normal([element.id,element.name,element.placeholder].join(' ')).replace(/[_-]/g,' ');
+      if(/\bcity\b/.test(semantic))return 'City';
+      if(/\b(state|province)\b/.test(semantic))return 'State/Province';
+      if(/\b(postal|zip)\b/.test(semantic))return 'Postal code';
+    }
+    return found || 'Unlabelled field';
   }
 
+  function choiceQuestion(element) {
+    const options=new Set(['yes','no']);
+    const option=clean(Array.from(element.labels||[]).map(questionText).find(value=>options.has(normal(value))) || '');
+    let question=(element.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>questionText(document.getElementById(id)))
+      .filter(value=>value && !options.has(normal(value))).join(' ');
+    // Pinpoint puts the question and option in one hidden aria label.
+    if(option && question.toLowerCase().endsWith(' '+option.toLowerCase()))question=question.slice(0,-option.length).trim();
+    return question;
+  }
   function groupLabel(container, fallback) {
     container=questionContainer(container);
-    return [...Array.from(container?.querySelectorAll('legend,[data-automation-id="formLabel"],[data-automation-id="richText"],label') || []).filter(node=>!node.querySelector('input,select,textarea') && (node.tagName!=='LABEL' || !node.htmlFor)).map(questionText), container?.getAttribute('aria-label'),
+    return [...Array.from(container?.querySelectorAll('legend,[data-automation-id="formLabel"],[data-automation-id="richText"],label') || []).filter(node=>!node.querySelector('input,select,textarea') && (node.tagName!=='LABEL' || !node.htmlFor || document.getElementById(node.htmlFor)?.type==='hidden')).map(questionText), container?.getAttribute('aria-label'),
       container ? referencedLabel(container, 'aria-labelledby') : '',
       text(container?.querySelector('h1,h2,h3,h4,[role="heading"]')), fallback].map(usableLabel).find(Boolean) || 'Unlabelled field';
   }
@@ -357,6 +383,20 @@
     }
     return "";
   }
+  function resumeAffordance(element) {
+    if(element.id!=='resumator-resume-value' || !element.closest('#resumator-resume'))return null;
+    return Array.from(element.closest('#resumator-resume').querySelectorAll('a#resumator-choose-upload,a#resumator-resume-switch-upload'))
+      .find(link=>visible(link)&&/^attach resume(?: file)?$/i.test(text(link)));
+  }
+  function exposedFile(element) {
+    if(visible(element) || resumeAffordance(element) || attachedFile(element))return true;
+    const container=fileContainer(element);
+    if(!visible(container) || !/\b(resume|cv|cover)\b/i.test(fileLabel(element)))return false;
+    // Workday keeps this input hidden even in the active, visible resume section.
+    if(element.getAttribute('data-automation-id')==='file-upload-input-ref')return true;
+    return Array.from(container.querySelectorAll('button,[role="button"],label')).some(node=>visible(node) &&
+      /^(attach|upload|browse|choose|select)\b/i.test(text(node))) || Array.from(element.labels||[]).some(visible);
+  }
   function fileContainer(element) {
     let container = element.parentElement;
     while (container && !container.matches("form,body")) {
@@ -468,7 +508,7 @@
     records = new Map();
     const fields = [];
     const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
-      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
+      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") && exposedFile(element) : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
@@ -477,7 +517,7 @@
     const keys = new Set();
     for (const element of controls) {
       if (["checkbox","radio"].includes(element.type) && !element.closest('form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]')) continue;
-      if (grouped.has(element) || /honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
+      if (grouped.has(element) || /captcha|honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
       let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') || element.getAttribute("data-automation-id") === "multiSelectInput" || isPrompt(element) ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : element.type || "text";
       if (!["text", "textarea", "select", "radio", "checkbox", "combobox", "file", "date", "number", "email", "tel", "url"].includes(kind)) kind = "text";
@@ -496,7 +536,7 @@
           (kind === "checkbox" ? choiceContainer(other)===container : element.name ? other.name===element.name : choiceContainer(other)===container));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
-        if (members.length > 1 || kind === "radio") fieldLabel = groupLabel(container, fieldLabel);
+        if (members.length > 1 || kind === "radio") fieldLabel = choiceQuestion(element) || groupLabel(container, fieldLabel);
         members.forEach(member => grouped.add(member));
       }
       if (!element.dataset.autoapplyKey || keys.has(element.dataset.autoapplyKey)) element.dataset.autoapplyKey = `aa-${++nextKey}`;
@@ -505,8 +545,8 @@
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
       container=questionContainer(container);
-      fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
-        options, multiple: kind==='checkbox' && members.length>1 || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
+      fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
+        options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
         section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
@@ -709,7 +749,7 @@
     const digits=String(value).replace(/\D/g,'');
     if(digits.length!==11||!digits.startsWith('1')) return value;
     let group=element.closest('[data-automation-id="phoneNumber"],fieldset,[role="group"],.intl-tel-input,.iti')||element.parentElement;
-    for(let i=0;i<2&&group?.parentElement&&!group.matches('form,body');i++) {if(group.querySelector('[data-automation-id="countryPhoneCode"],select,[role="combobox"],.iti__flag-container'))break;group=group.parentElement;}
+    for(let i=0;i<2&&group?.parentElement&&!group.matches('form,body');i++) {if(group.querySelector('[data-automation-id="countryPhoneCode"],select,[role="combobox"],.iti__flag-container,.flag-container,.selected-flag,.iti__country-container'))break;group=group.parentElement;}
     if(group?.matches("form,body"))group=null;
     const country=Array.from(group?.querySelectorAll('select,[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"]),[data-automation-id="countryPhoneCode"]')||[]).find(el=>el!==element&&/country|dial.code|phone.code/i.test(label(el)+' '+el.getAttribute('data-automation-id')));
     const picker=group?.querySelector('.iti__flag-container,.iti__country-container,.selected-flag,[class*="flag-dropdown"]');
@@ -717,6 +757,7 @@
       if(country.tagName==='SELECT') {const option=Array.from(country.options).find(o=>/united states|\+1(?:\D|$)/i.test(o.text));if(option){nativeSet(country,'value',option.value);events(country);}}
       else await fillCombo(country,'United States (+1)');
     }
+    if(picker?.getAttribute('title') && !/United States.*\+1/i.test(picker.getAttribute('title')))throw Error('Phone country differs; select the correct country before filling.');
     const hint=element.placeholder||'',pattern=element.getAttribute('pattern')||'';
     const workday=location.hostname.endsWith('.myworkdayjobs.com')||element.closest('[data-automation-id^="formField"]')&&/^phone number/i.test(field.label);
     if(!workday&&!country&&!picker&&(hint.includes('+')||pattern.includes('\\+')||/international/i.test(field.label)&&!hint&&!pattern&&!(element.maxLength>0&&element.maxLength<=12)&&element.inputMode!=='numeric'))return value;
@@ -725,6 +766,20 @@
     if(/\(\d{3}\)\s*\d{3}[- ]\d{4}/.test(hint))return '('+national.slice(0,3)+') '+national.slice(3,6)+'-'+national.slice(6);
     if(/\d{3}-\d{3}-\d{4}/.test(hint))return national.slice(0,3)+'-'+national.slice(3,6)+'-'+national.slice(6);
     return national;
+  }
+  async function settledText(record, expected, phone=false) {
+    const digits=value=>String(value).replace(/\D/g,'');
+    const canonical=value=>phone ? digits(value).replace(/^1(?=\d{10}$)/,'') : String(value);
+    let stable=0, last;
+    // Observe beyond change/blur and typical deferred widget rerenders, without retyping.
+    for(let attempt=0;attempt<6;attempt++) {
+      await pause(150);refreshRecord(record);
+      if(!record.element.isConnected || !interactiveVisible(record.element))return false;
+      const value=valueOf(record);
+      if(canonical(value)!==canonical(expected))return false;
+      stable=value===last?stable+1:0;last=value;
+    }
+    return stable>=2;
   }
   async function fill(answers, files = {}) {return traced("fill",()=>fillFields(answers,files));}
   async function fillFields(answers, files = {}) {
@@ -735,7 +790,7 @@
     for (const answer of answers) {
       const record = refreshRecord(records.get(answer.key));
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
-      const {element, members, field} = record;
+      let {element, members, field} = record;
       trace("field","found",element);
       if (isSkillsField(element)) { summary.skipped++; continue; }
       if (/\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b/i.test(field.label)) {
@@ -770,6 +825,13 @@
         } else if (field.kind === "file") {
           const file = files[answer.value];
           if (!file) { unresolved(answer.value === "cover_letter"); continue; }
+          if(!visible(element) && element.id==='resumator-resume-value') {
+            const link=resumeAffordance(element);
+            if(!link){unresolved(false);continue;}
+            link.click();
+            if(!await waitFor(()=>visible(currentControl(element)),1000)){unresolved(false);continue;}
+            refreshRecord(record);element=record.element;
+          }
           const bytes = Uint8Array.from(atob(file.base64), char => char.charCodeAt(0));
           const transfer = new DataTransfer();
           transfer.items.add(new File([bytes], file.filename, {type: file.mime}));
@@ -828,10 +890,12 @@
           }
           events(element);
           element.blur?.();
+          if((field.kind==='tel'||/phone|mobile/i.test(field.label)) && !await settledText(record,value,true)){unresolved(false);continue;}
+          if(answer.verify_settled && !await settledText(record,value)){unresolved(false);continue;}
           if (/_date$/.test(sectionField(element)) && element.value !== value &&
               (!/^\d+$/.test(value) || Number(element.value) !== Number(value))) { unresolved(false); continue; }
         }
-        trace("field","verified",element,{verified:true,...(field.kind!=="file"?{value:answer.value,observed:String(valueOf(record))===String(answer.value)?valueOf(record):"committed selection"}:{})});
+        trace("field","verified",element,{verified:true,...(field.kind!=="file"?{value:answer.value,observed:valueOf(record)}:{})});
         mark(record, "#888888");
         summary.filled++;
         const value=valueOf(record); observedValues.set(field.key,JSON.stringify(value));
@@ -1485,6 +1549,8 @@
       style.textContent='button{font:11px system-ui;padding:3px 8px;border:1px solid #555;border-radius:5px;background:#191919;color:#eee;cursor:pointer}button:focus-visible{outline:2px solid currentColor;outline-offset:2px}@media(prefers-color-scheme:light){button{background:#fff;color:#333;border-color:#aaa}}';
       button.textContent='Ask AI'; button.type='button';
       button.onclick=async () => {
+        chatExplicit=field;chatFocus=field;
+        if(extensionFilling)return;
         await scan();
         const record=Array.from(records.values()).find(record=>record.element===field);
         if (record) chrome.runtime.sendMessage({type:'ask-ai',key:record.field.key}).catch(()=>{});
@@ -1539,5 +1605,45 @@
     }
     return {host:location.hostname,nodes,truncated};
   }
-  globalThis.autoApplyContent = {beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  const chatDocument=crypto.randomUUID(),chatIdentities=new WeakMap();
+  let chatFocus,chatExplicit;
+  const writableChat=el=>el && el.isConnected && interactiveVisible(el) &&
+    !el.readOnly && !el.matches(':disabled,[readonly],[aria-readonly="true"]') &&
+    (el.matches('textarea,input[type="text"],input:not([type]),input[type="email"],input[type="tel"],input[type="url"]') || el.isContentEditable) && !el.closest('#autoapply-sidebar') && !/captcha/i.test([el.id,el.name,label(el)].join(' '));
+  document.addEventListener('focusin',event=>{if(!extensionFilling && event.isTrusted && writableChat(event.target))chatFocus=event.target;},true);
+  document.addEventListener('pointerdown',event=>{if(event.isTrusted && writableChat(event.target)){chatExplicit=null;chatFocus=event.target;}},true);
+  const chatValue=el=>String(el.isContentEditable?el.textContent:el.value);
+  async function chatFingerprint(value){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');}
+  async function chatContext({passive=false,request=''}={}){
+    if(!passive && !extensionFilling)await scan();
+    const fields=Array.from(records.values()).filter(r=>writableChat(r.element)).slice(0,80).map(r=>{
+      if(!chatIdentities.has(r.element))chatIdentities.set(r.element,crypto.randomUUID());
+      return {key:r.field.key,label:r.field.label.slice(0,500),kind:r.field.kind,identity:chatIdentities.get(r.element),max_length:r.field.max_length};
+    });
+    let named=fields.filter(f=>f.label.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));
+    if(!named.length && /cover letter/i.test(request))named=fields.filter(f=>/cover/i.test(f.label) && /letter/i.test(f.label));
+    const selected=named.length===1?named[0]:fields.find(f=>records.get(f.key)?.element===(writableChat(chatExplicit)?chatExplicit:chatFocus));
+    const current_answer=selected?{key:selected.key,text:chatValue(records.get(selected.key).element).slice(0,12000),fingerprint:await chatFingerprint(chatValue(records.get(selected.key).element))}:undefined;
+    return {url:location.href,page:pageInfo(),document:chatDocument,fields,current_key:selected?.key || null,current_answer};
+  }
+  async function chatReplace(context,action){
+    const field=context.fields?.find(f=>f.key===action.key),record=records.get(action.key);
+    if(extensionFilling || skillsState.busy)throw Error('Application is busy. Wait for autofill or writing to finish, then retry.');
+    if(context.url!==location.href || context.document!==chatDocument || !field || !record ||
+       !writableChat(record.element) || chatIdentities.get(record.element)!==field.identity ||
+       label(record.element)!==field.label || !['text','textarea','email','tel','url'].includes(record.field.kind) ||
+       action.type!=='replace_text' || typeof action.text!=='string' || !action.text.trim() || action.text.length>12000 ||
+       field.max_length!==null && action.text.length>field.max_length)throw Error('Field changed or is unavailable. Select the field and ask again.');
+    const before=chatValue(record.element);
+    if(context.current_answer?.key!==action.key || context.current_answer.fingerprint!==await chatFingerprint(before) ||
+       chatValue(record.element)!==before || extensionFilling || !writableChat(record.element) || context.url!==location.href ||
+       context.document!==chatDocument || records.get(action.key)!==record || label(record.element)!==field.label ||
+       chatIdentities.get(record.element)!==field.identity)throw Error('Field changed while waiting. Select the field and retry; your edit is preserved.');
+    const summary=await fill([{key:action.key,status:'RESOLVED',value:action.text,force:true,verify_settled:true,source:'AI'}]);
+    if(!summary.completed.some(f=>f.key===action.key && String(f.value)===action.text))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
+    return {ok:true};
+  }
+  globalThis.autoApplyContent = {chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis[singleton]=globalThis.autoApplyContent;
+  if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
 })();

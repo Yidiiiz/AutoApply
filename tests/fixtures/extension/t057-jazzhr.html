@@ -1,0 +1,52 @@
+<!doctype html><title>Captured JazzHR structure</title><style>.none{display:none}input{min-height:20px}label{display:block}</style><form><div class="form-group" id="resumator-address">
+<label class="control-label" for="resumator-address-value" id="resumator-address-label">Address</label>
+<div class="resumator-input" id="resumator-address-field">
+<input class="form-control" id="resumator-address-value" maxlength="255" name="resumator-address-value" placeholder="Address" type="text"/>
+<div class="row">
+<div class="col col-xs-5">
+<input class="form-control" id="resumator-city-value" maxlength="255" name="resumator-city-value" placeholder="City" type="text"/>
+</div>
+<div class="col col-xs-4">
+<input class="form-control" id="resumator-state-value" maxlength="50" name="resumator-state-value" placeholder="State/Province" type="text"/>
+</div>
+<div class="col col-xs-3">
+<input class="form-control" id="resumator-postal-value" maxlength="50" name="resumator-postal-value" placeholder="Postal" type="text"/>
+</div>
+</div>
+</div>
+</div><div class="form-group" id="resumator-resume">
+<label class="control-label" for="resumator-resume-value" id="resumator-resume-label">Resume<i class="asterisk">*</i></label>
+<div class="form-group none" id="resumator-two-stage-resume-toggle">
+<i>We've received your resume. Click <a href="#" id="resumator-two-stage-change-resume">here</a> to update it.</i>
+</div>
+<div class="resumator-resume-text" id="resumator-resume-options">
+<a class="resumator-resume-action" href="#" id="resumator-choose-upload">Attach resume</a>
+                    or
+                    <a class="resumator-resume-action" href="#" id="resumator-choose-paste">Paste resume</a>
+</div>
+<div class="none" id="resumator-resume-upload-wrapper">
+<div class="resumator-resume-text">
+                        Attach resume as .pdf, .doc, .docx, .odt, .txt, or .rtf (limit 5MB) or
+                        <a class="resumator-resume-action" href="#" id="resumator-resume-switch-paste">Paste resume</a>
+</div>
+<div class="resumator-input" id="resumator-resume-field">
+<input name="MAX_FILE_SIZE" type="hidden"/><input class="" id="resumator-resume-value" name="resumator-resume-value" type="file"/> </div>
+</div>
+<div class="resumator-resume-text none" id="resumator-resume-paste-wrapper">
+<div class="resumator-resume-text">
+<p>
+                            Paste your resume here or
+                            <a class="resumator-resume-action" href="#" id="resumator-resume-switch-upload">Attach resume file</a>
+</p>
+</div>
+<div class="resumator-input" id="resumator-resumetext-field">
+<textarea class="form-control resumator-field" id="resumator-resumetext-value" name="resumator-resumetext-value" rows="5"></textarea>
+</div>
+</div>
+</div><div class="form-group">
+<label class="control-label" for="resumator-questionnaire-q2936528" id="resumator-questionnaire-q2936528-label">Were you referred to Healthpeak by a current employee?<i class="asterisk">*</i></label>
+<input class="resumator-questionnaire-checkbox-answer" data-test="resumator-questionnaire-q2936528" id="resumator-questionnaire-q2936528" maxlength="" name="resumator-questionnaire[2936528]" type="hidden"/><label class="checkbox" for="resumator-checkbox-2936528-1"><input class="resumator-questionnaire-checkbox" id="resumator-checkbox-2936528-1" name="resumator-checkbox-2936528-1" type="checkbox" value="Yes"/>Yes</label><label class="checkbox" for="resumator-checkbox-2936528-2"><input class="resumator-questionnaire-checkbox" id="resumator-checkbox-2936528-2" name="resumator-checkbox-2936528-2" type="checkbox" value="No"/>No</label> </div><div class="form-group">
+<label class="control-label" for="resumator-questionnaire-q2936531" id="resumator-questionnaire-q2936531-label">If Yes, please provide the name of the Healthpeak team member who referred you.</label>
+<input class="form-control resumator-field" data-test="resumator-questionnaire-q2936531" id="resumator-questionnaire-q2936531" maxlength="255" name="resumator-questionnaire[2936531]" type="text"/> </div><div class="form-group">
+<label class="control-label" for="resumator-questionnaire-q2977574" id="resumator-questionnaire-q2977574-label">Do you currently, or will you in the future require sponsorship to work in the US?<i class="asterisk">*</i></label>
+<input class="resumator-questionnaire-checkbox-answer" data-test="resumator-questionnaire-q2977574" id="resumator-questionnaire-q2977574" maxlength="" name="resumator-questionnaire[2977574]" type="hidden"/><label class="checkbox" for="resumator-checkbox-2977574-1"><input class="resumator-questionnaire-checkbox" id="resumator-checkbox-2977574-1" name="resumator-checkbox-2977574-1" type="checkbox" value="Yes"/>Yes</label><label class="checkbox" for="resumator-checkbox-2977574-2"><input class="resumator-questionnaire-checkbox" id="resumator-checkbox-2977574-2" name="resumator-checkbox-2977574-2" type="checkbox" value="No"/>No</label> </div><label>Permanent Address<input id="permanent"></label><div class="g-recaptcha" aria-label="CAPTCHA"></div></form><script>for(const id of ['resumator-choose-upload','resumator-resume-switch-upload'])document.getElementById(id).onclick=e=>{e.preventDefault();document.getElementById('resumator-resume-upload-wrapper').classList.remove('none');};</script>

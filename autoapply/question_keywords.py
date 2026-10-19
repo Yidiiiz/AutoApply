@@ -116,11 +116,20 @@ CONCEPTS = [
 ]
 
 
+def current_immigration_status(text):
+    """The current-status request, distinct from an export licence or clearance claim."""
+    text = normalize(text)
+    return bool(re.search(r'\b(?:indicate|select) your current immigration and work authorization status\b', text)
+                and not re.search(r'\b(?:hypothetical|if you|would you|clearance|licen[cs]e|since birth)\b', text))
+
+
 def match(text):
     """Return the most specific concept; options are deliberately never inspected."""
     if unusable_label(text) or date_part_label(text):
         return None
     text = normalize(text)
+    if current_immigration_status(text):
+        return 'citizenship.us_citizen'
     long = len(text.split()) > 60
     matches = []
     for item in CONCEPTS:

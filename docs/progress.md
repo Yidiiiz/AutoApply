@@ -764,3 +764,64 @@ performance limitation is NOT fixed by T056. Warm freshbrowser smoke bothwidths
 has no timeout; measured rebuild0.719s, cached0.005s (later0.036/0.005s). Dashboard
 remains running on8765. Reload unpacked extension and refresh employer tabs for
 new build. No employer interaction/submission, private data commit or push.
+
+
+### T057 scoped implementation - 2026-10-18
+
+Queue reads now retain single-flight/revision checks and schedule bounded 5-30s recovery after failed reads. Successful resources clear only their own notice. Applied is the sole application status view; legacy Needs you/Failed routes redirect there, Worker routes redirect to Queue, and hidden legacy records, controls, Undo and history remain available to existing backend paths. Queue Chrome runs, Answers and Settings remain visible.
+
+The sanitized Healthpeak capture supplies the address nesting, upload links and distinct questionnaire checkbox groups used in local fixtures. Per-control address semantics preserve precise labels; Yes/No checkboxes stay one logical question each. Resume upload reveals only the known visible Attach resume affordance. Referral requires an explicit fact; No leaves the conditional name blank. CAPTCHA controls are excluded. The exact export-control current immigration-status question selects the offered citizenship choice only from explicit citizenship evidence.
+
+The settled sanitized Pinpoint capture supplies the legacy intl-tel-input widget, required processing consent and actual radio nesting. Each radio references one hidden DIV combining the full question with its option; only the known visible option suffix is removed. The fixture preserves that nesting and checks mixed case/spacing. Local tests cover late formatting, replaced inputs and resets; reset values remain unresolved. The supervisor's read-only fresh-page phone baseline did not reproduce the reported clearing.
+
+Toolbar opening reinjects a missing content API, uses a per-context singleton, restores per-tab state after navigation and always opens on toolbar clicks. Chat exposes writable-field identities and only one selected/current answer, bounded to 12000 characters. Provider context allowlists that answer and discards other values and extras. A local SHA-256 fingerprint prevents overwriting user edits during the response wait; actual replacement refuses active autofill, skills or writing while passive chat reads remain usable without resetting field records. Explicit replacement uses the complete prior draft (maximum 12000 characters), validates intent, target, document, URL and field identity in both client and server paths, then reports success only after settled verification. Ordinary chat and unsafe/stale actions cannot mutate forms. Persistent allowlisted writing preferences and contribution facts reach chat/question writing; excluded projects are removed from letter evidence. The reusable prompt selects two verified examples against bounded supplied posting/source evidence and uses natural 250-350 word prose without invented research.
+
+Verification is fixture-only with synthetic profiles, stubbed providers and local HTTP. Focused extension/API, dashboard, provider and semi-auto checks were run; full configured extension/dashboard suites are deferred to supervisor review. Actual 1440/500 dashboard and narrow chat screenshots are under .tmp/review/t057. No live employer or Discord access, applications submitted, private applicant files changed, service restarts, staging, commits, pushes or runtime/budget changes.
+
+
+T057 attempt 2 preserves the complete existing draft. Equivalent positive employee-referral Yes/No questions now use the explicit all-employer fact with provenance; missing facts remain unresolved, manually occupied answers remain intact, generic discovery sources are unchanged, and No leaves the conditional referrer name blank. No referrer identity is inferred. Boolean citizenship Yes/No and exact offered citizenship-status options remain separately covered.
+
+Supervisor-provided evidence in .tmp/review/t057/live-draft-results.json records 12 Healthpeak fields (including resume and two logical checkbox groups), distinct synthetic addresses and retained No choices; Impulse records 10 fields and four filled phone/radio/consent controls retained after two seconds. These are supervisor observations on the draft with non-GET/HEAD requests blocked, not this worker's live checks. No server acceptance of the hidden resume upload is claimed. Final actual-browser review and full configured checks remain with the runner/supervisor.
+
+Final attempt-2 focused verification: 47 T057 extension/API/dashboard/CV/provider tests passed in 33.99s; 14 narrow existing upload/Workday, provider-context toggle, and semi-auto manual-review/request-guard regressions passed in 60.14s. These use workspace-local --basetemp, disabled pytest cache, synthetic profiles and stub providers. Browser coverage includes existing-text refinement context with no other field values, a full draft over 2000 characters, bounded 12000-character reads, user edits beyond that prefix, occupied manual referral, and busy mutation refusal. Initial focused failures were corrected before the final pass. JavaScript syntax, Python AST and git diff --check passed. Full configured extension/dashboard/semi_auto suites are deliberately left to the runner; no full-suite acceptance is claimed.
+
+
+### T058: scoped integration recovery after T057 interruption - 2026-10-19
+
+T057 attempt 3 was interrupted by quota before a final structured report and was
+not accepted. Supervisor checks on that unchanged draft reported extension/API
+398 passed and two failures (the two Workday SPA upload variants), in 1052.51s;
+dashboard/autonomy 355 passed and one failure (the obsolete screenshot segment
+click), in 274.57s. Other supervisor evidence: semi_auto/question_rules/integrations
+60 passed in 42.95s; focused T057 59 passed in 73.63s; CV/writer/keywords 328 passed
+in 68.20s; diff check passed. These are prior supervisor results, not T058 full-suite
+passes. All pre-existing T057 edits, including chat draft/receipt isolation,
+application scoping and explicit rewrite-and-replace, are preserved.
+
+Reproduced the Workday False variant locally before the fix: one failure in
+20.66s, with the experience fields and writing filled but filename empty. The new
+file exposure filter had excluded Workday's hidden file-upload-input-ref when its
+visible resume section had no visible label/button. That recognized input is now
+admitted within a visible resume/CV section; JazzHR retains its exact known Attach
+resume link reveal path. Both SPA variants additionally verify assigned synthetic
+file count, name, MIME type and bytes while retaining the filename assertion and
+zero final-submit checks. The Healthpeak fixture additionally checks the exact
+link clicked, visible upload wrapper, assigned bytes and zero form submissions.
+
+The original T051 screenshot flow now verifies Applications/Applied active and
+the Applied list visible directly. It asserts status navigation and Worker are
+hidden, preserving every existing 1440/800/500 light/dark layout, selection,
+keyboard, overflow and disabled Applied row assertion.
+Final T058 focused verification with .venv Python: 70 passed, 701 deselected in
+151.89s. Selection was all T057 tests in extension, extension_api, dashboard and
+CV, both Workday SPA variants, existing Greenhouse hidden-upload/date and upload
+label/replacement tests, and the complete T051 screenshot flow. This covers the
+preserved Queue recovery/navigation, citizenship/referral provenance, Pinpoint
+labels/consent/phone reset, toolbar initialization, writing policy and chat
+draft/receipt/rewrite safeguards. The T051 flow passed all six width/theme
+combinations. JavaScript syntax, Python AST and final git diff --check passed.
+No full suites were rerun or claimed to pass; independent supervisor verification
+remains. Checks used synthetic profiles, stubbed providers and fixture-only HTTP
+with external browser traffic blocked. Only the four T058 scope files were edited;
+no workers, live employer/Discord access, private applicant edits, process/runtime/
+budget changes, staging, commits, pushes or deployment were performed.

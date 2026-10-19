@@ -331,10 +331,10 @@ def test_chat_trimmed_history_and_job(http_dashboard, config, db, listing, writi
     writing_provider.result = {'reply': 'What would you like to highlight?'}
     messages = [dict(role='user' if i % 2 else 'assistant', text=str(i) + 'x' * 2200) for i in range(20)]
     status, result, _ = ext(http_dashboard, 'POST', '/ext/chat', dict(application_id=app_id, messages=messages))
-    assert status == 200 and result == writing_provider.result
+    assert status == 200 and result == dict(writing_provider.result, kind='draft')
     sent = writing_provider.requests[-1]
     assert sent['task'] == 'chat'
-    assert sent['messages'] == [dict(role=m['role'], text=m['text'][:2000]) for m in messages[-12:]]
+    assert sent['messages'] == [dict(role=m['role'], text=m['text'][:12000]) for m in messages[-12:]]
     assert sent['profile']['name'] == 'Test Student' and sent['job']['company'] == 'Company 0'
     assert db.application(app_id) == before
 
@@ -926,3 +926,220 @@ def test_t053_preserved_answer_coverage(config, db, http_dashboard, monkeypatch,
             (dict(choices=[],fact_ids=[],needs_input=True),None),
         ][case-5]
         source.test_unknown_choices_use_grounded_writer_and_validate(http_dashboard,profile,monkeypatch,proposal,expected)
+
+
+T057_IMMIGRATION = ('U.S. Export Control laws require that access to certain technical information be limited to U.S. Persons '
+    '(U.S. Citizens and Lawful Permanent Residents/Green Card Holders) and individuals granted appropriate authorization. '
+    'Please indicate your current Immigration and Work Authorization status. Verification will be required upon hire.')
+
+
+@pytest.mark.parametrize('citizen', [True, False, None])
+@pytest.mark.parametrize('option', ['USCitizen', 'US citizen', 'U.S. Citizen'])
+def test_t057_current_citizenship_exact_offered_status(http_dashboard, config, citizen, option):
+    profile = config.profile
+    profile['citizenship'] = {} if citizen is None else dict(us_citizen=citizen)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    # USCitizen spelling is also an exact citizenship choice, never a Yes fallback.
+    field = dict(key='citizen', label=T057_IMMIGRATION, kind='select', required=True,
+                 options=[option, 'Lawful Permanent Resident/Green Card Holder', 'Yes', 'Other'])
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://example.test/apply', fields=[field]))
+    assert status == 200
+    answer = result['answers'][0]
+    if citizen is True:
+        assert answer['value'] == option and answer['source'] == 'profile:citizenship.us_citizen'
+    else:
+        assert answer['status'] == 'NEEDS_INPUT'
+
+
+@pytest.mark.parametrize('label', ['Would you be eligible for an export license as a U.S. Citizen?',
+                                   'If you were a U.S. Citizen, indicate your current Immigration and Work Authorization status.'])
+def test_t057_citizenship_does_not_imply_legal_claims(http_dashboard, label):
+    _, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://example.test/apply', fields=[
+        dict(key='legal', label=label, kind='radio', required=True, options=['U.S. Citizen', 'Yes', 'No'])]))
+    assert result['answers'][0]['status'] == 'NEEDS_INPUT'
+
+
+def test_t057_consent_referral_and_distinct_addresses(http_dashboard, config):
+    profile = config.profile
+    profile['contact'].update(address='12 Example Road', city='Example City', state='Maryland', postal_code='20999',
+                              permanent_address='34 Original Road', permanent_city='Home City')
+    profile['application_preferences'] = dict(ordinary_policy_acknowledgement=True, referred_by_employee=False)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    fields = [dict(key=label, label=label, kind='text') for label in ['Address','City','State/Province','Postal code','Permanent Address']]
+    fields += [dict(key='referral',label='Were you referred to Healthpeak by a current employee?',kind='checkbox',options=['Yes','No'],required=True,multiple=False),
+               dict(key='consent', label='(Required) Allow us to process your personal information. *',kind='checkbox',required=True,
+                    options=['(Required) Allow us to process your personal information. *']),
+               dict(key='marketing',label='Optional consent to marketing emails',kind='checkbox',options=['Yes'])]
+    _, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://example.test/apply',fields=fields))
+    answers = {v['key']: v for v in result['answers']}
+    assert [answers[k]['value'] for k in ['Address','City','State/Province','Postal code']] == ['12 Example Road','Example City','Maryland','20999']
+    assert '34 Original Road' in answers['Permanent Address']['value'] and 'Home City' in answers['Permanent Address']['value']
+    assert answers['referral']['value'] == 'No'
+    assert answers['consent']['status'] == 'RESOLVED' and answers['marketing']['status'] == 'OPTIONAL_SKIP'
+
+
+def test_t057_chat_full_draft_and_authorization(http_dashboard, writing_provider):
+    draft = 'A full previous draft. ' * 180
+    context = dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='field-identity',max_length=None)],current_key='letter')
+    messages = [dict(role='assistant',text=draft,kind='draft'),dict(role='user',text='replace current field with that')]
+    status, value, _ = ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',messages=messages,field_context=context))
+    assert status == 200 and value['actions'] == [dict(type='replace_text',key='letter',text=draft)]
+    assert not writing_provider.requests
+    context['current_key'] = None
+    _, value, _ = ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',messages=messages,field_context=context))
+    assert 'actions' not in value and 'Select' in value['reply']
+    context['fields'][0]['kind'] = 'file'
+    assert ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',messages=messages,field_context=context))[0] == 400
+    writing_provider.result = dict(reply='Draft only',actions=[dict(type='submit',key='letter',text='bad')])
+    status, value, _ = ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',messages=[dict(role='user',text='How do I replace the current field?')]))
+    assert status == 400 and 'actions' not in value
+
+
+@pytest.mark.parametrize('referred', [None, False])
+def test_t057_missing_referral_and_conditional_name(http_dashboard,config,referred):
+    profile=config.profile
+    profile['application_preferences']={} if referred is None else dict(referred_by_employee=referred)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile),encoding='utf-8')
+    _,result,_=ext(http_dashboard,'POST','/ext/answers',dict(url='https://example.test/apply',fields=[
+        dict(key='ref',label='Were you referred to Healthpeak by a current employee?',kind='checkbox',options=['Yes','No'],multiple=False,required=True),
+        dict(key='name',label='If Yes, please provide the name of the Healthpeak team member who referred you.',kind='text')]))
+    assert result['answers'][0]['status']==('NEEDS_INPUT' if referred is None else 'RESOLVED')
+    if referred is False:
+        assert result['answers'][0]['value']=='No' and result['answers'][1]['status']=='OPTIONAL_SKIP'
+
+
+def test_t057_trace_radio_questions_use_explicit_facts(http_dashboard,config):
+    profile=config.profile;profile['locations']=dict(willing_to_relocate=True)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile),encoding='utf-8')
+    fields=[dict(key=str(i),label=label,kind='radio',required=True,options=['Yes','No']) for i,label in enumerate([
+        'Are you within a commutable distance or willing to relocate?',
+        'Are you legally authorized to work in the United States as per the below ITAR requirements?'])]
+    _,result,_=ext(http_dashboard,'POST','/ext/answers',dict(url='https://example.test/apply',fields=fields))
+    assert [v['value'] for v in result['answers']]==['Yes','Yes']
+    assert result['answers'][1]['source']=='profile:work_authorization.us_authorized'
+
+
+@pytest.mark.parametrize('label', ['Were you referred?', 'Were you referred to Example by a current employee?',
+    'Have you been referred by an employee?', 'Did a current employee refer you?', 'Employee referral (Yes/No)'])
+@pytest.mark.parametrize('referred', [True, False, None])
+def test_t057_all_employer_referral_variants(http_dashboard, config, label, referred):
+    profile=config.profile
+    profile['application_preferences']={} if referred is None else dict(referred_by_employee=referred)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile),encoding='utf-8')
+    _,value,_=ext(http_dashboard,'POST','/ext/answers',dict(url='https://example.test/apply',fields=[
+        dict(key='ref',label=label,kind='radio',options=['Yes','No'],required=True)]))
+    answer=value['answers'][0]
+    assert answer['status']==('NEEDS_INPUT' if referred is None else 'RESOLVED')
+    if referred is not None:
+        assert answer['value']==('Yes' if referred else 'No')
+        assert answer['source']=='profile:application_preferences.referred_by_employee'
+
+
+def test_t057_referral_not_generic_source(http_dashboard, config):
+    profile=config.profile;profile['application_preferences']=dict(referred_by_employee=False)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile),encoding='utf-8')
+    _,value,_=ext(http_dashboard,'POST','/ext/answers',dict(url='https://example.test/apply',fields=[
+        dict(key='source',label='How did you hear about us?',kind='select',required=True,options=['Employee referral','Website'])]))
+    assert value['answers'][0]['status']=='NEEDS_INPUT'
+
+
+def test_t057_selected_answer_provider_allowlist(http_dashboard, writing_provider):
+    writing_provider.result=dict(reply='A revised answer')
+    field=dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=None,value='PRIVATE')
+    context=dict(fields=[field],current_key='letter',current_answer=dict(key='letter',text='Existing answer',fingerprint='local-only',extra='PRIVATE'),extra='PRIVATE')
+    status,_,_=ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',field_context=context,messages=[dict(role='user',text='Refine this answer')]))
+    assert status==200
+    sent=writing_provider.requests[-1]['field_context']
+    assert sent['current_answer']==dict(key='letter',text='Existing answer')
+    assert 'PRIVATE' not in json.dumps(sent) and 'fingerprint' not in json.dumps(sent)
+    for key,text in [('other','text'),('letter','x'*12001),(None,'text')]:
+        context['current_answer']=dict(key=key,text=text)
+        assert ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',field_context=context,messages=[dict(role='user',text='Refine')]))[0]==400
+
+
+@pytest.mark.parametrize('citizen,expected', [(True,'Yes'),(False,'No')])
+def test_t057_boolean_citizenship_regression(http_dashboard, config, citizen, expected):
+    profile=config.profile;profile['citizenship']=dict(us_citizen=citizen)
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile),encoding='utf-8')
+    _,value,_=ext(http_dashboard,'POST','/ext/answers',dict(url='https://example.test/apply',fields=[
+        dict(key='citizen',label='Are you a U.S. citizen?',kind='radio',options=['Yes','No'],required=True)]))
+    assert value['answers'][0]['value']==expected
+
+
+def test_t057_chat_receipts_and_bounded_draft_reference(http_dashboard, writing_provider):
+    draft = 'A grounded full draft. ' * 160
+    context = dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=None)],current_key='letter')
+    receipts = ['Replaced Cover letter. Please review the field.', 'Select the text field.', 'Provider unavailable.']
+    messages = [dict(role='assistant',text=draft,kind='draft')]
+    for receipt in receipts:
+        messages.extend([dict(role='user',text='replace current field with that'),dict(role='assistant',text=receipt,kind='receipt')])
+    messages.append(dict(role='user',text='replace current field with that'))
+    payload = dict(url='https://example.test/apply',messages=messages,field_context=context)
+    status, value, _ = ext(http_dashboard,'POST','/ext/chat',payload)
+    assert status == 200 and value['draft'] == value['actions'][0]['text'] == draft
+    # Draft references survive eviction from the bounded message window.
+    payload.update(messages=messages[-2:],last_draft=draft)
+    assert ext(http_dashboard,'POST','/ext/chat',payload)[1]['actions'][0]['text'] == draft
+    for text in receipts + ['No']:
+        payload.pop('last_draft',None)
+        payload['messages']=[dict(role='assistant',text=text),messages[-1]]
+        assert 'actions' not in ext(http_dashboard,'POST','/ext/chat',payload)[1]
+    payload['messages']=[dict(role='assistant',text='No',kind='draft'),messages[-1]]
+    assert ext(http_dashboard,'POST','/ext/chat',payload)[1]['actions'][0]['text']=='No'
+    assert not writing_provider.requests
+
+
+@pytest.mark.parametrize('instruction', ['replace current field with a shorter version', 'update Cover letter to be more concise'])
+def test_t057_chat_rewrite_uses_selected_answer_once(http_dashboard, writing_provider, instruction):
+    writing_provider.result=dict(answer='I build useful tools.')
+    context=dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=100)],
+                 current_key='letter',current_answer=dict(key='letter',text='Existing selected answer.'))
+    payload=dict(url='https://example.test/apply',use_job_description=False,field_context=context,
+                 messages=[dict(role='assistant',text='Unrelated older draft',kind='draft'),dict(role='user',text=instruction)])
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',payload)
+    assert status==200 and value['replacement_mode']=='rewrite'
+    assert value['draft']==value['actions'][0]['text']=='I build useful tools.'
+    assert len(writing_provider.requests)==1
+    sent=writing_provider.requests[0]
+    assert sent['task']=='question_answer' and sent['previous']=='Existing selected answer.'
+    assert sent['question']=='Cover letter' and instruction in sent['instruction'] and '100 characters' in sent['instruction']
+    assert sent['profile']['name']=='Test Student' and 'evidence_packet' in sent
+
+
+@pytest.mark.parametrize('output', [dict(answer=''),dict(answer='x'*101),dict(answer='draft',needs_input=True),
+    dict(answer='draft',actions=[dict(type='submit')]),dict(answer='```bad```')])
+def test_t057_chat_rewrite_invalid_never_falls_back(http_dashboard,writing_provider,output):
+    writing_provider.result=output
+    context=dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=100)],
+                 current_key='letter',current_answer=dict(key='letter',text='Existing selected answer.'))
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',field_context=context,
+        messages=[dict(role='assistant',text='Old draft',kind='draft'),dict(role='user',text='replace current field with a shorter version')]))
+    assert status==400 and 'actions' not in value and len(writing_provider.requests)==1
+
+
+def test_t057_chat_rewrite_missing_source_unavailable_and_ambiguous(http_dashboard,writing_provider):
+    from autoapply.ai import ProviderUnavailable
+    context=dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=None)],current_key='letter')
+    payload=dict(url='https://example.test/apply',field_context=context,messages=[dict(role='user',text='replace current field with a shorter version')])
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',payload)
+    assert status==200 and 'actions' not in value and not writing_provider.requests
+    context['current_answer']=dict(key='letter',text='Existing answer')
+    writing_provider.result=ProviderUnavailable('Fixture unavailable; field unchanged')
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',payload)
+    assert status==409 and 'actions' not in value and len(writing_provider.requests)==1
+    payload['messages']=[dict(role='assistant',text='Old draft',kind='draft'),dict(role='user',text='replace current field with something')]
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',payload)
+    assert status==200 and 'actions' not in value and 'What text' in value['reply']
+    writing_provider.result=dict(reply='A shorter draft')
+    payload['messages'][-1]['text']='make it shorter'
+    assert 'actions' not in ext(http_dashboard,'POST','/ext/chat',payload)[1]
+    assert writing_provider.requests[-1]['task']=='chat'
+
+
+@pytest.mark.parametrize('quote', ['"', "'"])
+def test_t057_chat_quoted_literal(http_dashboard,writing_provider,quote):
+    context=dict(fields=[dict(key='letter',label='Cover letter',kind='textarea',identity='id',max_length=None)],current_key='letter')
+    status,value,_=ext(http_dashboard,'POST','/ext/chat',dict(url='https://example.test/apply',field_context=context,
+        messages=[dict(role='user',text='replace current field with '+quote+'No'+quote)]))
+    assert status==200 and value['replacement_mode']=='literal' and value['actions'][0]['text']=='No'
+    assert not writing_provider.requests

@@ -126,7 +126,7 @@ def test_posting_questions_are_filtered(question):
         validate_letter_result({'questions': [question]})
 
 
-@pytest.mark.parametrize('task,expected', [('cover_letter', '300-450 words'),
+@pytest.mark.parametrize('task,expected', [('cover_letter', '250-350 words'),
                                          ('verify_grounding', 'independent factual auditor'),
                                          ('answer', 'fact_ids')])
 async def test_codex_prompt_branches_without_cli(monkeypatch, task, expected):
@@ -238,3 +238,31 @@ def test_long_letter_pdf_fits_one_page_offline(monkeypatch, tmp_path):
         assert measurements[0]['scroll'] <= measurements[0]['width']
         assert measurements[0]['font'] < 10 * 96 / 72
         assert measurements[0]['lineHeight'] == '18.4px'
+
+
+async def test_t057_writing_policy_and_grounded_provider_packet(tmp_path, monkeypatch):
+    from pathlib import Path
+    profile = dict(identity=dict(first_name='Synthetic'), writing_preferences=dict(exclude_attune_metrics=True,
+                   attune_not_applicant_coded=True, cover_letter_excluded_projects=['Attune'],
+                   cover_letter_style='Natural, direct, specific to employer and role', secret='DO NOT SHARE'),
+                   projects=[dict(name='Attune',description='Reviewed results',contribution='Did not implement this project',bullets=['999 tests']),
+                             dict(name='Verified tool',description='Reduced runtime by 25%',contribution='Implemented the parser')])
+    job = dict(company='Synthetic Orbit',title='Software Intern',canonical_url='https://example.test/official-job',
+               description='Build customer mission scheduling tools and operate satellite constellations.')
+    request = cover_letter_request(profile,job,tmp_path)
+    assert request['profile']['projects'] == [profile['projects'][1]]
+    assert profile_facts(profile)['projects'][0]['contribution'] == 'Did not implement this project'
+    assert 'secret' not in request['profile']['writing_preferences']
+    assert request['evidence_packet']['source_url'] == job['canonical_url']
+    monkeypatch.setattr('autoapply.codex_writer.shutil.which',lambda _: 'fixture')
+    provider = CodexWritingProvider(dict(name='fixture',billing='included'),None,None)
+    async def ready(folder): pass
+    prompts = []
+    async def run(args,folder,prompt=None):
+        prompts.append(prompt)
+        Path(args[args.index('-o')+1]).write_text('{"paragraphs":["Grounded fixture body."]}',encoding='utf-8')
+    monkeypatch.setattr(provider,'ensure_ready',ready)
+    monkeypatch.setattr(provider,'run',run)
+    await provider.generate_response(request)
+    assert all(v in prompts[0] for v in ['250-350','two relevant verified examples','never imply the applicant coded or implemented Attune','source URL','25%'])
+    assert '999 tests' not in prompts[0]

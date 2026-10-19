@@ -808,3 +808,6 @@ response CSP permits only data: images; default-src, nonce-bound scripts/styles,
 same-origin connections and frame/form protections remain intact. A local browser
 fixture decodes and paints the actual favicon URI under the served response policy
 without securitypolicyviolation events (.tmp/review/t054/favicon-csp.json).
+
+
+T057: Queue failures keep checking with bounded backoff and one active resource request. A successful read clears its own stale notice while preserving unrelated action errors. Applied is the only visible application status; old Needs you/Failed hashes open Applied and Worker hashes open Queue. Legacy backend records and run/Undo/history paths remain intact. The toolbar shows Queue, Applied, Answers and Settings; Chrome run controls remain in Queue.

@@ -19,9 +19,25 @@ let userExcludedSkills=new Set(), userAddedSkills=new Set();
 let autoPreferenceReady=false;
 let result, source, histories = (await chrome.storage.session.get("answerHistory")).answerHistory || {};
 let messages = [], aiBusy = false, chatBusy = false, downloadURL;
+let chatApplication, lastDraft, chatURL;
+let chatHistories = (await chrome.storage.session.get('chatHistories')).chatHistories || {};
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
 const question = () => element("question").value.trim();
 const applicationKey = () => String(result?.matched?.application_id || result?.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] || tabId || "page");
+function loadChat(url=result?.url || chatURL){
+  const key=result?.url===url && result?.matched?.application_id ? 'id:'+result.matched.application_id : 'url:'+url;
+  if(!url || chatApplication===key)return;
+  chatURL=url;
+  chatApplication=key;const saved=chatHistories[key];
+  messages=(saved?.messages || []).slice(-12);lastDraft=saved?.lastDraft;
+  renderMessages();
+}
+async function saveChat(){
+  const stored=(await chrome.storage.session.get('chatHistories')).chatHistories || {};
+  delete stored[chatApplication];stored[chatApplication]={messages:messages.slice(-12).map(m=>({...m,text:m.text.slice(0,12000)})),lastDraft};
+  chatHistories=Object.fromEntries(Object.entries(stored).slice(-24));
+  await chrome.storage.session.set({chatHistories});
+}
 const historyKey = () => applicationKey()+":"+question();
 const history = () => histories[historyKey()] || {versions: [], index: 0};
 function openHelper(field){source={...field,tabId:result.tabId,url:result.url};element("question").value=field.label;selectTab("chat");selectChatTab("helper");renderAnswer();element("question").focus();}
@@ -168,6 +184,7 @@ function renderFillButton(value) {
 function render(value) {
   if (!value || tabId && value.tabId !== tabId) return;
   result = value;
+  loadChat();
   if(value.skills_available!==undefined) showSkills(value.skills_available);
   element("error").textContent = value.error || "";
   element("company").textContent = value.matched?.company || value.page?.company || "Current application";
@@ -223,11 +240,12 @@ function render(value) {
   }
 }
 const showError = error => { element("error").textContent = error.message; };
-async function pageContext() {
-  if (!result?.page) {
+async function pageContext(refresh=false) {
+  if (refresh || !result?.page) {
     const scanned = await send({type: "page-context"});
     if (scanned.error) throw new Error(scanned.error);
-    result = {...scanned, matched: await api("/ext/match", {url: scanned.url})};
+    result = {...(result?.url===scanned.url?result:{}), ...scanned, matched: await api("/ext/match", {url: scanned.url})};
+    render(result);
   }
   const enabled=element("use-job-description").checked;
   const {description,url,...page}=result.page;
@@ -273,16 +291,59 @@ function renderMessages() {
   if (chatBusy) { const typing = node("div", "•••"); typing.className = 'bubble assistant typing'; typing.setAttribute('aria-label', 'AI is typing'); container.append(typing); }
   requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
 }
+function chatReplacementIntent(value){return typeof value==='string' && /^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && !/\b(?:don.t|do not|never|cannot|can.t)\b/i.test(value);}
+function authorizedChatField(request,context){
+  if(!chatReplacementIntent(request))return null;
+  let fields=context?.fields || [];
+  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
+  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
+  return fields.length===1?fields[0]:null;
+}
+function chatReplacementSource(request){
+  const literal=request.match(/\b(?:with|to)\s+(["'])(.+)\1\s*$/is);
+  if(literal)return {mode:'literal',text:literal[2]};
+  if(/\b(?:with|using)\s+(?:that|it|(?:the |this |that )?(?:draft|answer|text)(?: above)?|the above)\s*[.!]?$/i.test(request))return {mode:'reference',text:lastDraft};
+  if(/\b(?:shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\bto (?:be|include|mention|remove|add)\b/i.test(request))return {mode:'rewrite'};
+  return {};
+}
 async function chat() {
   const text = element("chat-input").value.trim();
   if (!text || chatBusy) return;
   chatBusy = true; element("send").disabled = element("clear-chat").disabled = true;
-  messages.push({role: "user", text, time:Date.now()}); element("chat-input").value = ""; renderMessages();
+  element("chat-input").value = ""; renderMessages();
   element("chat-status").textContent = "Thinking…";
   try {
-    const reply = await api("/ext/chat", {...await pageContext(), messages: messages.slice(-12).map(({role,text})=>({role,text}))});
-    messages.push({role: "assistant", text: reply.reply, time:Date.now()}); element("chat-status").textContent = "";
-  } catch (error) { messages.pop(); element("chat-input").value = text; renderMessages(); element("chat-status").textContent = error.message; }
+    const fieldContext=await send({type:"chat-context",request:text});
+    if(fieldContext.error)throw Error(fieldContext.error);
+    loadChat(fieldContext.url);
+    const appKey=chatApplication;
+    messages.push({role:'user',text,time:Date.now()});renderMessages();await saveChat();
+    const enabled=element('use-job-description').checked,{description,url,...page}=fieldContext.page || {};
+    const reply = await api("/ext/chat", {url:fieldContext.url,page:{...page,...(enabled?{description,url}:{})},use_job_description:enabled,field_context:fieldContext, ...(lastDraft?{last_draft:lastDraft}:{}),messages: messages.slice(-12).map(({role,text,kind})=>({role,text,...(kind?{kind}:{})}))});
+    if(appKey!==chatApplication)throw Error('Application changed. Review and retry in the current application.');
+    let kind=reply.kind || 'draft';
+    if(!['draft','receipt'].includes(kind) || typeof reply.reply!=='string' || !reply.reply.trim())throw Error('Invalid chat response. The field is unchanged.');
+    if(reply.actions!==undefined && (!Array.isArray(reply.actions) || reply.actions.length>1))throw Error('Invalid replacement actions refused. Your draft is preserved.');
+    if(reply.actions?.length){
+      const action=reply.actions[0],field=fieldContext.fields?.find(f=>f.key===action?.key);
+      const intent=chatReplacementIntent(text),target=authorizedChatField(text,fieldContext);
+      const requested=chatReplacementSource(text),mode=reply.replacement_mode;
+      const authorizedText=mode==='rewrite'?reply.draft:requested.text;
+      if(!intent || !['literal','reference','rewrite'].includes(mode) || requested.mode!==mode || reply.draft!==action.text ||
+         mode==='rewrite' && (fieldContext.current_answer?.key!==action?.key || !fieldContext.current_answer?.text?.trim()) ||
+         target?.key!==action?.key || action.text!==authorizedText || reply.actions.length!==1 || !field || !['text','textarea','email','tel','url'].includes(field.kind) ||
+         Object.keys(action).sort().join(',')!=='key,text,type' || action.type!=='replace_text' || typeof action.text!=='string' ||
+         !action.text.trim() || action.text.length>12000 || field.max_length!=null && action.text.length>field.max_length)
+        throw Error('Unsafe or ambiguous replacement refused. Your draft is preserved.');
+      lastDraft=action.text;await saveChat();
+      const outcome=await send({type:'chat-replace',context:fieldContext,action,request:text});
+      if(outcome.error || !outcome.ok)throw Error(outcome.error || 'Replacement could not be verified. Review the page.');
+      reply.reply='Replaced '+field.label+'. Please review the field.';
+      kind='receipt';
+    }
+    if(kind==='draft')lastDraft=reply.reply.length<=12000?reply.reply:undefined;
+    messages.push({role: "assistant", text: reply.reply, kind, time:Date.now()});await saveChat();element("chat-status").textContent = "";
+  } catch (error) { element("chat-input").value = text; renderMessages(); element("chat-status").textContent = error.message; }
   finally { chatBusy = false; renderMessages(); element("send").disabled = element("clear-chat").disabled = false; }
 }
 let pairingReady;
@@ -310,7 +371,7 @@ element("copy").onclick = () => navigator.clipboard.writeText(element("answer").
 element("fill-answer").onclick = () => perform({type: "fill-answer", key: source.key, value: element("answer").value, source:"AI", url:source.url, label:source.label}).catch(showError);
 element("send").onclick = chat;
 element("chat-input").onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); chat(); } };
-element("clear-chat").onclick = () => { messages = []; renderMessages(); element("chat-status").textContent = ""; };
+element("clear-chat").onclick = async () => { messages = [];lastDraft=undefined;await saveChat();renderMessages(); element("chat-status").textContent = ""; };
 chrome.runtime.onMessage.addListener(message => { if (message.type === "autofill-result") render(message.result); });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && tabId && changes.tabResults) render(changes.tabResults.newValue?.[tabId]);
@@ -318,7 +379,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.server || changes.key)) connection();
 });
 const initial=await chrome.storage.session.get(["lastResult","tabResults"]);
+try{chatURL=(tabId?await chrome.tabs.get(tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0])?.url;}catch{}
 render(tabId?initial.tabResults?.[tabId]:initial.lastResult); completedAnswers(); renderAnswer(); connection();
+loadChat();
 
 let runPaused = false;
 function renderRun(run = {}) {

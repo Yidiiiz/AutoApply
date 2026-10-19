@@ -116,3 +116,6 @@ Turning automatic capture off hides its feedback; manual Send remains available.
 There is no separate above-footer success line. These
 snapshots await the next active review session; they never wake a supervisor or
 start automatic code fixes. Local fixture evidence is in .tmp/review/t056/.
+
+
+T057: Hide legacy application status segments and Worker navigation from both layout and keyboard focus. Queue remains the default, and legacy hashes redirect to visible panels. Fixture screenshots at 1440px and 500px verify navigation and horizontal fit. Toolbar actions restore the sidebar rather than toggling it closed; minimized and dismissed states remain separate controls. Chat replacement requires an explicit user request and one eligible field, preserves the full draft, and shows success only after verified replacement. Narrow chat evidence is fixture-only; actual employer acceptance is pending review.

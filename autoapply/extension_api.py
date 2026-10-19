@@ -420,6 +420,10 @@ def resolve_answers(dashboard, payload):
                 result.append(dict(key=q.key, value=value, source='profile:contact.phone_device_type' if value else '',
                                    status='RESOLVED' if value else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'))
                 continue
+            if (re.search(r'^if yes.*(?:name|who).*referred', normalize(q.label))
+                    and profile.get('application_preferences', {}).get('referred_by_employee') is False):
+                result.append(dict(key=q.key, value='', source='profile:application_preferences.referred_by_employee', status='OPTIONAL_SKIP'))
+                continue
             if q.kind == 'file':
                 result.append(dict(key=q.key, value='cover_letter' if 'cover' in q.label.lower() else 'resume',
                                    source='file', status='FILE'))
@@ -602,7 +606,7 @@ def write(dashboard, payload):
     with dashboard.answers.mutex:
         facts = cv.profile_facts(dashboard.config.profile)
     result = dashboard.run_writing(dict(task='question_answer', profile=facts, job=dict(cv.job_context(job), canonical_url=job.get("canonical_url", "")),
-                                       question=question, instruction=instruction, previous=previous, limits=limits))
+                                       question=question, instruction=instruction, previous=previous, limits=limits, evidence_packet=cv.writing_evidence(job)))
     answer = _writing_result(result, 'answer')
     response = dict(answer=answer, words=len(answer.split()), chars=len(answer))
     warnings = [f'{key} limit exceeded ({response[key]}/{maximum})' for key, maximum in limits.items()
@@ -677,22 +681,123 @@ def skill_plan(dashboard, payload):
     return {key: list(value) for key, value in plan.items()}
 
 
+def chat_replacement_intent(text):
+    return (isinstance(text, str) and bool(re.match(
+        r'^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b', text.strip(), re.I))
+        and bool(re.search(r'\b(?:field|textarea|text box|cover letter|answer)\b', text, re.I))
+        and not re.search(r"\b(?:don.t|do not|never|cannot|can.t)\b", text, re.I))
+
+
+def chat_field_context(value):
+    if value is None:
+        return {'fields': [], 'current_key': None}
+    if not isinstance(value, dict) or not isinstance(value.get('fields'), list) or len(value['fields']) > 80:
+        raise SettingsRejected('Invalid field context')
+    if value.get('current_key') is not None and (not isinstance(value['current_key'], str) or len(value['current_key']) > 100):
+        raise SettingsRejected('Invalid current field key')
+    fields = []
+    for item in value['fields']:
+        if (not isinstance(item, dict) or not isinstance(item.get('kind'), str) or item.get('kind') not in {'text', 'textarea', 'email', 'tel', 'url'}
+                or any(not isinstance(item.get(k), str) or len(item[k]) > limit for k, limit in
+                       [('key', 100), ('label', 500), ('identity', 100)])
+                or item.get('max_length') is not None and (type(item['max_length']) is not int or item['max_length'] < 0)):
+            raise SettingsRejected('Invalid writable field')
+        fields.append({k: item.get(k) for k in ('key', 'label', 'kind', 'identity', 'max_length')})
+    if len({f['key'] for f in fields}) != len(fields):
+        raise SettingsRejected('Ambiguous field keys')
+    current_key = value.get('current_key')
+    if current_key is not None and current_key not in {f['key'] for f in fields}:
+        raise SettingsRejected('Invalid selected field')
+    result = dict(fields=fields, current_key=current_key)
+    answer = value.get('current_answer')
+    if answer is not None:
+        if (not isinstance(answer, dict) or answer.get('key') != current_key or current_key is None
+                or not isinstance(answer.get('text'), str) or len(answer['text']) > 12000):
+            raise SettingsRejected('Invalid selected answer')
+        result['current_answer'] = dict(key=current_key, text=answer['text'])
+    return result
+
+
+def chat_replacement_source(request):
+    literal = re.search(r"\b(?:with|to)\s+([\"'])(.+)\1\s*$", request, re.I | re.S)
+    if literal:
+        return 'literal', literal[2]
+    if re.search(r'\b(?:with|using)\s+(?:that|it|(?:the |this |that )?(?:draft|answer|text)(?: above)?|the above)\s*[.!]?$', request, re.I):
+        return 'reference', None
+    if re.search(r'\b(?:shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\bto (?:be|include|mention|remove|add)\b', request, re.I):
+        return 'rewrite', None
+    return None, None
+
+
+def chat_replacement(messages, context, *, last_draft=None, writer=None):
+    request = messages[-1]['text'] if messages[-1]['role'] == 'user' else ''
+    if not chat_replacement_intent(request):
+        return None
+    fields = context['fields']
+    if re.search(r'\b(?:current|focused|this)\s+(?:field|textarea|text box)\b', request, re.I):
+        candidates = [f for f in fields if f['key'] == context['current_key']]
+    else:
+        candidates = [f for f in fields if f['label'].strip() and f['label'].strip().casefold() in request.casefold()]
+        if not candidates and re.search(r'cover letter', request, re.I):
+            candidates = [f for f in fields if 'cover' in f['label'].casefold() and 'letter' in f['label'].casefold()]
+    if len(candidates) != 1:
+        return dict(reply='Select the text field on the page, then ask me to replace the current field with the draft.', kind='receipt')
+    field = candidates[0]
+    mode, draft = chat_replacement_source(request)
+    if mode == 'reference':
+        # Only explicitly identified drafts are paste candidates. Untyped legacy
+        # assistant messages may be receipts, errors or selection guidance.
+        draft = last_draft if last_draft is not None else next((m['text'] for m in reversed(messages[:-1])
+                    if m['role'] == 'assistant' and m.get('kind') == 'draft'), '')
+    elif mode == 'rewrite':
+        answer = context.get('current_answer')
+        if not answer or answer['key'] != field['key'] or not answer['text'].strip() or writer is None:
+            return dict(reply='Select the field containing the answer to rewrite, then retry. The field is unchanged.', kind='receipt')
+        draft = writer(field, answer['text'], request)
+    elif mode is None:
+        return dict(reply='What text should replace the field? Quote it, refer to the draft, or specify how to rewrite the current answer.', kind='receipt')
+    if not draft.strip() or len(draft) > 12000:
+        return dict(reply='Draft the answer first, then ask me to replace the selected field. Drafts must be at most 12000 characters.', kind='receipt')
+    if field['max_length'] is not None and len(draft) > field['max_length']:
+        return dict(reply='The draft exceeds this field limit. Shorten it before replacing the field.', kind='receipt')
+    return dict(reply='Replacement is ready for verification.', kind='receipt', replacement_mode=mode, draft=draft,
+                actions=[dict(type='replace_text', key=field['key'], text=draft)])
+
+
 def chat(dashboard, payload):
     messages = payload.get('messages')
     if not isinstance(messages, list) or not messages or any(
             not isinstance(item, dict) or item.get('role') not in ('user', 'assistant') or
-            not isinstance(item.get('text'), str) or not item['text'].strip() for item in messages):
+            not isinstance(item.get('text'), str) or not item['text'].strip() or
+            item.get('kind') not in (None, 'draft', 'receipt') for item in messages):
         raise SettingsRejected('messages must contain user or assistant text')
-    history = [dict(role=item['role'], text=item['text'][:2000]) for item in messages[-12:]]
-    dashboard._writing_settings()
+    history = [dict(role=item['role'], text=item['text'][:12000]) for item in messages[-12:]]
+    context = chat_field_context(payload.get('field_context'))
     job, _ = _writing_job(dashboard, payload)
+    last_draft = payload.get('last_draft')
+    if last_draft is not None and (not isinstance(last_draft, str) or not last_draft.strip() or len(last_draft) > 12000):
+        raise SettingsRejected('Invalid last draft reference')
+
+    def rewrite(field, previous, instruction):
+        maximum = min(field['max_length'] if field['max_length'] is not None else 12000, 12000)
+        response = write(dashboard, dict(payload, question=field['label'], previous=previous,
+                         instruction=instruction + f'\nUse at most {maximum} characters.'))
+        answer = response['answer']
+        if len(answer) > maximum or 'warning' in response or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]|```', answer):
+            raise SettingsRejected('The rewritten draft is invalid or exceeds the field limit. The field is unchanged; review and retry.')
+        return answer
+
+    replacement = chat_replacement(messages[-12:], context, last_draft=last_draft, writer=rewrite)
+    if replacement is not None:
+        return replacement
+    dashboard._writing_settings()
     if payload.get("use_job_description", True):
         dashboard.writing_job(job)
     job["description"] = (job.get("description") or "")[:6000]
     with dashboard.answers.mutex:
         facts = cv.profile_facts(dashboard.config.profile)
-    result = dashboard.run_writing(dict(task='chat', profile=facts, job=dict(cv.job_context(job), canonical_url=job.get("canonical_url", "")), messages=history))
-    return dict(reply=_writing_result(result, 'reply'))
+    result = dashboard.run_writing(dict(task='chat', profile=facts, job=dict(cv.job_context(job), canonical_url=job.get("canonical_url", "")), messages=history, field_context=context, evidence_packet=cv.writing_evidence(job)))
+    return dict(reply=_writing_result(result, 'reply'), kind='draft')
 
 
 def cover_letter(dashboard, payload):

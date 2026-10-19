@@ -10,7 +10,7 @@ LABELS = {
     "email": "contact.email", "email address": "contact.email",
     "phone": "contact.phone", "phone number": "contact.phone", "mobile phone": "contact.phone",
     "address": "contact.address", "street address": "contact.address",
-    "city": "contact.city", "state": "contact.state", "zip code": "contact.postal_code",
+    "city": "contact.city", "state": "contact.state", "state province": "contact.state", "zip code": "contact.postal_code",
     "postal code": "contact.postal_code", "country": "contact.country",
     "skills": "skills", "gender": "demographics.gender", "gender identity": "demographics.gender",
     "race": "demographics.race", "race ethnicity": "demographics.race",

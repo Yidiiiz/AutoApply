@@ -392,6 +392,32 @@ class AnswerResolver:
             return None
         if policy == 'DO_NOT_ANSWER':
             return None
+        from .question_keywords import current_immigration_status
+        citizen_options = [o for o in q.options if normalize(o) in {'u s citizen', 'us citizen', 'uscitizen', 'united states citizen'}]
+        citizenship_request = current_immigration_status(q.label) or bool(re.fullmatch(r'(?:are you (?:a )?)?(?:u s|us|united states) citizen(?:ship)?(?: status)?', normalize(q.label)))
+        if citizen_options and not citizenship_request:
+            return None
+        if current_immigration_status(q.label) or citizenship_request and citizen_options:
+            path = 'citizenship.us_citizen'
+            if fact(profile, path) is True and len(citizen_options) == 1:
+                return Answer(citizen_options[0], 'profile:' + path, evidence=[path],
+                              provenance={'rule': 'explicit-current-citizenship'})
+            return None
+        if (q.kind == 'checkbox' and q.required and len(q.options) <= 1
+                and re.fullmatch(r'(?:required )?allow us to process your personal information', normalize(q.label).strip())
+                and fact(profile, 'application_preferences.ordinary_policy_acknowledgement') is True):
+            return Answer(True,
+                          'profile:application_preferences.ordinary_policy_acknowledgement',
+                          evidence=['application_preferences.ordinary_policy_acknowledgement'])
+        if re.fullmatch(r'(?:were you referred(?: to .+)?(?: by (?:a |an )?(?:current )?employee)?|have you been referred by (?:a |an )?(?:current )?employee|did (?:a |an )?(?:current )?employee refer you(?: to .+)?|employee referral(?: yes no)?)', normalize(q.label)):
+            path = 'application_preferences.referred_by_employee'
+            value = fact(profile, path)
+            if isinstance(value, bool):
+                selected = fit_options('Yes' if value else 'No', q.options)
+                if selected is not None:
+                    return Answer(selected, 'profile:' + path, evidence=[path],
+                                  provenance={'rule': 'explicit-all-employer-referral'})
+            return None
         # A verified current-authorization fact has one fixed representation.
         # Its label must independently match, even if supplied metadata is stale.
         from .question_keywords import match, authorization_answer

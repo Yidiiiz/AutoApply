@@ -302,7 +302,7 @@ def extension_server():
                     gates[name].clear()
                 for name in payload.get("release", []):
                     gates[name].set()
-                run.update(auto_cover=payload.get("auto_cover", run.get("auto_cover", False)))
+                run.update(auto_cover=payload.get("auto_cover", run.get("auto_cover", False)), t057_chat=payload.get("t057_chat",run.get("t057_chat",False)))
                 self.response(200, {"ok": True})
             elif self.path == "/ext/fixture-start":
                 base = f"http://127.0.0.1:{self.server.server_port}"
@@ -360,7 +360,19 @@ def extension_server():
                 self.response(200, {"ok": True})
             elif self.path == "/ext/chat":
                 gates["chat"].wait(15)
-                self.response(200, {"reply": "Fixture chat reply."})
+                if run.get('t057_chat'):
+                    from autoapply.extension_api import chat_replacement, chat_field_context
+                    replacement = chat_replacement(payload['messages'],chat_field_context(payload.get('field_context')),
+                        last_draft=payload.get('last_draft'), writer=lambda field,previous,instruction: 'A concise synthetic answer.')
+                    if payload['messages'][-1]['text'] == 'ordinary action':
+                        replacement=dict(reply='Unsafe',actions=[dict(type='replace_text',key=payload['field_context']['current_key'],text='bad')])
+                    if payload['messages'][-1]['text'] == 'fake Submit':
+                        replacement = dict(reply='Unsafe',actions=[dict(type='submit',key='letter',text='bad')])
+                    if payload['messages'][-1]['text'] == 'update Cover letter to be more concise but mismatch' and replacement.get('actions'):
+                        replacement['actions'][0]['text']='Unrelated unvalidated output'
+                    self.response(200,replacement or dict(reply=('A grounded synthetic draft. '*150).strip()))
+                else:
+                    self.response(200, {"reply": "Fixture chat reply."})
             elif self.path == "/ext/cover-letter":
                 gates["cover"].wait(15)
                 if "answers" not in payload and not run.get("auto_cover"):
@@ -769,7 +781,7 @@ def test_sidepanel_answers_cover_helper_and_chat(loaded_extension, extension_ser
     panel.locator("#use-job-description").uncheck()
     panel.locator("#chat-input").fill("Help without job context")
     panel.locator("#send").click()
-    expect(panel.locator(".bubble.assistant")).to_have_count(2)
+    expect(panel.locator(".bubble.assistant:not(.typing)")).to_have_count(2)
     disabled_chat = [payload for path, _, payload in requests if path == "/ext/chat"][-1]
     assert disabled_chat["use_job_description"] is False and "description" not in disabled_chat["page"]
     expect(panel.locator(".bubble.user p").first).to_have_text("How can I improve this answer?")
@@ -1019,6 +1031,8 @@ def test_workday_spa_refills_without_navigation(loaded_extension, extension_serv
     expect(page.locator('#year')).to_have_value('2024')
     expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
     expect(page.locator('#filename')).to_have_text('fixture-resume.pdf')
+    assert page.locator('#resume').evaluate('e => [e.files.length, e.files[0].name, e.files[0].type]') == [1, 'fixture-resume.pdf', 'application/pdf']
+    assert page.locator('#resume').evaluate('async e => Array.from(new Uint8Array(await e.files[0].arrayBuffer()))') == list(RESUME)
     expect(panel.locator('#autofill .fill-count')).to_contain_text('fields filled')
     expect(panel.locator('#company')).to_have_text('Run Company' if run_tab else 'Fixture Company')
     answers = [p for endpoint, _, p in requests if endpoint == '/ext/answers']
@@ -2879,3 +2893,272 @@ def test_t054_manifest_moon_icons_are_vector_derived():
         data=(ROOT/'extension'/manifest['icons'][str(size)]).read_bytes()
         assert data[:8]==b'\x89PNG\r\n\x1a\n'
         assert struct.unpack('>II',data[16:24])==(size,size)
+
+
+
+def t057_page(loaded_extension, extension_server, fixture):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server,key=KEY))
+    page = context.new_page()
+    page.route('**/t057-*',lambda route:route.fulfill(path=str(FIXTURES/fixture),content_type='text/html'))
+    page.goto(server+'/'+fixture)
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id',page.url)
+    page.wait_for_timeout(200)
+    return page,worker,tab_id,requests
+
+
+def test_t057_snapshot_jazzhr_fields_and_attach(loaded_extension,extension_server):
+    page,worker,tab_id,requests=t057_page(loaded_extension,extension_server,'t057-jazzhr.html')
+    page.evaluate("""() => {
+      window.clickedLinks=[];window.submissions=0;
+      document.addEventListener('click',e=>{const a=e.target.closest('a');if(a)clickedLinks.push(a.id);});
+      document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();submissions++;});
+    }""")
+    result=worker.evaluate("""async id=>{const [r]=await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+      const api=autoApplyContent,scan=await api.scan();
+      const values={'Address':'12 Example Road','City':'Example City','State/Province':'Maryland','Postal code':'20999','Permanent Address':'34 Home Road',
+        'Were you referred to Healthpeak by a current employee?':'No','Do you currently, or will you in the future require sponsorship to work in the US?':'No'};
+      const answers=scan.fields.map(f=>({key:f.key,status:f.kind==='file'?'FILE':values[f.label]?'RESOLVED':'OPTIONAL_SKIP',value:f.kind==='file'?'resume':values[f.label]}));
+      return {scan,summary:await api.fill(answers,{resume:{base64:btoa('%PDF fixture'),filename:'synthetic-resume.pdf',mime:'application/pdf'}})};
+    }});return r.result;}""",tab_id)
+    fields=result['scan']['fields']
+    assert [f['label'] for f in fields[:4]] == ['Address','City','State/Province','Postal code']
+    groups=[f for f in fields if f['kind']=='checkbox']
+    assert len(groups)==2 and all(f['options']==['Yes','No'] and not f['multiple'] for f in groups)
+    assert result['summary']['filled']==8, result['summary']
+    assert page.locator('#resumator-checkbox-2936528-2').is_checked()
+    assert not page.locator('#resumator-checkbox-2936528-1').is_checked()
+    assert page.locator('#resumator-resume-value').evaluate('e=>e.files[0].name')=='synthetic-resume.pdf'
+    expect(page.locator('#resumator-resume-upload-wrapper')).to_be_visible()
+    assert page.locator('#resumator-resume-value').evaluate('async e=>await e.files[0].text()')=='%PDF fixture'
+    assert page.evaluate('clickedLinks')==['resumator-choose-upload']
+    assert page.evaluate('submissions')==0
+    assert page.locator('#resumator-questionnaire-q2936531').input_value()==''
+    assert all('captcha' not in f['label'].lower() for f in fields)
+    assert not any(path=='/ext/applied' for path,_,_ in requests)
+
+
+@pytest.mark.parametrize('reset',[False,True])
+def test_t057_pinpoint_settled_phone_labels_consent(loaded_extension,extension_server,reset):
+    page,worker,tab_id,_=t057_page(loaded_extension,extension_server,'t057-pinpoint.html')
+    page.evaluate("""reset=>{document.querySelectorAll('[id^=\"answer-label-\"]').forEach(el=>el.textContent=el.textContent.replace(/  yes$/, '    YeS  ').replace(/  no$/, '    nO  '));document.getElementById('application_form_application_phone').addEventListener('blur',event=>setTimeout(()=>{
+      const clone=event.target.cloneNode();event.target.replaceWith(clone);clone.value=reset?'':'+1 202-555-0199';
+    },220),{once:true});}""",reset)
+    value=worker.evaluate("""async id=>{const [r]=await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+      const scan=await autoApplyContent.scan();const answers=scan.fields.filter(f=>['tel','radio','checkbox'].includes(f.kind)).map(f=>({key:f.key,status:'RESOLVED',value:f.kind==='tel'?'+12025550199':f.kind==='checkbox'?true:'Yes'}));
+      return {fields:scan.fields,summary:await autoApplyContent.fill(answers)};
+    }});return r.result;}""",tab_id)
+    radios=[f for f in value['fields'] if f['kind']=='radio']
+    assert [f['label'] for f in radios]==['Are you within a commutable distance or willing to relocate?','Are you legally authorized to work in the United States as per the below ITAR requirements?']
+    assert all(f['options']==['Yes','No'] for f in radios)
+    assert value['summary']['filled']==(3 if reset else 4),value['summary']
+    assert bool(value['summary']['needs_input']) is reset
+    expect(page.locator('#application_form_application_phone')).to_have_value('' if reset else '+1 202-555-0199')
+    expect(page.locator('#application_process_information')).to_be_checked()
+    expect(page.locator('#identity')).to_have_value('')
+
+
+def test_t057_actual_chat_full_replacement_sidebar_restore(loaded_extension,extension_server):
+    page,worker,tab_id,requests=t057_page(loaded_extension,extension_server,'t057-pinpoint.html')
+    fixture_delay(worker,t057_chat=True)
+    # Simulate a page opened before extension reload: reinjection must be idempotent.
+    worker.evaluate("""async id=>{await chrome.scripting.executeScript({target:{tabId:id},func:()=>{delete globalThis.autoApplyContent;}});await autoApplySidebar(id);} """,tab_id)
+    panel=page.frame_locator('#autoapply-sidebar iframe')
+    panel.locator('#tab-chat').click();panel.locator('#subtab-chat').click()
+    page.locator('#letter').focus()
+    page.evaluate("""()=>{document.getElementById('identity').value='OTHER PRIVATE ANSWER';for(const type of ['password','hidden','file']){const input=document.createElement('input');input.type=type;input.id=type+'-private';if(type!=='file')input.value='PRIVATE '+type;document.querySelector('form').append(input);}const captcha=document.createElement('textarea');captcha.id='captcha-private';captcha.value='PRIVATE CAPTCHA';document.querySelector('form').append(captcha);}""")
+    panel.locator('#chat-input').fill('Refine the cover letter already in the field');panel.locator('#send').click()
+    draft='A grounded synthetic draft. '*150
+    expect(panel.locator('.bubble.assistant p')).to_have_text(draft.strip())
+    sent=next(payload for path,_,payload in requests if path=='/ext/chat')
+    assert sent['field_context']['current_answer']['text']=='Existing text'
+    assert sent['field_context']['current_answer']['key']==sent['field_context']['current_key']
+    assert 'PRIVATE' not in json.dumps(sent) and all('value' not in f for f in sent['field_context']['fields'])
+    panel.locator('#chat-input').fill('replace current field with that');panel.locator('#send').click()
+    expect(page.locator('#letter')).to_have_value(draft.strip())
+    expect(panel.locator('.bubble.assistant p').last).to_contain_text('Replaced Cover letter')
+    # Receipts never become drafts, including after more than a history window
+    # of retries and a real MV3 panel reload.
+    for index in range(7):
+        panel.locator('#chat-input').fill('replace current field with that');panel.locator('#send').click()
+        expect(panel.locator('#send')).to_be_enabled()
+        expect(page.locator('#letter')).to_have_value(draft.strip())
+    panel.locator('body').evaluate('()=>location.reload()')
+    panel.locator('#tab-chat').click();panel.locator('#subtab-chat').click()
+    panel.locator('#chat-input').fill('replace Cover letter field with that');panel.locator('#send').click()
+    expect(panel.locator('#send')).to_be_enabled()
+    expect(page.locator('#letter')).to_have_value(draft.strip())
+    assert [payload for path,_,payload in requests if path=='/ext/chat'][-1]['last_draft']==draft.strip()
+    page.set_viewport_size(dict(width=360,height=700))
+    output=ROOT/'.tmp/review/t057';output.mkdir(parents=True,exist_ok=True)
+    assert panel.locator('body').evaluate('e=>e.scrollWidth<=innerWidth')
+    panel.locator('.bubble.assistant p').last.scroll_into_view_if_needed()
+    page.screenshot(path=str(output/'chat-replacement-360.png'))
+    old_context=panel.locator('body').evaluate('async()=>chrome.runtime.sendMessage({type:"chat-context",tabId:Number(new URL(location.href).searchParams.get("tabId"))})')
+    assert old_context['current_answer']['text']==draft.strip() and all('value' not in field for field in old_context['fields'])
+
+    panel.locator('#chat-input').fill('ordinary action');panel.locator('#send').click()
+    expect(panel.locator('#chat-status')).to_contain_text('refused')
+    expect(page.locator('#letter')).to_have_value(draft.strip())
+    panel.locator('#chat-input').fill('fake Submit');panel.locator('#send').click()
+    expect(panel.locator('#chat-status')).to_contain_text('refused')
+    expect(page.locator('#letter')).to_have_value(draft.strip())
+    assert not any(path=='/ext/applied' for path,_,_ in requests)
+    for state in ['open','minimized','closed']:
+        worker.evaluate('async args=>{await autoApplySidebar(args.id,args.state);await autoApplySidebar(args.id,"open");}',dict(id=tab_id,state=state))
+        expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
+    assert page.locator('#autoapply-sidebar').count()==1
+    page.goto(page.url+'?next=1')
+    expect(page.locator('#autoapply-sidebar iframe')).to_be_visible()
+    rejected=panel.locator('body').evaluate('''async (body,ctx)=>chrome.runtime.sendMessage({type:'chat-replace',tabId:ctx.tabId,context:ctx,request:'replace current field with that',action:{type:'replace_text',key:ctx.current_key,text:'bad'}})''',old_context)
+    assert rejected.get('error') and page.locator('#letter').input_value()=='Existing text'
+    panel.locator('#tab-chat').click();panel.locator('#subtab-chat').click()
+    panel.locator('#chat-input').fill('replace current field with that');panel.locator('#send').click()
+    expect(panel.locator('.bubble.assistant p').last).to_contain_text('Select the text field')
+    expect(page.locator('#letter')).to_have_value('Existing text')
+    # A stale document and a stale field identity both refuse without changing the form.
+    context=worker.evaluate('async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>autoApplyContent.chatContext()}))[0].result',tab_id)
+    context['document']='old-document'
+    refused=worker.evaluate("""async args=>{const [r]=await chrome.scripting.executeScript({target:{tabId:args.id},func:async ctx=>{try{await autoApplyContent.chatReplace(ctx,{type:'replace_text',key:ctx.fields.at(-1).key,text:'bad'});return false;}catch{return true;}},args:[args.context]});return r.result;}""",dict(id=tab_id,context=context))
+    assert refused
+
+
+
+def test_t057_actual_chat_rewrite_and_application_isolation(loaded_extension,extension_server):
+    page,worker,tab_id,requests=t057_page(loaded_extension,extension_server,'t057-pinpoint.html')
+    fixture_delay(worker,t057_chat=True)
+    worker.evaluate('id=>autoApplySidebar(id)',tab_id)
+    panel=page.frame_locator('#autoapply-sidebar iframe')
+    panel.locator('#tab-chat').click();panel.locator('#subtab-chat').click()
+    page.locator('#letter').focus()
+    panel.locator('#chat-input').fill('replace current field with a shorter version');panel.locator('#send').click()
+    expect(page.locator('#letter')).to_have_value('A concise synthetic answer.')
+    expect(panel.locator('.bubble.assistant p').last).to_contain_text('Replaced Cover letter')
+    sent=[payload for path,_,payload in requests if path=='/ext/chat'][-1]
+    assert sent['field_context']['current_answer']['text']=='Existing text'
+    panel.locator('#chat-input').fill('update Cover letter to be more concise but mismatch');panel.locator('#send').click()
+    expect(panel.locator('#chat-status')).to_contain_text('refused')
+    expect(page.locator('#letter')).to_have_value('A concise synthetic answer.')
+    for quote in ['"', "'"]:
+        panel.locator('#chat-input').fill('replace Cover letter with '+quote+'No'+quote);panel.locator('#send').click()
+        expect(panel.locator('#send')).to_be_enabled()
+        expect(page.locator('#letter')).to_have_value('No')
+    # A different application in the same panel cannot reference this draft.
+    worker.evaluate('''async args=>{const {tabResults={}}=await chrome.storage.session.get('tabResults');
+      tabResults[args.id]={tabId:args.id,url:args.url,matched:{application_id:987,company:'Another fixture'}};
+      await chrome.storage.session.set({tabResults});}''',dict(id=tab_id,url=page.url))
+    expect(panel.locator('#company')).to_have_text('Another fixture')
+    expect(panel.locator('.bubble')).to_have_count(0)
+    panel.locator('#chat-input').fill('replace Cover letter with that');panel.locator('#send').click()
+    expect(panel.locator('#send')).to_be_enabled()
+    expect(page.locator('#letter')).to_have_value('No')
+    sent=[payload for path,_,payload in requests if path=='/ext/chat'][-1]
+    assert 'last_draft' not in sent and not any(m['role']=='assistant' for m in sent['messages'])
+    expect(panel.locator('.bubble.assistant p').last).to_contain_text('Draft the answer first')
+
+
+def test_t057_phone_country_conflict_never_overwrites(loaded_extension,extension_server):
+    page,worker,tab_id,_=t057_page(loaded_extension,extension_server,'t057-pinpoint.html')
+    page.locator('.selected-flag').evaluate("e=>e.title='France: +33'")
+    value=worker.evaluate("""async id=>{const [r]=await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+      const scan=await autoApplyContent.scan(),field=scan.fields.find(f=>f.kind==='tel');
+      return autoApplyContent.fill([{key:field.key,status:'RESOLVED',value:'+12025550199'}]);
+    }});return r.result;}""",tab_id)
+    assert value['filled']==0 and value['needs_input']==['Phone']
+    expect(page.locator('#application_form_application_phone')).to_have_value('')
+    assert page.locator('.selected-flag').get_attribute('title')=='France: +33'
+
+
+
+def test_t057_toolbar_entrypoint_missing_script_and_restricted_pages(tmp_path):
+    import shutil
+    import subprocess
+    node=shutil.which('node')
+    if not node:pytest.skip('Node unavailable')
+    source=(ROOT/'extension/background.js').read_text(encoding='utf-8')
+    code=source[source.index('async function showSidebar('):source.index('globalThis.autoApplySidebar=')]
+    script=r"""
+const assert=require('node:assert/strict');let click,updated,injections=0,title='',badge='',state='closed';
+const session={},tab={id:1,url:'https://example.test/apply'},delay=async()=>{};
+const chrome={tabs:{get:async()=>tab,query:async()=>[tab],onUpdated:{addListener:fn=>updated=fn}},
+ storage:{session:{get:async()=>session,set:async value=>Object.assign(session,value)}},
+ action:{onClicked:{addListener:fn=>click=fn},setBadgeText:async value=>badge=value.text,setTitle:async value=>title=value.title},
+ scripting:{executeScript:async spec=>{if(spec.files){injections++;globalThis.autoApplyContent={sidebar:mode=>state=mode};return [];}
+ return [{result:await spec.func(...(spec.args||[]))}];}}};
+const console={error:()=>{}};
+"""+code+r"""
+(async()=>{
+ await click(tab);assert.equal(state,'open');assert.equal(injections,1);
+ for(const previous of ['open','closed','minimized']){state=previous;await click(tab);assert.equal(state,'open');}
+ assert.equal(injections,1);assert.equal(session.sidebarTabs[1],'open');
+ tab.url='chrome://settings/';await click(tab);assert.equal(badge,'!');assert.match(title,/HTTP or HTTPS/);
+ tab.url='https://example.test/next';session.sidebarTabs[1]='minimized';updated(1,{status:'complete'});
+ for(let i=0;i<10;i++)await Promise.resolve();assert.equal(state,'minimized');
+})().catch(error=>{process.stderr.write(String(error));process.exitCode=1;});
+"""
+    path=tmp_path/'toolbar.js';path.write_text(script,encoding='utf-8')
+    result=subprocess.run([node,str(path)],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
+
+def test_t057_content_initialization_waits_once_for_document(tmp_path):
+    import subprocess
+    source=(ROOT/'extension/content.js').read_text(encoding='utf-8')
+    prefix=source[:source.index('  let nextKey =')]
+    # Exercise the shipped initialization guard before installing DOM-dependent handlers.
+    probe=prefix+"initializations++;globalThis.autoApplyContent={};globalThis[singleton]=globalThis.autoApplyContent;})();"
+    script="const assert=require('node:assert/strict'),vm=require('node:vm');\n"
+    script+="const callbacks=[],context={initializations:0,document:{body:null,addEventListener:(name,fn)=>callbacks.push(fn)}};vm.createContext(context);\n"
+    script+="const code="+json.dumps(probe)+";vm.runInContext(code,context);vm.runInContext(code,context);assert.equal(callbacks.length,1);\n"
+    script+="context.document.body={};callbacks[0]();assert.equal(context.initializations,1);vm.runInContext(code,context);assert.equal(context.initializations,1);\n"
+    path=tmp_path/'initialization.js';path.write_text(script,encoding='utf-8')
+    value=subprocess.run(['node',str(path)],capture_output=True,text=True,timeout=15)
+    assert value.returncode==0,value.stderr
+
+
+
+def test_t057_chat_user_edit_and_occupied_referral(loaded_extension, extension_server):
+    page,worker,tab_id,_=t057_page(loaded_extension,extension_server,'t057-pinpoint.html')
+    worker.evaluate('id=>autoApplySidebar(id)',tab_id)
+    panel=page.frame_locator('#autoapply-sidebar iframe')
+    page.locator('#letter').focus()
+    initial='A'*12500
+    page.locator('#letter').fill(initial)
+    ctx=panel.locator('body').evaluate('async (body,id)=>chrome.runtime.sendMessage({type:"chat-context",tabId:id,request:"Cover letter"})',tab_id)
+    assert ctx['current_key'] and ctx.get('current_answer'), ctx
+    assert ctx['current_answer']['text']==initial[:12000]
+    page.locator('#letter').fill(initial+'User typed while waiting')
+    rejected=panel.locator('body').evaluate("async (body,ctx)=>chrome.runtime.sendMessage({type:'chat-replace',tabId:ctx.tabId,context:ctx,request:'replace Cover letter field with that',action:{type:'replace_text',key:ctx.current_key,text:'old draft'}})",ctx)
+    assert 'while waiting' in rejected['error'].lower(), json.dumps(dict(rejected=rejected,context=ctx,actual_url=page.url))
+    expect(page.locator('#letter')).to_have_value(initial+'User typed while waiting')
+    page.evaluate("()=>{const f=document.createElement('fieldset');f.innerHTML='<legend>Employee referral</legend><label><input type=radio name=ref value=Yes checked>Yes</label><label><input type=radio name=ref value=No>No</label>';document.querySelector('form').append(f);}")
+    summary=worker.evaluate("async id=>{const [r]=await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{const s=await autoApplyContent.scan(),f=s.fields.find(f=>f.label==='Employee referral');return autoApplyContent.fill([{key:f.key,status:'RESOLVED',value:'No'}]);}});return r.result;}",tab_id)
+    expect(page.locator('input[name=ref][value=Yes]')).to_be_checked()
+    assert summary['filled']==0
+
+
+def test_t057_chat_busy_mutation_guards(tmp_path):
+    import subprocess
+    source=(ROOT/'extension/background.js').read_text(encoding='utf-8')
+    code=source[source.index('function chatReplacementIntent('):source.index('  if (message.type === "page-context")')]
+    # Execute the shipped action branch with synthetic Chrome APIs and busy maps.
+    code += 'throw Error("unexpected branch");}'
+    script="const assert=require('node:assert/strict');let running=false,edits=0,reads=0;const writingTasks=new Map(),activeResults=new Map(),tab={id:1,url:'https://example.test/apply'};const showSidebar=async()=>{};const chrome={tabs:{get:async()=>tab},scripting:{executeScript:async spec=>{reads++;return [{result:{fields:[],document:'doc'},documentId:'doc'}];}}};\n"+code+"""
+(async()=>{
+const ctx={tabId:1,url:tab.url,document:'doc',documentId:'doc',fields:[{key:'k',label:'Cover letter',kind:'textarea',max_length:null}],current_key:'k'};
+const message={type:'chat-replace',tabId:1,context:ctx,request:'replace current field with that',action:{type:'replace_text',key:'k',text:'draft'}};
+for(const mode of ['autofill','skills','writing']){
+ running=mode==='autofill';skillsRunning=mode==='skills';if(mode==='writing')writingTasks.set(1,Promise.resolve());
+ await assert.rejects(()=>action(message),/busy.*retry/i);assert.equal(reads,0);
+ const context=await action({type:'chat-context',tabId:1});assert.equal(context.tabId,1);assert.equal(reads,1);reads=0;
+ running=false;skillsRunning=false;writingTasks.clear();
+}
+// A failed task removed by the existing finally cleanup does not keep the lock.
+await assert.rejects(()=>action({...message,request:'ordinary chat'}),/not authorized/);assert.equal(reads,0);
+})().catch(error=>{process.stderr.write(String(error));process.exitCode=1;});
+"""
+    path=tmp_path/'busy.js';path.write_text(script,encoding='utf-8')
+    result=subprocess.run(['node',str(path)],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr

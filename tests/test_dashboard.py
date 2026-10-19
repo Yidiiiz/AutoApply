@@ -1050,7 +1050,7 @@ def test_page_readable_timeouts_and_friendly_list_names(http_dashboard):
     assert "abort.abort(new DOMException('Request timed out','TimeoutError'))" in page
     assert "options.method==='GET'?30000:10000" in page
     assert "priority:'Queue','needs-you':'Needs you',failed:'Failed',applied:'Applied',run:'Status'" in page
-    assert "notify(listNames[id]+': '+requestMessage(e),true)" in page
+    assert "notify(listNames[id]+': '+requestMessage(e),true,id)" in page
     assert "if(!background)throw e;return request(path)" in page
     assert 'headings[id][0]' not in page and 'Rank:' not in page
 
@@ -1060,12 +1060,13 @@ def test_javascript_timeout_and_quiet_background_retry(tmp_path):
     if not executable:
         pytest.skip('Node is unavailable for offline JavaScript verification')
     request_code = PAGE[PAGE.index('async function request('):PAGE.index('function post(')]
-    list_code = PAGE[PAGE.index('const loads={}'):PAGE.index('let toastTimer')]
+    list_code = PAGE[PAGE.index('const loads={},listRecovery={};'):PAGE.index('let toastTimer')]
     script = r'''
 const assert=require('node:assert/strict');
 let timer,timeout,revision=0,messages=[];
 const setTimeout=(fn,ms)=>{timer=fn;timeout=ms;},clearTimeout=()=>{};
-const notify=message=>messages.push(message);
+const notice={dataset:{},hidden:true};const document={getElementById:()=>notice};
+const notify=(message,error,owner='action')=>{messages.push(message);notice.dataset.owner=owner;notice.hidden=false;};
 let fetch=(path,{signal})=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason)));
 ''' + request_code + list_code + r'''
 (async()=>{
@@ -2074,7 +2075,7 @@ renderManual({applications:sample.slice(0,7)});renderFailed({applications:sample
 assert.equal(document.getElementById('count-applications').textContent,'7');assert.equal(document.getElementById('count-failed').textContent,'4');assert.equal(document.getElementById('count-applied').textContent,'7');
 const excluded=document.getElementById('not-eligible');assert.equal(excluded._head.children.length,4);excluded._head.children[1].children[0].click();assert.equal(excluded._head.children[1].attributes['aria-sort'],'ascending');
 document.getElementById('main').scrollTop=100;selectTab('applications');assert.equal(document.getElementById('main').scrollTop,0);
-for(const id of ['needs-you','failed','applied']){document.getElementById('segment-'+id).click();assert.equal(applicationSegment,id);assert.equal(storage.get('autoapply.applicationSegment'),id);assert.equal(document.getElementById('panel-'+id).hidden,false);assert.equal(document.getElementById('segment-'+id).attributes['aria-pressed'],'true');}
+for(const id of ['needs-you','failed','applied']){selectTab(id);assert.equal(applicationSegment,'applied');assert.equal(storage.get('autoapply.applicationSegment'),'applied');assert.equal(document.getElementById('panel-applied').hidden,false);assert.equal(document.getElementById('segment-'+id).hidden,true);}
 // Persisted preferences load safely, including unavailable browser storage.
 """
     path = tmp_path / 'pagination.js'
@@ -2082,7 +2083,7 @@ for(const id of ['needs-you','failed','applied']){document.getElementById('segme
     result = subprocess.run([executable, str(path)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
     for seed, expected in [
-        ("storage.set('autoapply.perPage','100');storage.set('autoapply.sort.priority',JSON.stringify({key:'ats',direction:'descending'}));storage.set('autoapply.applicationSegment','failed');", "assert.equal(perPage,100);assert.equal(sorts.priority.key,'ats');assert.equal(applicationSegment,'failed');"),
+        ("storage.set('autoapply.perPage','100');storage.set('autoapply.sort.priority',JSON.stringify({key:'ats',direction:'descending'}));storage.set('autoapply.applicationSegment','failed');", "assert.equal(perPage,100);assert.equal(sorts.priority.key,'ats');assert.equal(applicationSegment,'applied');"),
         ("storage.set('autoapply.perPage','3.5');storage.set('autoapply.sort.priority','invalid');", "assert.equal(perPage,50);assert.equal(sorts.priority.key,'rank');"),
         ("localStorage.getItem=()=>{throw Error('denied');};localStorage.setItem=()=>{throw Error('denied');};", "assert.equal(perPage,50);render({rows:[],sweep:{}});selectSegment('applied');"),
     ]:
@@ -2313,7 +2314,12 @@ def test_t051_dashboard_screenshots(http_dashboard, config, db, listing):
                     expect(gear).to_be_focused()
                     expect(gear).to_have_attribute('aria-selected','true')
                     page.locator('#tab-applications').click()
-                    page.locator('#segment-applied').click()
+                    expect(page.locator('#tab-applications')).to_have_attribute('aria-selected','true')
+                    expect(page.locator('#panel-applied')).to_be_visible()
+                    expect(page.locator('#applied')).to_be_visible()
+                    expect(page.locator('#segment-applied')).to_have_attribute('aria-pressed','true')
+                    for selector in ('.application-switch','#segment-needs-you','#segment-failed','#segment-applied','#panel-needs-you','#panel-failed','#tab-run','#worker-status'):
+                        expect(page.locator(selector)).to_be_hidden()
                     disabled=page.locator('#applied .applied-check input').first
                     expect(disabled).to_be_checked()
                     expect(disabled).to_be_disabled()
@@ -2510,3 +2516,90 @@ def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing)
             assert page.evaluate('cspViolations') == [] and not errors
         finally:
             browser.close()
+
+
+
+def test_t057_queue_continues_after_repeated_timeouts_and_resource_ownership(tmp_path):
+    executable=shutil.which('node')
+    if not executable: pytest.skip('Node unavailable')
+    code=PAGE[PAGE.index('async function request('):PAGE.index('function post(')]
+    code+=PAGE[PAGE.index('const loads={},listRecovery={};'):PAGE.index('async function loadManual')]
+    script=r"""
+const assert=require('node:assert/strict');
+let revision=0,now=0,calls=0,resolveHeld;
+Date.now=()=>now;
+const timers=new Map();let nextTimer=0;
+const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay,due:now+delay});return id;},clearTimeout=id=>timers.delete(id);
+const notice={dataset:{},hidden:true},message={textContent:''};
+const document={getElementById:()=>notice};
+const notify=(text,error,owner='action')=>{message.textContent=text;notice.dataset.owner=owner;notice.hidden=false;};
+let fetch=(path,{signal})=>{calls++;return new Promise((resolve,reject)=>{resolveHeld=data=>resolve({ok:true,json:async()=>data});signal.addEventListener('abort',()=>reject(signal.reason));});};
+const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+async function fire(at){now=at;const entry=[...timers.entries()].find(([id,t])=>t.due===at);assert.ok(entry,'missing timer '+at);timers.delete(entry[0]);entry[1].fn();await flush();}
+"""+code+r"""
+(async()=>{
+ let rendered=[];
+ const cold=loadList('priority','/api/priority',data=>rendered.push(data));
+ const overlap=loadList('priority','/api/priority',()=>assert.fail('duplicate render'));
+ assert.equal(calls,1);await fire(30000);assert.equal(calls,2);await fire(60000);
+ assert.equal(await cold,false);assert.equal(await overlap,false);
+ assert.equal(notice.hidden,false);assert.equal(notice.dataset.owner,'priority');
+ assert.equal(timers.size,1);assert.equal([...timers.values()][0].delay,5000);
+ await loadList('priority','/api/priority',()=>assert.fail('backoff bypassed'));assert.equal(calls,2);
+ await fire(65000);assert.equal(calls,3);await fire(95000);assert.equal(calls,4);await fire(125000);
+ assert.equal(timers.size,1);assert.equal([...timers.values()][0].delay,10000);
+ await fire(135000);assert.equal(calls,5);
+ const final=loadList('priority','/api/priority',()=>assert.fail('duplicate render'));
+ assert.equal(calls,5);resolveHeld({rows:[7]});await final;
+ assert.deepEqual(rendered,[{rows:[7]}]);assert.equal(notice.hidden,true);assert.equal(timers.size,0);
+ notify('Authentication failed',true);
+ request=async()=>({rows:[8]});await loadList('priority','/api/priority',data=>rendered.push(data));
+ assert.equal(notice.hidden,false);assert.equal(message.textContent,'Authentication failed');
+ // A persisted mutation revision invalidates a held response; the next retry is still scheduled.
+ request=()=>new Promise(resolve=>resolveHeld=resolve);const stale=loadList('priority','/api/priority',()=>assert.fail('stale rendered'));
+ revision++;resolveHeld({rows:[9]});assert.equal(await stale,false);assert.equal(timers.size,1);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    path=tmp_path/'t057-recovery.js';path.write_text(script,encoding='utf-8')
+    result=subprocess.run([executable,str(path)],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
+@pytest.mark.browser
+def test_t057_applied_queue_navigation_screenshots(http_dashboard,config,db,listing):
+    from playwright.sync_api import sync_playwright,expect
+    queue(db,config,listing,3)
+    server,_=http_dashboard
+    output=Path('.tmp/review/t057');output.mkdir(parents=True,exist_ok=True)
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(channel='chromium',headless=True)
+        try:
+            page=browser.new_page(viewport=dict(width=1440,height=900))
+            errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+            def respond(route):
+                incoming=route.request
+                if not incoming.url.startswith('http://127.0.0.1:8765/'):
+                    route.abort();return
+                status,body,headers=request(server,incoming.method,incoming.url.removeprefix('http://127.0.0.1:8765'),incoming.all_headers(),incoming.post_data)
+                route.fulfill(status=status,body=body if isinstance(body,(str,bytes)) else json.dumps(body),headers=headers)
+            page.route('**/*',respond)
+            page.goto('http://127.0.0.1:8765/')
+            expect(page.locator('#tab-priority')).to_have_attribute('aria-selected','true')
+            expect(page.locator('#tab-run')).to_be_hidden();expect(page.locator('#worker-status')).to_be_hidden()
+            expect(page.locator('#rows .item')).to_have_count(3)
+            for old in ['needs-you','failed','run']:
+                page.evaluate('hash=>location.hash=hash',old)
+                expect(page.locator('#tab-priority' if old=='run' else '#tab-applications')).to_have_attribute('aria-selected','true')
+                assert page.evaluate('location.hash')==('#priority' if old=='run' else '#applications')
+            for width in [1440,500]:
+                page.set_viewport_size(dict(width=width,height=900))
+                for tab in ['priority','applications']:
+                    page.locator('#tab-'+tab).click()
+                    expect(page.locator('#tab-'+tab)).to_have_attribute('aria-selected','true')
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    assert page.locator('main').evaluate('e=>e.scrollWidth<=e.clientWidth')
+                    page.screenshot(path=str(output/f'dashboard-{tab}-{width}.png'))
+            expect(page.locator('#panel-applied')).to_be_visible()
+            expect(page.locator('#segment-needs-you')).to_be_hidden();expect(page.locator('#segment-failed')).to_be_hidden()
+            assert errors==[]
+        finally:browser.close()

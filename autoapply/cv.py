@@ -36,8 +36,8 @@ def profile_facts(profile):
     fields = {
         'education': ('school', 'degree', 'major', 'minors', 'minor', 'graduation_date',
                       'start_date', 'gpa', 'currently_enrolled', 'current', 'coursework', 'relevant_coursework'),
-        'employment': ('company', 'title', 'location', 'start_date', 'end_date', 'current', 'description', 'bullets'),
-        'projects': ('name', 'role', 'company', 'url', 'start_date', 'end_date', 'technologies', 'description', 'bullets'),
+        'employment': ('company', 'title', 'location', 'start_date', 'end_date', 'current', 'description', 'contribution', 'bullets'),
+        'projects': ('name', 'role', 'company', 'url', 'start_date', 'end_date', 'technologies', 'description', 'contribution', 'bullets'),
         'links': ('website', 'personal_website', 'linkedin', 'github', 'portfolio', 'other'),
     }
     facts = {'name': profile_name(profile)}
@@ -53,19 +53,45 @@ def profile_facts(profile):
     for section in ('skills', 'skill_categories'):
         if profile.get(section):
             facts[section] = profile[section]
+    preferences = profile.get('writing_preferences')
+    preferences = preferences if isinstance(preferences, dict) else {}
+    policy = {}
+    for key in ('exclude_attune_metrics', 'attune_not_applicant_coded'):
+        if isinstance(preferences.get(key), bool):
+            policy[key] = preferences[key]
+    if isinstance(preferences.get('cover_letter_excluded_projects'), list):
+        policy['cover_letter_excluded_projects'] = [v[:100] for v in preferences['cover_letter_excluded_projects'][:20] if isinstance(v, str)]
+    if isinstance(preferences.get('cover_letter_style'), str):
+        policy['cover_letter_style'] = preferences['cover_letter_style'][:1000]
+    facts['writing_preferences'] = policy
     return facts
 
 
 def job_context(job):
-    return {k: unescape(text(job.get(k))) for k in ('company', 'title', 'location', 'description')}
+    limits = dict(company=200, title=300, location=300, description=6000)
+    return {k: unescape(text(job.get(k)))[:limit] for k, limit in limits.items()}
+
+
+def writing_evidence(job):
+    context = job_context(job)
+    return dict(source_url=text(job.get('canonical_url'))[:2000],
+                official_posting=context['description'][:6000],
+                company_context=text(job.get('company_context'))[:3000],
+                company_details_available=bool(context['description'] or text(job.get('company_context'))))
 
 
 def cover_letter_request(profile, job, samples_folder, answers=None):
     """Allowlist professional facts; samples supply style, never applicant facts."""
     folder = Path(samples_folder)
     samples = [path.read_text(encoding='utf-8')[:4000] for path in sorted(folder.glob('*.txt'))[:3]]
-    return dict(task='cover_letter', job=job_context(job),
-                profile=profile_facts(profile), style_samples=samples, answers=answers or [],
+    facts = profile_facts(profile)
+    excluded = {v.casefold() for v in facts['writing_preferences'].get('cover_letter_excluded_projects', [])}
+    if facts['writing_preferences'].get('attune_not_applicant_coded') or facts['writing_preferences'].get('exclude_attune_metrics'):
+        excluded.add('attune')
+    if isinstance(facts.get('projects'), list):
+        facts['projects'] = [v for v in facts['projects'] if str(v.get('name', '')).casefold() not in excluded]
+    return dict(task='cover_letter', job=job_context(job), evidence_packet=writing_evidence(job),
+                profile=facts, style_samples=samples, answers=answers or [],
                 skipped_questions=[item['question'] for item in answers or [] if not item['answer']])
 
 

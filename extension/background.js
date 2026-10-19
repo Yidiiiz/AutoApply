@@ -3,12 +3,31 @@ import {snapshotCollector} from "./snapshots.js";
 
 async function showSidebar(tabId, mode='open') {
   const tab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
-  if(!tab?.id||!/^https?:/.test(tab.url||''))return;
-  const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
-  const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=frame?.result||mode;
+  if(!tab?.id||!/^https?:/.test(tab.url||''))throw Error('Open an HTTP or HTTPS application page to use AutoApply.');
+  let [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
+  if(!frame?.result){
+    if(mode!=='toggle'){const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=mode;await chrome.storage.session.set({sidebarTabs});}
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+    for(let attempt=0;attempt<6&&!frame?.result;attempt++){
+      if(attempt)await delay(150);
+      [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
+    }
+  }
+  if(!frame?.result)throw Error('AutoApply could not open on this page. Try an application page outside Chrome settings or the web store.');
+  const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=frame.result;
   await chrome.storage.session.set({sidebarTabs});
+  await chrome.action.setBadgeText({tabId:tab.id,text:''});
+  await chrome.action.setTitle({tabId:tab.id,title:'Open AutoApply'});
 }
-chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'toggle').catch(console.error));
+chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'open').catch(async error=>{
+  console.error(error);await chrome.action.setTitle({tabId:tab.id,title:error.message});await chrome.action.setBadgeText({tabId:tab.id,text:'!'});
+}));
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.status==='complete'){
+  chrome.storage.session.get(['sidebarTabs','chromeRun']).then(({sidebarTabs={},chromeRun})=>{
+    const state=sidebarTabs[tabId] || (chromeRun?.active&&chromeRun.tabId===tabId?'open':null);
+    if(state) return showSidebar(tabId,state);
+  }).catch(console.error);
+}});
 globalThis.autoApplySidebar=showSidebar;
 let running = false;
 const activeResults = new Map(), writingTasks = new Map();
@@ -386,6 +405,21 @@ async function advanceAfterWriting(result) {
     pendingSteps.delete(result.tabId); await autofill(result.tabId,result.matched);
   }
 }
+function chatReplacementIntent(value){return typeof value==='string' && /^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && !/\b(?:don.t|do not|never|cannot|can.t)\b/i.test(value);}
+function authorizedChatField(request,context){
+  if(!chatReplacementIntent(request))return null;
+  let fields=context?.fields || [];
+  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
+  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
+  return fields.length===1?fields[0]:null;
+}
+function validChatAction(action,context){
+  if(!Array.isArray(context?.fields))return false;
+  const field=context.fields.find(f=>f.key===action?.key);
+  return action && Object.keys(action).sort().join(',')==='key,text,type' && action.type==='replace_text' &&
+    field && ['text','textarea','email','tel','url'].includes(field.kind) && typeof action.text==='string' && action.text.trim() &&
+    action.text.length<=12000 && (field.max_length==null || action.text.length<=field.max_length);
+}
 let skillsRunning=false;
 async function action(message) {
   if(message.type==='skill-selection') {
@@ -424,6 +458,28 @@ async function action(message) {
   }
   if(message.type==='autofill' && skillsRunning) throw Error('Wait for skills autofill to finish.');
   if (message.type === "autofill") return autofill(message.tabId);
+  if(['chat-context','chat-replace'].includes(message.type)) {
+    const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
+    if(!tab?.id || !/^https?:/.test(tab.url||''))throw Error('Open an application page first.');
+    const busy=()=>running || skillsRunning || writingTasks.has(tab.id) || activeResults.get(tab.id)?.coverBusy;
+    if(message.type==='chat-context') {
+      await showSidebar(tab.id,'open');
+      const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:options=>globalThis.autoApplyContent.chatContext(options),args:[{passive:Boolean(busy()),request:typeof message.request==='string'?message.request.slice(0,12000):''}]});
+      return {...frame.result,tabId:tab.id,documentId:frame.documentId};
+    }
+    if(busy())throw Error('Application is busy. Wait for autofill, skills or writing to finish, then retry.');
+    const ctx=message.context,action=message.action;
+    if(ctx?.tabId!==tab.id || ctx?.url!==tab.url)throw Error('Application changed. Select the field and ask again.');
+    if(!chatReplacementIntent(message.request) || authorizedChatField(message.request,ctx)?.key!==action?.key || !validChatAction(action,ctx))
+      throw Error('Replacement was not authorized for this field. Select the field and ask again.');
+    const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent?.chatContext({passive:true})});
+    if(frame.documentId!==ctx.documentId || frame.result?.document!==ctx.document)throw Error('Application changed. Select the field and ask again.');
+    if(busy())throw Error('Application is busy. Wait for autofill, skills or writing to finish, then retry.');
+    const [filled]=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:[ctx.documentId]},func:async(ctx,action)=>{
+      try{return await globalThis.autoApplyContent.chatReplace(ctx,action);}catch(error){return {error:error.message};}
+    },args:[ctx,action]});
+    return filled?.result || {error:'Application changed. Select the field and retry.'};
+  }
   if (message.type === "page-context") return scan(message.tabId);
   if (message.type === 'auto-advance-preference') return advancePreference(message.enabled);
   if (message.type === 'snapshot-preference') return snapshots.preference(message.enabled);
@@ -556,7 +612,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference"].includes(message.type)) return;
   if(['manual-submit','retry-submission-tracking'].includes(message.type) && (sender.url?.split('?')[0]!==chrome.runtime.getURL('sidepanel.html') ||
      sender.tab?.id && !sender.tab.url?.startsWith(chrome.runtime.getURL('')) && sender.tab.id!==message.tabId ||
      new URL(sender.url).searchParams.has('tabId') && Number(new URL(sender.url).searchParams.get('tabId'))!==message.tabId))return;
