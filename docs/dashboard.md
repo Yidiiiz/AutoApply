@@ -829,3 +829,20 @@ without securitypolicyviolation events (.tmp/review/t054/favicon-csp.json).
 
 
 T057: Queue failures keep checking with bounded backoff and one active resource request. A successful read clears its own stale notice while preserving unrelated action errors. Applied is the only visible application status; old Needs you/Failed hashes open Applied and Worker hashes open Queue. Legacy backend records and run/Undo/history paths remain intact. The toolbar shows Queue, Applied, Answers and Settings; Chrome run controls remain in Queue.
+
+
+T065: A Chrome run holds its current application until the employer confirms a
+manual submission, the current tab closes, or Skip is chosen. Filled forms,
+sign-in, missing answers and errors remain current; review and tracking retry do
+not open the next application. Pause/cancel invalidate pending work, and worker
+restart reuses the tab without automatically refilling reviewed fields. Progress
+is a slim line with an explicit review/wait state; completed runs collapse into
+Last run with a bounded details list.
+
+Queue has one compact list layout. Job titles have safe external-link icons;
+not-eligible uses a labeled icon and retains its reason dialog and Undo.
+Listing-check help, grid controls and Queue cover-letter generation are removed.
+Column headers stay visible while scrolling, and top/bottom pagination share page
+and page-size state. Already stored descriptions appear as escaped text, limited
+to three preview lines with Show more/less when needed; reads do not scrape.
+Discovery shows elapsed hours/days, with failed updates labeled explicitly.

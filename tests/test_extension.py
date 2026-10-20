@@ -442,6 +442,9 @@ def extension_server(config, db):
                                   dict(application_id=2, run_id="fixture-run", state="pending", url=base + "/batch-two.html", company="Fixture", title="Two", index=2, total=2)], index=0)
                 self.response(200, {"ok": True})
             elif self.path == "/ext/run/next":
+                if any(item["state"] == "opened" for item in run["items"]):
+                    self.response(200, {"wait": True})
+                    return
                 if run["index"] < len(run["items"]):
                     item = run["items"][run["index"]]
                     run["index"] += 1
@@ -461,7 +464,7 @@ def extension_server(config, db):
             elif self.path == '/ext/run/result':
                 item=next((i for i in run['items'] if i['application_id']==payload['application_id']),None)
                 if item and item['state']=='opened':
-                    item['state']=payload['state']
+                    item.update(state='skipped' if payload['state']=='skipped' else 'opened', phase=payload['state'], detail=payload.get('detail',''))
                     self.response(200, dict(ok=True))
                 else:
                     self.response(409, dict(error='Application is not open in this run'))
@@ -1060,34 +1063,36 @@ def test_preselected_country_and_replaced_upload(loaded_extension, extension_ser
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
 
-def test_chrome_run_opens_fills_and_keeps_two_tabs(loaded_extension, extension_server):
+def test_chrome_run_holds_review_until_close_or_skip(loaded_extension, extension_server):
     context, worker, extension_id = loaded_extension
     server, requests = extension_server
-    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused: true, chromeRun: {paused: true, index: 0, total: 0}})")
+    worker.evaluate("() => chrome.storage.session.set({chromeRunPaused: true, chromeRun: {paused: true}})")
     worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
     worker.evaluate("""async server => {
         await fetch(server + '/ext/fixture-start', {method:'POST', headers:{'X-AutoApply-Key':'fixture-pairing-key', 'Content-Type':'application/json'}, body:'{}'});
+        await chrome.storage.session.set({chromeRunPaused:false});await autoApplyRunTick();
     }""", server)
+    first = next(page for page in context.pages if page.url == server + '/batch-one.html')
+    expect(first.locator('#name')).to_have_value('Fixture Student')
+    first.locator('#name').fill('User edit')
+    claims = sum(path == '/ext/run/next' for path, _, _ in requests)
+    for _ in range(3):
+        worker.evaluate('()=>autoApplyRunTick()')
+    assert sum(path == '/ext/run/next' for path, _, _ in requests) == claims
+    assert not any(page.url == server + '/batch-two.html' for page in context.pages)
+    expect(first.locator('#name')).to_have_value('User edit')
+    assert first.evaluate('[submitClicks,submissions]') == [0,0]
+    first.close()
+    worker.evaluate('()=>autoApplyRunTick()')
+    worker.evaluate('()=>autoApplyRunTick()')
+    second = next(page for page in context.pages if page.url == server + '/batch-two.html')
+    expect(second.locator('#name')).to_have_value('Fixture Student')
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    expect(panel.locator('#run-pause')).to_have_attribute('aria-label','Resume run')
-    panel.locator('#run-pause').click()
-    expect(panel.locator('#chrome-run-status')).to_contain_text('2/2', timeout=30000)
-    expect(panel.locator('#run-controls')).to_be_hidden(timeout=30000)
-    results = [payload for path, _, payload in requests if path == '/ext/run/result']
-    assert [(item['application_id'], item['state']) for item in results] == [(1, 'filled'), (2, 'filled')]
-    pages = [page for page in context.pages if page.url in {server + '/batch-one.html', server + '/batch-two.html'}]
-    assert len(pages) == 2
-    for page in pages:
-        expect(page.locator('#name')).to_have_value('Fixture Student')
-        expect(page.locator('#email')).to_have_value('student@example.test')
-        expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
-        assert page.evaluate('[submitClicks, submissions]') == [0, 0]
-    answers = [payload for path, _, payload in requests if path == '/ext/answers']
-    assert [payload['application_id'] for payload in answers] == [1, 2]
-    assert all(next(field for field in payload['fields'] if field['label'] == 'Phone country')['answered'] for payload in answers)
-    worker.evaluate("()=>chrome.storage.session.set({chromeRun:{paused:true,active:true,index:2,total:2}})")
-    expect(panel.locator('#run-pause')).to_have_attribute('aria-label','Resume run')
+    panel.locator('#run-skip').click()
+    worker.evaluate('()=>autoApplyRunTick()')
+    assert not any(path == '/ext/applied' for path, _, _ in requests)
+    assert [payload['application_id'] for path, _, payload in requests if path == '/ext/run/result' and payload['state']=='skipped'] == [1]
 
 
 @pytest.mark.parametrize("batch", [False, True])
@@ -1106,8 +1111,8 @@ def test_workday_entry_stops_at_sign_in(loaded_extension, extension_server, batc
             await globalThis.autoApplyRunTick();
         }""", server)
         results = [payload for endpoint, _, payload in requests if endpoint == '/ext/run/result']
-        assert results[0]['state'] == 'needs_input'
-        assert results[0]['detail'] == detail
+        assert results[-1]['state'] == 'needs_input'
+        assert results[-1]['detail'] == detail
         page = next(page for page in context.pages if page.url == server + '/workday-signin.html')
     else:
         page = context.new_page()
@@ -3882,3 +3887,23 @@ def test_t063_failed_checkbox_does_not_activate_adjacent_navigation(loaded_exten
     payload=next(p for path,_,p in requests if path=='/ext/snapshot')
     assert next(f for f in payload['diagnostic']['fields'] if f['label']=='Contact consent')['repair_status']=='verification_failed'
     assert page.evaluate('actions')==[]
+
+
+def test_t065_direct_mv3_lifecycle_and_queue_visuals():
+    """Bounded Node/CDP test against an actual isolated unpacked extension.
+
+    The fixture owns only local HTTP stubs and its own Chrome profile. No
+    Playwright driver teardown, employer traffic, provider calls or live data.
+    """
+    import os
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    browsers = Path(os.environ.get('LOCALAPPDATA', '')) / 'ms-playwright'
+    if not node or not any(browsers.glob('chromium-*/chrome-win64/chrome.exe')):
+        pytest.skip('Node and full local Chromium are required')
+    result = subprocess.run([node, str(FIXTURES / 't065_verify.cjs')], cwd=ROOT,
+                            capture_output=True, text=True, timeout=150)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((ROOT / '.tmp/review/t065/direct-result.json').read_text())
+    assert report['ok'] and len(report['checks']) >= 40

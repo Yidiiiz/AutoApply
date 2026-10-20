@@ -1064,3 +1064,31 @@ selection passed. JavaScript syntax, Python AST and git diff --check passed.
 No API implementation changed in this correction; earlier API evidence above is
 historical. Only extension/background.js, extension/content.js,
 tests/test_extension.py and this progress note were edited for the review fix.
+
+
+T065 (2026-10-20): Chrome runs retain one current application through loading,
+sign-in, autofill, review, unresolved answers and recoverable failures. Progress
+updates keep the server claim opened; only confirmed submission, current-tab close
+or explicit Skip releases it. Close-result retries carry the run identity, and
+epochs prevent stale work from releasing a later application. Pause/cancel stop
+owned work without waiting for injection into a loading document. Restart/session
+reconciliation keeps the existing tab and reviewed edits; interrupted fills offer
+manual retry. Closing/filling never marks applied; failed tracking stays held.
+
+The exact Workday Continue application landing entry has active-step, sign-in and
+form-submit guards, plus a bounded entry trace. The local render context is
+representative; no live employer DOM or applicant data was accessed. Auto-next
+uses a 48x28 switch and centered 16px lock. Queue is list-only, with a compact run
+line, collapsed bounded last-run details, safe title links, labeled eligibility
+icons, sticky columns, synchronized top/bottom pagination and escaped stored job
+descriptions (6000-character payload bound, three-line preview). Queue reads fetch
+no descriptions. Discovery age is concise and failures remain labeled.
+
+Validation: 33 focused API/dashboard tests passed; the isolated unpacked MV3
+Node/CDP fixture passed 59 checks, including three-job loading/review holds,
+close/retry, Skip, synthetic manual confirmation/tracking failure, pause/cancel
+while loading, delayed sign-in, late closed-tab answers, worker restart/session
+reconciliation, desktop/narrow queue screenshots, sticky headers and lock states.
+JavaScript syntax, Python AST and git diff --check passed. Fixture artifacts:
+.tmp/review/t065. No live services or real applications were used, and no budgets,
+runtime metadata, staging, commits or deployment changed.

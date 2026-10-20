@@ -231,6 +231,7 @@ class Dashboard:
                         url = app.get('canonical_url') or ''
                         rows.append(dict(rank=rank, application_id=app['id'], company=unescape(app['company']),
                                          title=unescape(app['title']), ats=app['ats'], posted_at=app['posted_at'],
+                                         description=(app.get('description') or '')[:6000],
                                          listing_status=app['listing_status'], updated_at=app['updated_at'],
                                          url=url if url.startswith(('https://', 'http://')) else ''))
                     self._priority_rows, self._priority_key = rows, key

@@ -1764,9 +1764,10 @@ const elements=new Map(),document={createElement:tag=>new Node(tag),createElemen
 const testTabs=['run','priority','applications','answers','settings'].map(id=>{const tab=document.getElementById('tab-'+id);tab.id='tab-'+id;tab.setAttribute('aria-controls','panel-'+id);return tab;});
 document.body=new Node('body');
 const testTools=['run','needs-you','failed','priority','applied'].map(id=>{const el=new Node('div');el.dataset.tools=id;return el;});
-const window={listeners:{},addEventListener(k,fn){this.listeners[k]=fn;}},location={hash:'#run',href:'http://127.0.0.1:8765/'},history={replaceState:()=>{}};
+const window={listeners:{},addEventListener(k,fn){const previous=this.listeners[k];this.listeners[k]=previous?event=>{previous(event);fn(event);}:fn;}},location={hash:'#run',href:'http://127.0.0.1:8765/'},history={replaceState:()=>{}};
 const storage=new Map(),localStorage={getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)};
 let fetch=()=>new Promise(()=>{});const setInterval=()=>{},setTimeout=()=>{},clearTimeout=()=>{};
+const requestAnimationFrame=fn=>fn();
 Date.now=()=>Date.parse('2026-10-08T17:38:06.446586+00:00');
 '''
     assertions = r'''
@@ -1812,7 +1813,7 @@ renderFailed({applications:[app]});titled('failed','FORM_NOT_READY','Form did no
 assert.equal(document.getElementById('count-needs-you').textContent,'1');assert.equal(document.getElementById('count-failed').textContent,'1');
 render({rows:[{...app,rank:1,listing_status:'ACTIVE',last_liveness_result:'OPEN',last_liveness_at:stamp,posted_at:stamp}],
  sweep:{counts:{},finished_at:stamp}});
-titled('rows','ACTIVE','Active');titled('rows','OPEN','Open');titled('rows',stamp,time.textContent);titled('sweep',stamp,time.textContent);
+titled('rows','ACTIVE','Active');titled('rows','OPEN','Open');titled('rows',stamp,time.textContent);
 const queueRow=document.getElementById('rows').children[1];
 const posted=queueRow.children.find(el=>el.dataset.label==='Posted').children[1];
 assert.equal(posted.textContent,'Oct 8');assert.equal(posted.dateTime,stamp);assert.match(posted.title,/2h ago/);
@@ -1820,9 +1821,9 @@ const check=queueRow.children.find(el=>el.dataset.label==='Listing check').child
 assert.equal(check.children[0].textContent,'Open');assert.equal(check.children[0].children[0].className,'dot');
 assert.match(check.children[0].title,/Listing: Active \| Checked:.*2h ago/);
 assert.equal(check.children[1].className,'listing-meta');
-for(const id of ['manual','failed','rows']){const open=descendants(document.getElementById(id)).find(el=>el.attributes['aria-label']==='Open application #4503');
- assert.equal(open.textContent,'Open');assert.equal(open.children[0].tag,'svg');assert.equal(open.children[0].attributes['aria-hidden'],'true');
- assert.equal(open.children[0].children[0].tag,'path');assert.equal(open.parent.children[1].children[0].type,'checkbox');}
+for(const id of ['manual','failed','rows']){const open=descendants(document.getElementById(id)).find(el=>el.attributes['aria-label']==='Open application #4503 in a new tab');
+ assert.equal(open.textContent,'');assert.equal(open.children[0].tag,'svg');assert.equal(open.children[0].attributes['aria-hidden'],'true');
+ assert.equal(open.children[0].children[0].tag,'path');assert.equal(open.parent.className,'role');}
 assert.equal(document.getElementById('count-priority').textContent,'1');
 renderStatus({phase:'FILLING',updated_at:stamp,applications:[app]});
 titled('run-status','FILLING','Filling');titled('run-status',stamp,time.textContent);
@@ -1839,11 +1840,11 @@ renderStatus({applications:[app]});
 const oldRow=document.getElementById('applications').children[1];renderStatus({applications:[app]});
 assert.equal(document.getElementById('applications').children[1],oldRow);
 for(const tab of tabIds){const toolbar=testTools.find(el=>el.dataset.tools===tab);assert.equal(toolbar.children[0].type,'search');
- assert.equal(views[tab],'list');toolbar.children[1].children[1].listeners.click();assert.equal(views[tab],'grid');
+ assert.equal(typeof views,'undefined');assert.equal(toolbar.children.length,1);
  toolbar.children[0].value='no match';toolbar.children[0].listeners.input();assert.match(document.getElementById(bodyIds[tab]).textContent,/No matches/);
  toolbar.children[0].value='';toolbar.children[0].listeners.input();}
 renderApplied({applications:[{...app,marked_at:stamp,reversible:true},{...app,application_id:4504,reversible:false}]});
-assert.match(document.getElementById('applied').textContent,/Uncheck to put back/);assert.match(document.getElementById('applied').textContent,/Recorded in Discord/);
+assert.ok(descendants(document.getElementById('applied')).some(el=>el.attributes['aria-label']==='Put back #4503'&&!el.disabled));assert.ok(descendants(document.getElementById('applied')).some(el=>el.title==='Recorded in Discord'));
 assert.ok(descendants(document.getElementById('applied')).some(el=>el.attributes['aria-label']==='Put back #4503'));
 renderApplied({applications:[]});
 for(const id of ['run','needs-you','failed','priority'])assert.ok(descendants(document.getElementById(bodyIds[id])).some(el=>el.attributes['aria-label']==='Mark #4503 as applied'));
@@ -1863,10 +1864,8 @@ const originalReload=reload;reload=async()=>[];
  assert.equal(document.getElementById('count-applied').textContent,'0');assert.equal(document.getElementById('message').textContent,'Already guarded');
  for(const id of ['run','needs-you','failed','priority'])assert.equal(document.getElementById('count-'+id).textContent,'1');
  // CV buttons show busy state, open the authenticated preview and toast warnings.
- for(const id of ['priority','needs-you','applied']){
-  assert.ok(descendants(makeRow(id,app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
-  assert.ok(descendants(makeCard(id,app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
- }
+ for(const id of ['needs-you','applied'])assert.ok(descendants(makeRow(id,app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
+ assert.ok(!descendants(makeRow('priority',app)).some(el=>el.attributes['aria-label']==='Generate Cover letter for #4503'));
  const cvCalls=[],cvPreview={};
  window.open=(...args)=>{cvCalls.push(args);return cvPreview;};
  let finishCV;post=(action,body)=>{cvCalls.push([action,body]);return new Promise(resolve=>{finishCV=resolve;});};
@@ -1889,18 +1888,8 @@ const originalReload=reload;reload=async()=>[];
  assert.equal(link.textContent,'Open cover letter');assert.equal(link.href,'http://127.0.0.1:8765/api/cv/4503?token='+encodeURIComponent(token));assert.equal(link.target,'_blank');assert.equal(link.rel,'noopener noreferrer');
  assert.ok(!fallback.hidden);link.click();assert.ok(!document.body.children.includes(fallback));
  await generateCV(app);const dismissed=document.body.children.at(-1);dismissed.children.find(el=>el.tag==='button').click();assert.ok(!document.body.children.includes(dismissed));
- // Grid cards use the same compact structure on every tab.
+ // All tabs use the compact list.
  renderApplied({applications:[]});
- for(const id of ['run','needs-you','failed','priority']){
-  const card=document.getElementById(bodyIds[id]).children[1];
-  assert.deepEqual(card.children.map(el=>el.className),['card-top','card-role','card-meta','card-detail','actions']);
-  assert.ok(descendants(card.children[0]).some(el=>el.type==='checkbox'));
-  assert.ok(!descendants(card).some(el=>el.className==='cell-label'));
-  assert.equal(card.children[2].children[0].children[0].className,'dot');
-  assert.ok(card.children[3].title);
- }
- const questions={...app,pending_count:2,pending_questions:['First question?','Second question?']};
- assert.equal(cardDetail('needs-you',questions),'2 questions\nFirst question?');
  renderApplied({applications:[{...app,marked_at:stamp,reversible:false}]});
  const permanent=descendants(document.getElementById('applied')).find(el=>el.type==='checkbox');
  assert.equal(permanent.checked,true);assert.equal(permanent.disabled,true);assert.equal(permanent.title,'Recorded in Discord');
@@ -1908,10 +1897,10 @@ const originalReload=reload;reload=async()=>[];
  // Removal renumbers optimistically; a failed POST restores both the row and ranks.
  render({rows:[{...app,rank:1},{...app,application_id:4505,rank:2}],sweep:{}});
  let rejectMark;post=()=>new Promise((resolve,reject)=>{rejectMark=reject;});const failedMark=markApplied(app);
- assert.match(document.getElementById('rows').textContent,/Queue rank 1/);
- assert.ok(!document.getElementById('rows').textContent.includes('Queue rank 2'));
+ assert.ok(descendants(document.getElementById('rows')).some(el=>el.className==='cell rank'&&el.textContent==='Rank1'));
+ assert.ok(!descendants(document.getElementById('rows')).some(el=>el.className==='cell rank'&&el.textContent==='Rank2'));
  rejectMark(Error('Try again'));await failedMark;
- assert.match(document.getElementById('rows').textContent,/Queue rank 2/);
+ assert.ok(descendants(document.getElementById('rows')).some(el=>el.className==='cell rank'&&el.textContent==='Rank2'));
  // Unchecking removes the applied row before the response, and Undo marks it again.
  post=async()=>({marked_at:stamp});await markApplied(app);
  let finishBack;post=()=>new Promise(resolve=>{finishBack=resolve;});const backing=putBack(app.application_id);
@@ -1923,9 +1912,7 @@ const originalReload=reload;reload=async()=>[];
  await Promise.resolve();await Promise.resolve();assert.equal(document.getElementById('count-applied').textContent,'1');
  // Not eligible works in list and grid, validates Other, preserves text and supports Undo.
  await putBack(app.application_id);
- for(const view of ['list','grid']){views.priority=view;draw('priority');assert.ok(descendants(document.getElementById('rows')).some(el=>el.textContent==='Not eligible'));}
- assert.ok(descendants(makeRow('needs-you',app)).some(el=>el.textContent==='Not eligible'));
- assert.ok(descendants(makeCard('needs-you',app)).some(el=>el.textContent==='Not eligible'));
+ assert.ok(descendants(makeRow('needs-you',app)).some(el=>el.attributes['aria-label']==='Mark #4503 as not eligible'));
  const trigger=descendants(document.getElementById('rows')).find(el=>el.attributes['aria-label']==='Mark #4503 as not eligible');trigger.click();
  assert.equal(eligibilityDialog.open,true);assert.equal(document.getElementById('eligibility-title').textContent,'Not eligible - '+app.company+' / '+app.title);
  assert.equal(eligibilityConfirm.disabled,true);assert.equal(document.getElementById('eligibility-reasons').children.length,7);
@@ -1936,8 +1923,8 @@ const originalReload=reload;reload=async()=>[];
  post=async()=>{throw Error('Fixture refusal');};await markNotEligible();assert.equal(eligibilityDialog.open,true);assert.equal(document.getElementById('eligibility-error').textContent,'Fixture refusal');assert.equal(document.getElementById('count-priority').textContent,'2');
  const eligibilityCalls=[];post=async(action,body)=>{eligibilityCalls.push([action,body]);return {marked_at:stamp};};await markNotEligible();
  assert.deepEqual(eligibilityCalls[0],['not-eligible',{application_id:4503,reason:'Other',note:'<script>fixture only</script>'}]);
- assert.equal(eligibilityDialog.open,false);assert.equal(document.getElementById('count-priority').textContent,'1');assert.match(document.getElementById('rows').textContent,/Queue rank 1/);
- assert.ok(!document.getElementById('rows').textContent.includes('Queue rank 2'));
+ assert.equal(eligibilityDialog.open,false);assert.equal(document.getElementById('count-priority').textContent,'1');assert.ok(descendants(document.getElementById('rows')).some(el=>el.className==='cell rank'&&el.textContent==='Rank1'));
+ assert.ok(!descendants(document.getElementById('rows')).some(el=>el.className==='cell rank'&&el.textContent==='Rank2'));
  assert.ok(document.getElementById('not-eligible').textContent.includes('<script>fixture only</script>'));assert.ok(descendants(document.getElementById('not-eligible')).some(el=>el.attributes['aria-label']==='Restore #4503'));
  assert.equal(document.getElementById('toast-message').textContent,'Marked not eligible');assert.equal(toastAction,'eligible');
  document.getElementById('undo').click();await Promise.resolve();await Promise.resolve();
@@ -1971,7 +1958,7 @@ const originalReload=reload;reload=async()=>[];
  // Discovery uses the server result and persists completion metadata.
  searchBusy=true;searchStarted=Date.now()-72000;updateSearchTime();assert.equal(discoveryLabel.textContent,'Searching... 1m 12s');
  finishSearch({status:'succeeded',started_at:'2026-10-08T17:36:01.446586Z',finished_at:'2026-10-08T17:38:06.446586Z',result:{new:7}});
- assert.match(discoveryState.textContent,/Last search finished.*took 2m 05s.*7 new listings/);
+ assert.match(discoveryState.textContent,/Last updated 0 hours ago/);
  assert.equal(discoveryLabel.textContent,'Find new listings');const saved=storage.get('autoapply.lastSearch');lastSearch=null;restoreSearch();
  assert.equal(lastSearch.newListings,7);assert.equal(lastSearch.duration,125000);assert.equal(storage.get('autoapply.lastSearch'),saved);
 
@@ -2058,7 +2045,7 @@ input=footer.children[4].children[0];input.value='50';input.listeners.change();
 pages.priority=2;draw('priority');pendingMarks.set(10000,{});draw('priority');assert.equal(pages.priority,2);
 assert.equal(body.children[1].dataset.applicationId,10051);pendingMarks.clear();
 pages.priority=22;models.priority=sample.slice(0,70);draw('priority');assert.equal(pages.priority,2);
-views.priority='grid';draw('priority');assert.ok(body.classes.has('grid'));assert.equal(body.children.length,21);
+draw('priority');assert.ok(!body.classes.has('grid'));assert.equal(body.children.length,21);
 const filter=testTools.find(el=>el.dataset.tools==='priority').children[0];filter.value='company 1';filter.listeners.input();assert.equal(pages.priority,1);
 filter.value='';filter.listeners.input();models.priority=sample.slice(0,70);draw('priority');
 const rank=body._head.children[1],application=body._head.children[2];
@@ -2132,9 +2119,9 @@ def test_content_scroll_and_pagination_layout_offline():
                 page.evaluate("pages.priority=1;draw('priority');selectTab('run');")
                 assert main.evaluate('(el)=>el.scrollTop') == 0
                 page.evaluate("selectTab('priority');")
-            page.evaluate("views.priority='grid';draw('priority');")
+            page.evaluate("draw('priority');")
             assert page.locator('#rows .list-head button').count() == 6
-            assert all(button.is_visible() for button in page.locator('#rows .list-head button').all())
+            assert page.locator('[data-view]').count() == 0
         finally:
             browser.close()
 
@@ -2166,12 +2153,12 @@ all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[1
 all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[]);
 controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
 const compact=makeRow('priority',sample[0]);assert.equal(compact.children[0].className,'chrome-check');assert.equal(compact.children[0].textContent,'');assert.equal(compact.children[0].children[0].attributes['aria-label'],'Select #1 for Chrome');
-assert.equal(makeCard('priority',sample[0]).children[0].children[1].children[1].className,'chrome-check');
+assert.equal(typeof makeCard,'undefined');
 let posted=[];post=async(action,body)=>{posted.push({action,body});return {items:[{...sample[0],state:action.endsWith('cancel')?'skipped':'pending'}],poll_age_seconds:null};};
 await startChromeRun();assert.deepEqual(posted[0],{action:'ext-run',body:{application_ids:[1,2]}});
 assert.equal(document.getElementById('chrome-run-panel').hidden,false);assert.match(document.getElementById('chrome-run-hint').textContent,/Open Chrome/);
 renderChromeRun({items:['pending','opened','filled','needs_input','failed','skipped'].map((state,i)=>({...sample[0],application_id:i+1,state})),poll_age_seconds:1});
-assert.match(document.getElementById('chrome-run-status').textContent,/Running 5\/6 - Fixture: opened/);assert.equal(document.getElementById('chrome-run-items').children.length,0);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
+assert.match(document.getElementById('chrome-run-status').textContent,/5\/6.*opened.*Fixture/);assert.equal(document.getElementById('chrome-run-items').children.length,0);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
 await document.getElementById('chrome-run-cancel').listeners.click();assert.equal(posted[1].action,'ext-run/cancel');assert.equal(document.getElementById('chrome-run-cancel').disabled,true);
 assert.equal(document.getElementById('chrome-run-panel').hidden,true);scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/Chrome run finished: 1 skipped/);
 assert.equal(document.getElementById('chrome-last-run').hidden,false);assert.equal(document.getElementById('chrome-last-run').open,false);assert.deepEqual(document.getElementById('chrome-run-items').children.map(item=>item.textContent),['#1 Fixture - Intern - skipped']);assert.equal(document.getElementById('chrome-run-panel').hidden,true);
@@ -2494,9 +2481,7 @@ def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing)
                     assert page.get_by_text('More', exact=True).count() == 0
                     assert button.evaluate("e=>{const b=e.getBoundingClientRect();return b.width===32&&b.right<=innerWidth&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}")
                     assert page.locator('#discovery-label').count() == 1
-                    if not page.locator('.listing-checks').evaluate('e=>e.open'):
-                        page.locator('.listing-checks summary').click()
-                    expect(page.locator('#sweep')).to_be_visible()
+                    assert page.locator('.listing-checks,#sweep').count() == 0
                     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     assert page.locator('main').evaluate('e=>e.scrollWidth<=e.clientWidth')
                     page.screenshot(path=str(output/f'dashboard-{width}-{theme}.png'))
@@ -2511,7 +2496,7 @@ def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing)
                     expect(busy).to_be_enabled(timeout=10000)
                     expect(busy).to_have_attribute('aria-busy', 'false')
                     expect(busy).to_have_attribute('aria-label', 'Find new listings')
-                    expect(page.locator('#discovery-state')).to_contain_text('3 new listings')
+                    expect(page.locator('#discovery-state')).to_contain_text('Last updated')
             assert sum(method == 'POST' and path == '/api/refresh' for method, path in calls) == 4
             assert page.evaluate('cspViolations') == [] and not errors
         finally:
@@ -2603,3 +2588,13 @@ def test_t057_applied_queue_navigation_screenshots(http_dashboard,config,db,list
             expect(page.locator('#segment-needs-you')).to_be_hidden();expect(page.locator('#segment-failed')).to_be_hidden()
             assert errors==[]
         finally:browser.close()
+
+
+def test_t065_priority_returns_bounded_stored_description(dashboard, config, db, listing, monkeypatch):
+    stored = '<b>Stored only</b> ' + 'Description. ' * 600
+    app_id = queue(db, config, replace(listing, description=stored), 1)[0]
+    probe = Mock(side_effect=AssertionError('Queue reads must never fetch descriptions'))
+    monkeypatch.setattr(descriptions, 'fetch_description', probe)
+    row = next(row for row in dashboard.priority()['rows'] if row['application_id'] == app_id)
+    assert row['description'] == stored[:6000]
+    assert not probe.called

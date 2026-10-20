@@ -241,18 +241,27 @@ def test_run_queue(http_dashboard, config, db, listing):
         claimed = ext(http_dashboard, 'GET', '/ext/run/next')[1]
         assert claimed['application_id'] == ordered[index]
         assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(wait=True)
-        status_run = ext(http_dashboard, 'GET', '/ext/run/status')[1]
-        assert status_run['poll_age_seconds'] < 2
-        assert request(http_dashboard[0], 'GET', '/api/ext-run')[1]['current'] == ordered[index]
+        assert ext(http_dashboard, 'GET', '/ext/run/status')[1]['poll_age_seconds'] < 2
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='filled', run_id='stale'))[0] == 409
         assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], state='submitted'))[0] == 400
-        assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[index], run_id=claimed['run_id'], state=state, detail='Test'))[0] == 200
+        progress = dict(application_id=ordered[index], run_id=claimed['run_id'], state=state, detail='Test')
+        assert ext(http_dashboard, 'POST', '/ext/run/result', progress)[0] == 200
+        held = request(http_dashboard[0], 'GET', '/api/ext-run')[1]
+        assert held['current'] == ordered[index]
+        assert held['items'][index]['state'] == 'opened'
+        assert held['items'][index]['phase'] == state
+        assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(wait=True)
+        # Closing/skip is terminal, idempotent and never marks applied.
+        progress['state'] = 'skipped'
+        assert ext(http_dashboard, 'POST', '/ext/run/result', progress)[0] == 200
+        assert ext(http_dashboard, 'POST', '/ext/run/result', progress)[0] == 200
     assert web(http_dashboard, '/api/ext-run/cancel')[0] == 200
     assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(done=True)
     run = request(http_dashboard[0], 'GET', '/api/ext-run')[1]
-    assert [r['state'] for r in run['items']] == ['needs_input', 'filled', 'skipped']
+    assert [r['state'] for r in run['items']] == ['skipped', 'skipped', 'skipped']
     assert run['current'] is None and [db.application(i) for i in ids] == before
     assert ext(http_dashboard, 'POST', '/ext/run/result', dict(application_id=ordered[2], state='filled'))[0] == 409
+
 
 
 @pytest.mark.parametrize('ids', [[], [True], [0], [1, 1], [999999], [3556]])
@@ -1380,3 +1389,20 @@ def test_t063_repair_report_bounds(http_dashboard, change):
     payload['diagnostic']['repair']=dict(filled=0,attempts=1,stopped='none',before={'fields':[]})
     payload['diagnostic']['repair'].update(change)
     assert ext(http_dashboard,'POST','/ext/snapshot',payload)[0]==400
+
+
+def test_t065_failed_progress_holds_claim_and_old_confirmation_is_rejected(http_dashboard, config, db, listing):
+    ids = queue(db, config, listing, 3)
+    assert web(http_dashboard, '/api/ext-run', dict(application_ids=ids))[0] == 200
+    first = ext(http_dashboard, 'GET', '/ext/run/next')[1]
+    for state in ('needs_input', 'failed', 'filled'):
+        assert ext(http_dashboard, 'POST', '/ext/run/result', dict(first, state=state, detail='Review current'))[0] == 200
+        assert ext(http_dashboard, 'GET', '/ext/run/next')[1] == dict(wait=True)
+    assert web(http_dashboard, '/api/ext-run/cancel', dict(run_id=first['run_id']))[0] == 200
+    assert web(http_dashboard, '/api/ext-run', dict(application_ids=ids))[0] == 200
+    second = ext(http_dashboard, 'GET', '/ext/run/next')[1]
+    before = db.application(ids[0])
+    assert ext(http_dashboard, 'POST', '/ext/applied', dict(application_id=ids[0], run_id=first['run_id'],
+               url=first['url'], evidence='Application submitted'))[0] == 409
+    assert db.application(ids[0]) == before
+    assert ext(http_dashboard, 'GET', '/ext/run/status')[1]['current'] == second['application_id']

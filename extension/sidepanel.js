@@ -402,7 +402,7 @@ let runPaused = false;
 function renderRun(run = {}) {
   runPaused = Boolean(run.paused);
   element('run-controls').hidden=!(run.active || run.paused || run.current);
-  element('chrome-run-status').textContent=run.error || (run.total ? (run.index || 0)+'/'+run.total : '');
+  element('chrome-run-status').textContent=run.error || (run.total ? (run.index || 0)+'/'+run.total+(run.current?' \u00b7 '+(run.phase==='filled'?'Review application':run.phase==='needs_input'?'Waiting for you':run.phase==='failed'?'Review error':'Current application'):'') : '');
   const label=runPaused?'Resume run':'Pause run';
   element('run-pause').textContent=runPaused?'▶':'Ⅱ';
   element('run-pause').setAttribute('aria-label',label);element('run-pause').title=label;

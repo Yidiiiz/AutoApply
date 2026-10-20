@@ -618,9 +618,17 @@
   function enterApplication() {
     if (signInPage() || /review/i.test(workdayState()?.step || '')) return false;
     const manual = manualEntry();
-    const entry = manual || Array.from(document.querySelectorAll('button,a[href],[role="button"]')).find(element =>
-      visible(element) && /^(apply|apply for this job)$/i.test((element.getAttribute('aria-label') || element.textContent).trim()));
+    const activeStep=workdayState()?.step;
+    const workdayLanding=!activeStep && !document.querySelector('[data-automation-id="progressBar"]') &&
+      (/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && /\/job\//.test(location.pathname) ||
+       document.querySelector('[data-automation-id="jobPostingPage"],[data-automation-id="jobPostingHeader"]'));
+    const entry = manual || Array.from(document.querySelectorAll('button,a[href],[role="button"]')).find(element => {
+      const caption=(element.getAttribute('aria-label') || element.textContent).trim();
+      return visible(element) && !element.disabled && ( /^(apply|apply for this job)$/i.test(caption) ||
+        workdayLanding && /^continue application$/i.test(caption));
+    });
     if (!entry || entry.type === "submit" || entry.form || entry.closest("form")) return false;
+    trace('entry', 'click', null, {caption:(entry.getAttribute('aria-label') || entry.textContent).trim().slice(0,80)});
     // Exact entry labels only: never Next, Save and Continue, or Submit.
     if (entry.tagName === 'A') {
       const url = new URL(entry.href);

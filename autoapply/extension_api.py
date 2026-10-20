@@ -1096,20 +1096,32 @@ def run_result(dashboard, payload):
         raise SettingsRejected('Invalid result state or detail')
     with dashboard._ext_mutex:
         item = next((i for i in dashboard._ext_run if i['application_id'] == application_id), None)
-        if not item or item['state'] != 'opened' or payload.get('run_id') != item['run_id']:
+        if not item or payload.get('run_id') != item['run_id']:
             raise SettingsRejected('Application is not open in this run', status=409)
-        item.update(state=state, detail=detail)
+        # Only closing/explicitly skipping releases a claim. Filling, sign-in and
+        # recoverable errors still belong to the current application lifecycle.
+        if item['state'] == 'skipped' and state == 'skipped':
+            return dict(ok=True)  # A lost response may be retried safely.
+        if item['state'] != 'opened':
+            raise SettingsRejected('Application is not open in this run', status=409)
+        item.update(state='skipped' if state == 'skipped' else 'opened', phase=state, detail=detail)
     return dict(ok=True)
 
 
 def applied(dashboard, payload):
     application_id = _id(payload.get('application_id'))
+    if payload.get('run_id'):
+        with dashboard._ext_mutex:
+            if not any(i['application_id'] == application_id and i['run_id'] == payload['run_id']
+                       and i['state'] in {'opened', 'submitted'} for i in dashboard._ext_run):
+                raise SettingsRejected('Application is not open in this run', status=409)
     url = _url(payload.get('url'))
     evidence = _text(payload, 'evidence', 2000, required=True)
     result = dashboard.mark_applied(application_id, evidence=json.dumps(dict(url=url, evidence=evidence)))
     with dashboard._ext_mutex:
         for item in dashboard._ext_run:
-            if item['application_id'] == application_id and item['state'] != 'skipped':
+            if (item['application_id'] == application_id and item['state'] != 'skipped'
+                    and (not payload.get('run_id') or item['run_id'] == payload['run_id'])):
                 item.update(state='submitted', detail=evidence)
     return result
 
