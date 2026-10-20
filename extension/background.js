@@ -28,6 +28,11 @@ chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.statu
     if(state) return showSidebar(tabId,state);
   }).catch(console.error);
 }});
+// History API navigation need not mutate the DOM. Recheck inline prompts only.
+chrome.tabs.onUpdated.addListener((tabId,change)=>{
+  if(change.url && /^https?:/.test(change.url)) chrome.scripting.executeScript({target:{tabId,allFrames:true},
+    func:()=>globalThis.autoApplyContent?.syncWritingButtons()}).catch(()=>{});
+});
 globalThis.autoApplySidebar=showSidebar;
 let running = false;
 const activeResults = new Map(), writingTasks = new Map();

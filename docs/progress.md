@@ -1,5 +1,41 @@
 # Progress — T048
 
+T064: Inline Ask AI now requires a job application form context. Supported ATS
+application routes also require application controls or upload/form structure;
+custom employer forms use application headings, contact details, resume uploads
+and Apply actions. A heading immediately preceding a generic form with resume,
+contact and standard Submit controls now qualifies that form only. Pairing and
+opening the sidebar do not authorize inline prompts. Independent contact, support, chat and editor fields stay unadorned.
+The existing 80 ms mutation debounce now removes prompts when fields become
+unavailable or application context disappears, and restores them without
+duplicates. History navigation schedules the same passive check. Explicitly
+named same-origin application frames can inherit their containing form's context;
+other frames must qualify themselves. Detection neither scans for answers nor
+calls an API, opens a menu or changes employer controls. Manual toolbar/sidebar
+access is preserved.
+
+Local actual MV3 regressions are in `tests/test_extension.py` with the synthetic
+`tests/fixtures/extension/t064.html`. They cover nonapplications, custom forms,
+independent forms, hidden/removed fields, SPA cleanup/restoration, ATS structures
+and embedded questions. The final correction also qualifies a generic form with
+an immediately preceding application heading, resume/contact fields and standard
+Submit button. Its regression reproduces the reported shape alongside a sibling
+support form, tests heading/resume context loss, and explicitly checks Answer
+helper opening without changing the written answer. All four T064 tests close
+pages in `finally`; request assertions allow normal status/next polling only.
+
+Verification is partial. Prior-attempt history records a custom-form diagnostic
+pass and a standalone four-host ATS pass (1 passed, 169 deselected, 144.88s).
+Those historical results do not verify this final correction. In attempt 2,
+the standalone outside-heading test timed out at the 100-second subprocess
+limit without a pytest result. Its 40-second faulthandler dump showed Playwright
+waiting in the Windows event loop. No further browser tests were launched after
+that stall. The new case and three T064 regressions require a completed local
+browser rerun. JavaScript syntax, Python AST and diff whitespace checks passed.
+No full suite, live employer/provider/Discord calls, applications, ignored
+applicant edits, cleanup, stash operations, workers, orchestration/runtime/config
+changes, staging, commits, pushes, deployment or budget resets were performed.
+
 Milestone: Correct Workday skill activation after exact-option discovery and
 reconcile the supplied automation workflow with the existing serial runner.
 

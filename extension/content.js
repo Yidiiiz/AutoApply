@@ -1710,17 +1710,69 @@
     return {clicked: true, errors: validationErrors()};
   }
   const writingButtons = new Map();
+  const writingSelector = 'textarea,[contenteditable="true"],input[type="text"],input:not([type])';
+  const writingScope = field => field.closest('form,[role="form"]') || field.closest('main') || field.closest('section,article');
+  function applicationWritingScope(root) {
+    if (!root || !visible(root)) return false;
+    // Inspect structure and captions, never answers, menus, or paired state.
+    const nodes = selector => Array.from(root.querySelectorAll(selector)).filter(node => writingScope(node) === root);
+    const identity = node => clean([node.id,node.getAttribute('name'),node.getAttribute('aria-label'),
+      ...Array.from(node.labels || [], questionText)].join(' '));
+    const controls = nodes('input,select,textarea,[contenteditable="true"]');
+    const resume = controls.some(node => node.type === 'file' && /resume|\bcv\b/i.test(identity(node)));
+    const contact = controls.filter(visible).some(node => /email|phone|full.?name|first.?name|last.?name/i.test(identity(node)));
+    const headingSelector = 'h1,h2,h3,legend,[role="heading"]';
+    const applicationHeading = node => visible(node) && /\b(?:job application|application (?:form|questions)|apply (?:for|to) (?:this|the|our)|your application)\b/i.test(text(node));
+    const heading = nodes(headingSelector).some(applicationHeading);
+    const finalApply = nodes('button,input[type="submit"],[role="button"]').filter(visible)
+      .some(node => /^(?:submit application|send application|apply(?: now)?)$/i.test(clean(node.textContent || node.value)));
+    if (heading && (contact || resume) || resume && contact && finalApply) return true;
+    // Generic employer forms often put their heading immediately before the form.
+    // Keep that association local and require strong evidence within this form.
+    const preceding = root.previousElementSibling;
+    if (root.matches('form,[role="form"]') && preceding?.matches(headingSelector) &&
+        applicationHeading(preceding) && resume && contact &&
+        nodes('button,input[type="submit"],[role="button"]').filter(visible)
+          .some(node => /^submit$/i.test(clean(node.textContent || node.value)))) return true;
+    const doc = root.ownerDocument, url = new URL(doc.URL);
+    const host = url.hostname, path = url.pathname;
+    const atsRoute = /(^|\.)(?:myworkdayjobs\.com|myworkdaysite\.com)$/.test(host) && /\/apply(?:\/|$)/i.test(path) ||
+      /(^|\.)(?:greenhouse\.io|greenhouse\.com)$/.test(host) && /\/(?:jobs|embed\/job_app)\b/i.test(path) ||
+      /(^|\.)pinpointhq\.com$/.test(host) && /\/postings\/[^/]+\/applications(?:\/new)?\/?$/i.test(path) ||
+      /(^|\.)(?:applytojob\.com|jazz\.co)$/.test(host) && /\/apply\/[^/]+/i.test(path);
+    const applicationControls = controls.some(node => /^(?:application_form_application_|resumator-)/.test(node.id)) ||
+      Boolean(doc.querySelector('[data-automation-id="progressBarActiveStep"]') && controls.some(node => node.hasAttribute('data-automation-id')));
+    return Boolean(atsRoute && (resume || applicationControls || heading && contact));
+  }
+  function writingApplication(field, scopes) {
+    if (!field.isConnected || !field.matches(writingSelector) || !visible(field) || field.closest('#autoapply-sidebar,.autoapply-ask-ai,aside,nav,[role="search"]')) return false;
+    if (field.tagName === 'INPUT' && !(field.size >= 50 || field.getBoundingClientRect().height >= 60)) return false;
+    // A chat/comment composer embedded alongside an application is still unrelated.
+    if (/\b(?:chat|comment|newsletter|search|user.?prompt|support)\b/i.test([field.id,field.name,field.getAttribute('aria-label')].join(' ').replace(/[_-]/g,' '))) return false;
+    const root = writingScope(field);
+    if (!root) return false;
+    if (!scopes.has(root)) scopes.set(root, applicationWritingScope(root));
+    if (scopes.get(root)) return true;
+    // Some employers split written questions into a same-origin application frame.
+    // Require an explicitly named application frame inside a qualifying form.
+    try {
+      const frame = window.frameElement;
+      return Boolean(frame && visible(frame) && /application|applicant/i.test(frame.title) &&
+        applicationWritingScope(writingScope(frame)));
+    } catch { return false; }
+  }
   function syncWritingButtons() {
-    for (const [field, host] of writingButtons) if (!field.isConnected || !visible(field)) { host.remove(); writingButtons.delete(field); }
-    for (const field of document.querySelectorAll('textarea,[contenteditable="true"],input[type="text"],input:not([type])')) {
-      if (!visible(field) || writingButtons.has(field)) continue;
-      if (field.tagName === 'INPUT' && !(field.size >= 50 || field.getBoundingClientRect().height >= 60)) continue;
+    const scopes = new Map();
+    for (const [field, host] of writingButtons) if (!host.isConnected || !writingApplication(field,scopes)) { host.remove(); writingButtons.delete(field); }
+    for (const field of document.querySelectorAll(writingSelector)) {
+      if (writingButtons.has(field) || !writingApplication(field,scopes)) continue;
       const host = document.createElement('span'); host.className='autoapply-ask-ai';
       host.style.cssText='display:block; margin:4px 0 8px;';
       const shadow=host.attachShadow({mode:'open'}), style=document.createElement('style'), button=document.createElement('button');
       style.textContent='button{font:11px system-ui;padding:3px 8px;border:1px solid #555;border-radius:5px;background:#191919;color:#eee;cursor:pointer}button:focus-visible{outline:2px solid currentColor;outline-offset:2px}@media(prefers-color-scheme:light){button{background:#fff;color:#333;border-color:#aaa}}';
       button.textContent='Ask AI'; button.type='button';
       button.onclick=async () => {
+        if (!writingApplication(field,new Map())) { syncWritingButtons(); return; }
         chatExplicit=field;chatFocus=field;
         if(extensionFilling)return;
         await scan();
@@ -1729,10 +1781,17 @@
       };
       shadow.append(style,button); field.after(host); writingButtons.set(field,host);
     }
+    for (const frame of Array.from(document.querySelectorAll('iframe')).slice(0,20)) {
+      try { frame.contentWindow.dispatchEvent(new Event('autoapply-writing-context')); } catch { /* Cross-origin frames gate themselves. */ }
+    }
   }
   let writingButtonTimer;
-  new MutationObserver(() => { clearTimeout(writingButtonTimer); writingButtonTimer=setTimeout(syncWritingButtons,80); })
-    .observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['hidden','style','class']});
+  function scheduleWritingButtons() { clearTimeout(writingButtonTimer); writingButtonTimer=setTimeout(syncWritingButtons,80); }
+  new MutationObserver(scheduleWritingButtons)
+    .observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,
+      attributeFilter:['hidden','style','class','aria-hidden','disabled','readonly','aria-disabled','aria-readonly',
+        'id','name','title','type','size','aria-label','aria-labelledby','role','contenteditable']});
+  for (const event of ['popstate','hashchange','autoapply-writing-context']) window.addEventListener(event,scheduleWritingButtons);
   setTimeout(syncWritingButtons,80);
 
   // Passive reads only: diagnostics must never replace the scanner's live handles.
@@ -1879,6 +1938,7 @@
     return {ok:true};
   }
   globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent.syncWritingButtons=scheduleWritingButtons;
   globalThis[singleton]=globalThis.autoApplyContent;
   if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
 })();

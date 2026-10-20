@@ -13,6 +13,16 @@ required fields needing review. Submission remains manual. AI writing, chat, cov
 Chrome runs remain available.
 See [the extension README](../extension/README.md) for setup and fixture checks.
 
+Inline **Ask AI** appears beside written responses in detected job application
+forms. Detection uses application routes plus form structure, or application
+headings, resume uploads, contact fields and an Apply action on custom employer
+forms. A heading immediately before a generic form also qualifies when that form
+contains resume and contact fields and a standard Submit button. Unrelated
+editors, chat, comments and sibling contact forms do not enable it.
+Prompts disappear when the application context or writable field disappears and
+return when the form returns. Detection makes no API requests. The toolbar and
+sidebar remain available manually on other pages.
+
 ## Extension API
 
 Settings → Dashboard shows the Chrome extension pairing key with Copy and

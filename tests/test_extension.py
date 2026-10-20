@@ -19,6 +19,137 @@ KEY = "fixture-pairing-key"
 RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 
 
+def test_t064_outside_heading_generic_application(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    try:
+        page.route('**/t064.html', lambda route: route.fulfill(path=str(FIXTURES/'t064.html'), content_type='text/html'))
+        page.goto(server+'/t064.html')
+        page.evaluate("showView('outside-heading')")
+        application = page.locator('#view > form').first
+        expect(application.locator('.autoapply-ask-ai')).to_have_count(1)
+        expect(page.locator('.autoapply-ask-ai')).to_have_count(1)
+        assert all(path in {'/ext/run/status', '/ext/run/next'} for path, _, _ in requests)
+        application.get_by_role('button', name='Ask AI', exact=True).click()
+        panel = page.frame_locator(f'iframe[src^="chrome-extension://{extension_id}/sidepanel.html"]')
+        expect(panel.locator('#question')).to_have_value('Why this role?')
+        expect(panel.locator('#ask-section')).to_be_visible()
+        expect(page.locator('#autoapply-sidebar')).to_be_visible()
+        expect(application.locator('textarea')).to_have_value('')
+        for _ in range(2):
+            page.locator('#view > h1').evaluate("e=>e.textContent='Application'")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+            page.locator('#view > h1').evaluate("e=>e.textContent='Job application'")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(1)
+        application.locator('[type=file]').evaluate('e=>e.remove()')
+        expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+        assert not [path for path, _, _ in requests if path in {'/ext/match', '/ext/answers', '/ext/write', '/ext/chat'}]
+    finally:
+        page.close()
+
+
+def test_t064_nonapplication_and_spa_scope(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    try:
+        page.route('**/t064.html', lambda route: route.fulfill(path=str(FIXTURES/'t064.html'), content_type='text/html'))
+        page.goto(server+'/t064.html')
+        page.wait_for_timeout(350)
+        expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+        assert all(path in {'/ext/run/status', '/ext/run/next'} for path, _, _ in requests)
+        tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(tab=>tab.url===url).id', page.url)
+        worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+        expect(page.locator('#autoapply-sidebar')).to_be_visible()
+        page.wait_for_timeout(200)
+        expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+        for _ in range(2):
+            page.evaluate("showView('application')")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(3)
+            expect(page.locator('#unrelated + .autoapply-ask-ai,#outside + .autoapply-ask-ai,#chat-input + .autoapply-ask-ai')).to_have_count(0)
+            page.locator('#essay').evaluate("e=>e.hidden=true")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(2)
+            page.locator('#essay').evaluate("e=>e.hidden=false")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(3)
+            page.locator('#long-answer').evaluate('e=>e.remove()')
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(2)
+            # Keep the same writing controls while removing only application evidence.
+            page.locator('#application-form').evaluate("e=>{e.querySelector('h1').textContent='Contact us';e.querySelector('[type=file]').remove();e.querySelector('button').textContent='Send';}")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+            page.evaluate("showView('nonapplication')")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+        assert not [path for path, _, _ in requests if path in {'/ext/match','/ext/answers','/ext/write','/ext/chat'}]
+    finally:
+        page.close()
+
+
+def test_t064_supported_ats_routes_require_application_structure(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    try:
+        cases = [
+            ('https://fixture.myworkdayjobs.com/en-US/jobs/job/123/apply', 'workday_spa.html'),
+            ('https://boards.greenhouse.io/fixture/jobs/123', 'greenhouse.html'),
+            ('https://fixture.pinpointhq.com/postings/123/applications/new', 't057-pinpoint.html'),
+            ('https://fixture.applytojob.com/apply/123/Engineer', 't057-jazzhr.html'),
+        ]
+        for url, fixture in cases:
+            page.route(url, lambda route: route.fulfill(path=str(FIXTURES/'t064.html'), content_type='text/html'))
+            page.goto(url)
+            page.wait_for_timeout(200)
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+            page.unroute(url)
+            # Every external request is fulfilled locally; no employer GET or write.
+            def serve(route, request, fixture=fixture):
+                assert route.request.method == 'GET'
+                route.fulfill(path=str(FIXTURES/fixture), content_type='text/html')
+            page.route(url, serve)
+            page.goto(url)
+            page.locator('form').first.evaluate("e=>e.insertAdjacentHTML('beforeend','<label>Written open question<textarea id=t064-response></textarea></label>')")
+            expect(page.locator('#t064-response + .autoapply-ask-ai')).to_have_count(1)
+            if fixture == 't057-pinpoint.html':
+                page.evaluate("history.pushState({},'', '/support')")
+                expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+                page.evaluate('url=>history.pushState({},"",url)', url)
+                expect(page.locator('#t064-response + .autoapply-ask-ai')).to_have_count(1)
+            # The ATS host and application URL alone cannot qualify contact/support.
+            page.locator('body').evaluate("e=>e.innerHTML='<main><h1>Support</h1><form><input type=email><textarea></textarea><input size=60><div contenteditable=true>Editor</div><button>Send</button></form></main>'")
+            expect(page.locator('.autoapply-ask-ai')).to_have_count(0)
+        assert all(path in {'/ext/run/status', '/ext/run/next'} for path, _, _ in requests)
+    finally:
+        page.close()
+
+
+def test_t064_same_origin_application_frame_context(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    page = context.new_page()
+    try:
+        page.route('**/t064.html', lambda route: route.fulfill(path=str(FIXTURES/'t064.html'), content_type='text/html'))
+        page.route('**/t064-frame.html', lambda route: route.fulfill(body='<form><label>Written open question<textarea id=framed></textarea></label></form>', content_type='text/html'))
+        page.goto(server+'/t064.html')
+        page.evaluate("showView('application')")
+        page.locator('#application-form').evaluate("e=>e.insertAdjacentHTML('beforeend','<iframe title=\"Application questions\" src=/t064-frame.html></iframe><iframe title=\"Chat\" src=/t064-frame.html></iframe>')")
+        application = page.frame_locator('iframe[title="Application questions"]')
+        chat = page.frame_locator('iframe[title="Chat"]')
+        expect(application.locator('.autoapply-ask-ai')).to_have_count(1)
+        expect(chat.locator('.autoapply-ask-ai')).to_have_count(0)
+        page.locator('#application-form h1').evaluate("e=>e.textContent='Contact us'")
+        page.locator('#application-form [type=file]').evaluate('e=>e.remove()')
+        page.locator('#application-form button[type=submit]').evaluate("e=>e.textContent='Send'")
+        expect(application.locator('.autoapply-ask-ai')).to_have_count(0)
+        page.locator('#application-form h1').evaluate("e=>e.textContent='Job application'")
+        expect(application.locator('.autoapply-ask-ai')).to_have_count(1)
+        assert all(path in {'/ext/run/status', '/ext/run/next'} for path, _, _ in requests)
+    finally:
+        page.close()
+
+
 def test_t056_snapshot_collector_lifecycle():
     """Run the shipped collector with Chrome-shaped storage and passive-frame stubs."""
     import subprocess
