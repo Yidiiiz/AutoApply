@@ -20,7 +20,7 @@ export function snapshotCollector({api, current, report, delay}) {
       for(const frameId of new Set([0,...fields.map(field=>Number(field.key.split(':')[0]))])) {
         const identity=result.pageIdentities?.[frameId];if(!identity)return;
         const local=fields.filter(field=>field.key.startsWith(frameId+':')).map(field=>({key:field.key.slice(field.key.indexOf(':')+1),label:field.label}));
-        // Passive reads preserve the scanner's live handles, including during manual Send.
+        // Passive reads preserve the scanner's live handles, including during manual Analyze.
         const [frame]=await chrome.scripting.executeScript({target:{tabId:result.tabId,frameIds:[frameId]},
           func:(identity,fields)=>globalThis.autoApplyContent?.unresolvedStructure(identity,fields),args:[identity.identity,local]});
         if(!frame?.result || frame.documentId!==identity.documentId)return;

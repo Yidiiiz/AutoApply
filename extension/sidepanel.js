@@ -145,9 +145,23 @@ function completedAnswers(){
 }
 let savedTimer, snapshotTimer, snapshotFade, snapshotError, snapshotOwner, snapshotContext;
 let snapshotBusy=false, snapshotPreferenceReady=false;
+let analysisVersion=0,analysisBinding;
+function clearAnalysis(){analysisVersion++;analysisBinding=undefined;element('page-analysis').hidden=true;element('analysis-findings').replaceChildren();element('analysis-details').open=false;}
+function renderAnalysis(value){
+  analysisBinding={tabId:value.tabId,url:value.url,application_id:value.application_id};
+  element('analysis-summary').textContent=value.summary;
+  const list=element('analysis-findings');list.replaceChildren();
+  for(const finding of (value.findings || []).slice(0,50)){
+    const item=document.createElement('li'),title=document.createElement('strong');title.textContent=finding.label;item.append(title);
+    for(const note of (finding.notes || []).slice(0,8)){const p=document.createElement('p');p.textContent=note;item.append(p);}list.append(item);
+  }
+  element('analysis-note').textContent=(value.busy?'Autofill is active; this is a passive snapshot. Recheck when it finishes. ': '')+(value.truncated?'Bounded capture; some controls were omitted. ': '')+(value.note || 'Details saved for review.');
+  element('page-analysis').hidden=false;
+}
+chrome.runtime.onMessage.addListener(message=>{if(message.type==='analysis-invalidated' && message.tabId===(tabId || analysisBinding?.tabId || result?.tabId)){clearAnalysis();clearSnapshotStatus();}});
 const snapshotLedger=await chrome.storage.session.get(['snapshotFeedbackSeen','snapshotFeedbackRecovered']);
 const snapshotSeen=new Set(snapshotLedger.snapshotFeedbackSeen || []), snapshotRecovered=new Set(snapshotLedger.snapshotFeedbackRecovered || []);
-const snapshotKey=value=>JSON.stringify([value?.tabId,value?.url]);
+const snapshotKey=value=>JSON.stringify([value?.tabId,value?.url,value?.matched?.application_id ?? value?.application_id]);
 function clearSnapshotStatus(){
   clearTimeout(snapshotTimer);clearTimeout(snapshotFade);
   const status=element('snapshot-status');status.className='';status.textContent='';status.title='';status.removeAttribute('aria-label');
@@ -156,10 +170,11 @@ function clearSnapshotStatus(){
 }
 function snapshotSent(owner){
   clearSnapshotStatus();snapshotOwner=owner;
-  const status=element('snapshot-status');status.textContent='Sent';
+  const status=element('snapshot-status');status.textContent=owner==='manual'?'Analyzed':'Sent';
   snapshotTimer=setTimeout(()=>{status.className='sent-fade';snapshotFade=setTimeout(clearSnapshotStatus,300);},2500);
 }
 function renderSnapshotFeedback(value){
+  if(value?.stalePage || analysisBinding && snapshotKey(analysisBinding)!==snapshotKey(value))clearAnalysis();
   const context=snapshotKey(value);
   if(snapshotContext!==context){clearSnapshotStatus();snapshotContext=context;}
   if(!snapshotPreferenceReady)return;
@@ -170,7 +185,7 @@ function renderSnapshotFeedback(value){
   if(snapshotOwner==='auto' && (!enabled || !feedback))clearSnapshotStatus();
   if(!snapshotBusy && snapshotOwner!=='manual' && enabled && feedback && !snapshotRecovered.has(feedback.id)){
     if(feedback.sent){if(fresh)snapshotSent('auto');}
-    else {clearSnapshotStatus();snapshotOwner='auto';const status=element('snapshot-status');status.textContent='Failed';status.title='Structure not sent. Try Send page structure.';status.setAttribute('aria-label',status.title);}
+    else {clearSnapshotStatus();snapshotOwner='auto';const status=element('snapshot-status');status.textContent='Failed';status.title='Capture not saved. Try Analyze page.';status.setAttribute('aria-label',status.title);}
   }
   if(snapshotOwner==='manual' && snapshotError)element('error').textContent=snapshotError;
 }
@@ -430,11 +445,12 @@ autoStructure.onchange=async()=>{
 };
 chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local' && changes.autoSendStructure){autoStructure.checked=changes.autoSendStructure.newValue!==false;render(result);}});
 element('send-structure').onclick=async()=>{
-  const context=snapshotKey(result), recovered=result?.snapshotFeedback?.id;clearSnapshotStatus();snapshotBusy=true;snapshotOwner='manual';
-  element('send-structure').disabled=true;
-  try{const response=await send({type:'page-snapshot'});if(response.error || !response.ok)throw Error(response.error || 'Structure was not saved.');if(context===snapshotKey(result)){if(recovered){snapshotRecovered.add(recovered);await chrome.storage.session.set({snapshotFeedbackRecovered:[...snapshotRecovered].slice(-100)});}snapshotSent('manual');}
-  }catch(error){if(context===snapshotKey(result)){const status=element('snapshot-status');status.textContent='Failed';status.title=error.message;snapshotOwner='manual';snapshotError=error.message+' Try Send page structure again.';status.setAttribute('aria-label',snapshotError);element('error').textContent=snapshotError;}}
-  finally{snapshotBusy=false;element('send-structure').disabled=false;}
+  if(snapshotBusy)return;
+  const recovered=result?.snapshotFeedback?.id;clearSnapshotStatus();clearAnalysis();const version=analysisVersion;snapshotBusy=true;snapshotOwner='manual';
+  const button=element('send-structure');button.disabled=true;button.textContent='Analyzing…';button.setAttribute('aria-busy','true');
+  try{const response=await send({type:'page-snapshot'});if(response.error || !response.ok)throw Error(response.error || 'Analysis was not saved.');if(typeof response.summary!=='string' || !Array.isArray(response.findings))throw Error('Page analysis requires the updated local dashboard.');if(version===analysisVersion){if(recovered){snapshotRecovered.add(recovered);await chrome.storage.session.set({snapshotFeedbackRecovered:[...snapshotRecovered].slice(-100)});}renderAnalysis(response);snapshotSent('manual');}
+  }catch(error){if(version===analysisVersion){const status=element('snapshot-status');status.textContent='Failed';status.title=error.message;snapshotOwner='manual';snapshotError=error.message+' Try Analyze page again.';status.setAttribute('aria-label',snapshotError);element('error').textContent=snapshotError;}}
+  finally{snapshotBusy=false;button.disabled=false;button.textContent='Analyze page';button.removeAttribute('aria-busy');}
 };
 
 

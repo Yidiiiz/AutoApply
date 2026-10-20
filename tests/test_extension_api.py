@@ -1224,3 +1224,124 @@ def test_t059_disability_mapping_respects_policy(config, db, policy):
     q = Question('disability', 'Disability', 'combobox', False,
                  ['Yes, I have a disability, or have had one in the past'])
     assert AnswerResolver(config, db).resolve(q, dict(id=0, company='Fixture')) is None
+
+
+def analysis_payload(**changes):
+    control = dict(tag='input', role='combobox', id='proxy', **{'aria-readonly': 'true', 'aria-controls': 'choices'},
+                   readonly=True, opacity=0, transformed=True, rect=[-100, 30, .01, .2], value='PRIVATE')
+    field = dict(label='Full name', kind='text', required=True, detected=True, answered=False, options=[],
+                 control=control, ancestors=[dict(tag='div', **{'class': 'react-select__control'}, visible=True, rect=[0, 0, 200, 40])],
+                 reasons=['readonly_proxy', 'transparent_proxy'], menu=dict(observed=False, count=0, roles=[]),
+                 current_answer='PRIVATE', frame_id=0, page_identity='1:2:3')
+    payload = dict(host='fixture.test', context_url='https://fixture.test/application', nodes=[],
+                   diagnostic=dict(reason='page_analysis', fields=[field], busy=False, responsive=True),
+                   profile={'name': 'PRIVATE'}, actions=[dict(type='submit')])
+    payload.update(changes)
+    return payload
+
+
+def test_t060_analysis_saved_readonly_canonical_and_redacted(http_dashboard, config, monkeypatch):
+    from autoapply import codex_writer
+    monkeypatch.setattr(codex_writer.CodexWritingProvider, 'generate_response', lambda *a, **k: pytest.fail('Analysis must not call a provider'))
+    payload = analysis_payload()
+    payload['diagnostic']['fields'] += [dict(payload['diagnostic']['fields'][0], label='Unmapped synthetic widget', detected=False,
+        reasons=['readonly_proxy', 'transparent_proxy', 'omitted_by_scanner', 'disabled']),
+        dict(payload['diagnostic']['fields'][0], label='Email', answered=True)]
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', payload)
+    assert status == 200 and result['ok'], result
+    assert result['summary'] == '2 unfilled controls \u00b7 1 omitted by scanner'
+    assert result['findings'][0]['status'] == 'ready_for_saved_answer'
+    assert result['findings'][1]['status'] == 'unknown_concept'
+    assert any('visible parent control' in note for note in result['findings'][0]['notes'])
+    assert any('Scanner omitted' in note for note in result['findings'][1]['notes'])
+    assert 'filename' not in result and 'actions' not in result
+    saved = json.loads(next((config.private/'snapshots').glob('fixture.test-*.json')).read_text(encoding='utf-8'))
+    assert saved['id'] == result['analysis_id'] and saved['created_at'] and saved['source'] == 'manual_analysis'
+    assert saved['diagnostic']['provider'] == 'not_used'
+    row = saved['diagnostic']['fields'][0]
+    assert row['control']['opacity'] == 0 and row['control']['transformed']
+    assert row['control']['aria-controls'] == 'choices' and row['ancestors'][0]['class'] == 'react-select__control'
+    assert row['frame_id'] == 0 and row['page_identity'] == '1:2:3'
+    assert row['active'] and saved['diagnostic']['page_url'] == 'https://fixture.test/application'
+    encoded = json.dumps(saved) + json.dumps(result)
+    assert all(secret not in encoded for secret in ('PRIVATE', 'Test Student', 'student@example.test', 'current_answer', 'actions'))
+
+
+@pytest.mark.parametrize('change', [
+    {'control': {'tag': 'input', 'type': 'password'}},
+    {'control': {'tag': 'input', 'rect': [float('nan'), 0, 0, 0]}},
+    {'control': {'tag': 'input', 'opacity': 5}}, {'control': {'tag': 'input', 'readonly': 'yes'}},
+    {'ancestors': [{'tag': 'div'}]*5}, {'options': ['choice']*21}, {'detected': 'true'},
+    {'reasons': ['execute_script']}, {'menu': {'roles': ['<script>']}}, {'frame_id': -1},
+    {'page_identity': 'PRIVATE'}, {'kind': 'password'},
+])
+def test_t060_analysis_independent_validation(http_dashboard, change):
+    payload = analysis_payload()
+    payload['diagnostic']['fields'][0].update(change)
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[0] == 400
+
+
+def test_t060_analysis_empty_allfilled_bounds_and_provider_independence(http_dashboard, config, monkeypatch):
+    from autoapply import extension_api
+    payload = analysis_payload()
+    payload['diagnostic']['fields'][0]['answered'] = True
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]['summary'] == 'All inspected controls are filled.'
+    payload['diagnostic']['fields'] = []
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]['summary'] == 'No form controls found.'
+    payload['diagnostic']['fields'] = analysis_payload()['diagnostic']['fields'] * 51
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[0] == 400
+    payload = analysis_payload(context_url='https://different.test/')
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[0] == 400
+    payload = analysis_payload()
+    monkeypatch.setattr(extension_api.answers.AnswerResolver, 'resolve_result', lambda *a: (_ for _ in ()).throw(ValueError('unavailable')))
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]
+    assert result['ok'] and result['findings'][0]['status'] == 'answer_check_unavailable'
+    assert 'structural findings are still saved' in result['findings'][0]['notes'][-1]
+
+
+def test_t060_analysis_inspects_without_profile_and_option_mismatch(http_dashboard, config):
+    payload = analysis_payload()
+    payload['diagnostic']['fields'][0].update(kind='select', options=['Unrelated choice'])
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]
+    assert result['findings'][0]['status'] == 'no_offered_match'
+    # This is a temporary synthetic test profile, never the repository private data.
+    (config.private/'profile.yaml').unlink()
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', analysis_payload())[1]
+    assert result['ok'] and result['findings']
+    assert result['findings'][0]['status'] != 'ready_for_saved_answer'
+    for path in (config.private/'snapshots').glob('*.json'):
+        assert path.stat().st_size < 1000000
+
+
+def test_t060_inactive_context_is_not_an_answer_request(http_dashboard, config):
+    from copy import deepcopy
+    payload = analysis_payload()
+    prototype = payload['diagnostic']['fields'][0]
+    hidden = deepcopy(prototype)
+    hidden.update(label='Hidden mobile duplicate', active=True, reasons=['omitted_by_scanner'])
+    hidden['control'].update(display='none', rect=[0, 0, 0, 0], visible=True)
+    closed = deepcopy(prototype)
+    closed.update(label='Cookie panel', active=True, reasons=['hidden_parent', 'disabled'])
+    geometry = deepcopy(prototype)
+    geometry.update(label='Zero geometry parent', active=True, reasons=[])
+    geometry['ancestors'][0]['rect'] = [0, 0, 0, 0]
+    payload['diagnostic']['fields'] = [hidden, closed, geometry]
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]
+    assert result['findings'] == [] and result['summary'] == 'No active form controls found.'
+    saved = json.loads(next((config.private/'snapshots').glob('*.json')).read_text(encoding='utf-8'))
+    assert len(saved['diagnostic']['fields']) == 3
+    assert not any(f['active'] for f in saved['diagnostic']['fields'])
+
+
+def test_t060_page_paths_distinguishable_without_url_secrets(http_dashboard, config):
+    for job in ('job-one', 'job-two'):
+        payload = analysis_payload(context_url=f'https://user:URL_PASSWORD@fixture.test/{job}/apply?token=QUERY_SECRET#FRAGMENT_SECRET')
+        status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', payload)
+        assert status == 200 and result['ok']
+        assert 'page_url' not in result
+    saved = [json.loads(p.read_text(encoding='utf-8')) for p in (config.private/'snapshots').glob('*.json')]
+    assert {p['diagnostic']['page_url'] for p in saved} == {'https://fixture.test/job-one/apply', 'https://fixture.test/job-two/apply'}
+    assert all(secret not in json.dumps(saved) for secret in ('URL_PASSWORD', 'QUERY_SECRET', 'FRAGMENT_SECRET', 'user:'))
+    payload = analysis_payload(context_url='https://fixture.test/' + 'a'*3000)
+    assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[0] == 200
+    assert all(len(json.loads(p.read_text(encoding='utf-8'))['diagnostic']['page_url']) <= 2048 for p in (config.private/'snapshots').glob('*.json'))

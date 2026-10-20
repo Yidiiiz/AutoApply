@@ -148,11 +148,11 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     page.locator('h1').evaluate("e=>e.textContent='Changed step'")
     worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
     assert len(snapshots()) == 2
-    # Manual Send remains repeatable and must not invoke the scanner.
+    # Manual Analyze remains repeatable and must not invoke the scanner.
     worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{globalThis.savedScan=autoApplyContent.scan;autoApplyContent.scan=()=>{throw Error('diagnostics rescanned')};}})", tab_id)
     for _ in range(2):
         panel.locator('#send-structure').click()
-        expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+        expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     assert len(snapshots()) == 4
     assert panel.evaluate("()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left;}")
     worker.evaluate('id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=globalThis.savedScan;}})', tab_id)
@@ -197,7 +197,7 @@ def test_t056_writing_settles_and_snapshot_failure_manual_retry(loaded_extension
     fixture_delay(worker, release=['write'])
     expect(page.locator('[name=essay]')).to_have_value('I enjoy building useful local tools.')
     expect(panel.locator('#snapshot-status')).to_have_text('Failed', timeout=15000)
-    expect(panel.locator('#snapshot-status')).to_have_attribute('aria-label', 'Structure not sent. Try Send page structure.')
+    expect(panel.locator('#snapshot-status')).to_have_attribute('aria-label', 'Capture not saved. Try Analyze page.')
     assert worker.evaluate('snapshotAttempts') == 2
     expect(panel.locator('#snapshot-status')).to_have_text('Failed')
     expect(panel.locator('#autofill .fill-count')).to_have_text('7 fields filled')
@@ -208,12 +208,12 @@ def test_t056_writing_settles_and_snapshot_failure_manual_retry(loaded_extension
     panel.locator('#auto-send-structure').check()
     expect(panel.locator('#snapshot-status')).to_have_text('Failed')
     panel.locator('#send-structure').click()
-    expect(panel.locator('#error')).to_contain_text('Try Send page structure again.')
+    expect(panel.locator('#error')).to_contain_text('Try Analyze page again.')
     worker.evaluate('async id=>{const {tabResults}=await chrome.storage.session.get("tabResults");await chrome.runtime.sendMessage({type:"autofill-result",result:tabResults[id]});}', tab_id)
-    expect(panel.locator('#error')).to_contain_text('Try Send page structure again.')
+    expect(panel.locator('#error')).to_contain_text('Try Analyze page again.')
     worker.evaluate('()=>{globalThis.fetch=realFetch;}')
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     expect(panel.locator('#error')).to_be_empty()
     expect(panel.locator('#snapshot-status')).to_be_empty(timeout=4500)
     panel.evaluate('location.reload()')
@@ -222,7 +222,10 @@ def test_t056_writing_settles_and_snapshot_failure_manual_retry(loaded_extension
 
 
 @pytest.fixture
-def extension_server():
+def extension_server(config, db):
+    from autoapply.dashboard import Dashboard
+    from autoapply.extension_api import snapshot
+    analysis_dashboard = Dashboard(config, db)
     requests = []
     run = {"items": [], "index": 0}
     skill_aliases = {"ecmascript": "JavaScript"}
@@ -356,6 +359,8 @@ def extension_server():
                 gates["write"].wait(15)
                 answer = "Refined fixture answer." if payload.get("previous") else "I enjoy building useful local tools."
                 self.response(200, {"answer": answer, "words": len(answer.split()), "chars": len(answer)})
+            elif self.path == '/ext/snapshot' and payload.get('diagnostic', {}).get('reason') == 'page_analysis':
+                self.response(200, snapshot(analysis_dashboard, payload))
             elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember", "/ext/snapshot"}:
                 self.response(200, {"ok": True})
             elif self.path == "/ext/chat":
@@ -420,6 +425,7 @@ def extension_server():
         server.shutdown()
         server.server_close()
         thread.join()
+        analysis_dashboard.close()
 
 
 @pytest.fixture
@@ -1820,7 +1826,7 @@ def test_t039_labels_rules_navigation_and_snapshot(loaded_extension, extension_s
     panel = context.new_page()
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     worker.evaluate("""async id=>chrome.storage.session.set({tabResults:{[id]:{tabId:id,busy:true,waiting:true,fields:[],pending:[],writing:[],page:{},summary:{filled:0,skipped:0,errors:[]}}}})""", tab_id)
     expect(panel.locator('#autofill')).to_be_disabled()
     for name in ('fill','answers','chat'):
@@ -2737,17 +2743,17 @@ def test_t054_manual_submit_confirmation_and_narrow_utilities(loaded_extension, 
     page.screenshot(path=str(output/'settings-360x600.png'))
     panel.locator('#settings-back').click()
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     assert panel.evaluate('''()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left&&Math.abs(s.y+s.height/2-b.y-b.height/2)<2;}''')
     shot('sent-inline')
     expect(panel.locator('#snapshot-status')).to_be_empty(timeout=5000)
     panel.evaluate('''()=>{const send=chrome.runtime.sendMessage.bind(chrome.runtime);let failed=false;chrome.runtime.sendMessage=m=>m.type==='page-snapshot'&&!failed?(failed=true,Promise.resolve({error:'Fixture snapshot failed'})):send(m);}''')
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Failed')
-    expect(panel.locator('#error')).to_contain_text('Try Send page structure again')
+    expect(panel.locator('#error')).to_contain_text('Try Analyze page again')
     shot('snapshot-error')
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Sent')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     expect(panel.locator('#error')).to_be_empty()
     shot('snapshot-retry-sent')
     panel.locator('#minimize').click()
@@ -3259,3 +3265,167 @@ def test_t059_readonly_guards_and_responsive_fallback(loaded_extension, extensio
     mobile = worker.evaluate('async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>autoApplyContent.scan()}))[0].result', tab_id)
     assert len(mobile['fields']) == 4 and all(f['kind'] == 'select' for f in mobile['fields'])
     assert len({f['key'] for f in mobile['fields']}) == 4
+
+
+@pytest.mark.parametrize('width,kind', [(1000, 'combobox'), (480, 'select')])
+def test_t060_capture_derived_active_variants(loaded_extension, extension_server, config, width, kind):
+    # Reuse the sanitized actual T059 capture, including the tiny opacity-zero
+    # focus proxies and responsive native copies, rather than a generic mock.
+    page, worker, tab_id, requests = t059_page(loaded_extension, extension_server)
+    page.set_viewport_size(dict(width=width, height=850))
+    page.locator('form').evaluate('''form=>form.insertAdjacentHTML('beforeend', `
+      <div id="analysis-extras">
+        <aside style="visibility:hidden" aria-hidden="true"><div><div><div><div>
+          <label>Strictly necessary cookies<input type="checkbox" disabled></label>
+          <label>Analytics cookies<input type="checkbox"></label>
+        </div></div></div></div></aside>
+        <label>Application consent<input id="styled-consent" type="checkbox" style="opacity:0"></label>
+        <div role="switch" aria-label="Visible unsupported preference" aria-checked="false" tabindex="0">Preference</div>
+        <div role="checkbox" aria-label="Already checked custom choice" aria-checked="true" tabindex="0">Checked</div>
+        <label>Visible prerequisite<input disabled></label>
+      </div>`)''')
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel = next(f for f in page.frames if '/sidepanel.html' in f.url)
+    def analyze():
+        panel.locator('#send-structure').click()
+        expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
+        files = (config.private/'snapshots').glob('*.json')
+        return json.loads(max(files, key=lambda p: p.stat().st_mtime_ns).read_text(encoding='utf-8'))['diagnostic']
+    report = analyze()
+    active = [f for f in report['fields'] if f['active']]
+    demographics = [f for f in active if f['kind'] in {'combobox', 'select'}]
+    assert len(demographics) == 4 and {f['kind'] for f in demographics} == {kind}
+    assert len({f['label'] for f in demographics}) == 4
+    assert len(report['findings']) == 7, report
+    assert not any('cookies' in f['label'] or 'Already checked' in f['label'] for f in report['findings'])
+    assert any(f['label'] == 'Application consent' for f in report['findings'])
+    unsupported = next(f for f in report['findings'] if f['label'] == 'Visible unsupported preference')
+    assert not unsupported['detected'] and any('Scanner omitted' in n for n in unsupported['notes'])
+    assert any('Disabled control' in n for f in report['findings'] if f['label'] == 'Visible prerequisite' for n in f['notes'])
+    assert any(not f['active'] for f in report['fields'])
+    page.locator('#analysis-extras').evaluate('e=>e.remove()')
+    filled = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert filled['summary']['filled'] == 3, filled
+    report = analyze()
+    assert [f['label'] for f in report['findings']] == ['Ethnicity']
+    assert not report['findings'][0]['required']
+    assert page.evaluate('submissions') == 0
+    assert not any(path == '/ext/applied' for path, _, _ in requests)
+
+
+def test_t060_fresh_analysis_singleflight_bound_passive_report(loaded_extension, extension_server, config):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    page.route('**/t060.html', lambda route: route.fulfill(path=str(FIXTURES/'t060.html'), content_type='text/html'))
+    page.goto(server+'/t060.html')
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id', page.url)
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel = next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    expect(panel.locator('#send-structure')).to_have_text('Analyze page')
+    expect(panel.locator('#page-analysis')).to_be_hidden()
+    expect(panel.locator('#auto-send-structure')).to_be_enabled()
+    # A second active application must not steal this sidebar's explicitly bound tab.
+    other = context.new_page()
+    other.goto(server+'/job.html')
+    worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.analysisCalls=0;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot')){analysisCalls++;await new Promise(r=>globalThis.releaseAnalysis=r);}return analysisFetch(url,...args);};}")
+    before = page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select,[contenteditable]'),e=>[e.value,e.checked,e.textContent])")
+    panel.locator('#send-structure').evaluate('e=>{e.click();e.click()}')
+    expect(panel.locator('#send-structure')).to_have_text('Analyzing\u2026')
+    expect(panel.locator('#send-structure')).to_be_disabled()
+    expect(panel.locator('#send-structure')).to_have_attribute('aria-busy','true')
+    assert worker.evaluate("async()=>{for(let i=0;i<100 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10));return analysisCalls}") == 1
+    worker.evaluate('()=>releaseAnalysis()')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
+    expect(panel.locator('#page-analysis')).to_be_visible()
+    expect(panel.locator('#analysis-summary')).to_contain_text('unfilled controls')
+    expect(panel.locator('#analysis-details')).not_to_have_attribute('open','')
+    panel.locator('#analysis-details summary').click()
+    expect(panel.locator('#analysis-findings')).to_contain_text('Scanner omitted')
+    expect(panel.locator('#analysis-findings')).to_contain_text('Read-only focus proxy')
+    expect(panel.locator('#analysis-findings')).to_contain_text('saved answer is available')
+    assert page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select,[contenteditable]'),e=>[e.value,e.checked,e.textContent])") == before
+    assert page.evaluate('events') == []
+    payload = next(p for path,_,p in requests if path=='/ext/snapshot')
+    assert payload['context_url'] == page.url
+    proxy = next(f for f in payload['diagnostic']['fields'] if f['control'].get('id')=='proxy')
+    assert proxy['detected'] and not proxy['answered'] and proxy['control']['opacity']==0
+    assert proxy['control']['transformed'] and proxy['menu']['roles']==['none']
+    assert proxy['control']['aria-controls']=='choices'
+    assert any(not f['detected'] and f['control'].get('id')=='omitted' for f in payload['diagnostic']['fields'])
+    saved = next((config.private/'snapshots').glob('127.0.0.1-*.json')).read_text(encoding='utf-8')
+    assert 'PRIVATE_' not in json.dumps(payload)+saved
+    assert not any(path in {'/ext/answers','/ext/write','/ext/chat','/ext/remember','/ext/applied'} for path,_,_ in requests)
+    shots=ROOT/'.tmp/review/t060';shots.mkdir(parents=True,exist_ok=True)
+    (shots/'latest-analysis.json').write_text(saved,encoding='utf-8')
+    page.screenshot(path=str(shots/'fresh-analysis.png'))
+    panel.locator('#analysis-details summary').click()
+    page.set_viewport_size(dict(width=360,height=600))
+    page.screenshot(path=str(shots/'compact-analysis-360.png'))
+    assert panel.evaluate("()=>document.documentElement.scrollWidth<=innerWidth")
+    # Structural navigation invalidates the details without another Autofill.
+    page.locator('form').evaluate("e=>{const label=document.createElement('label');label.textContent='New application question';e.append(label)}")
+    expect(panel.locator('#page-analysis')).to_be_hidden()
+    expect(panel.locator('#snapshot-status')).to_be_empty()
+    worker.evaluate('()=>{globalThis.fetch=analysisFetch}')
+
+
+def test_t060_analysis_busy_preserves_scanner_handles(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server,key=KEY,autoSendStructure=False))
+    page=context.new_page();page.goto(server+'/form.html')
+    tab_id=worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id',page.url)
+    fixture_delay(worker,hold=['write'])
+    worker.evaluate('id=>{globalThis.heldFill=autoApplyAutofill(id);return true}',tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel=next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    value=worker.evaluate("async id=>{for(let i=0;i<1000;i++){const {tabResults={}}=await chrome.storage.session.get('tabResults');const r=tabResults[id];if(r?.writing?.length && !r.writingSettled)return r;await new Promise(r=>setTimeout(r,10));}throw Error('writing did not start')}",tab_id)
+    worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=()=>{throw Error('Analysis rescanned')};}})",tab_id)
+    before=page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select'),e=>[e.value,e.checked])")
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
+    assert next(p for path,_,p in requests if path=='/ext/snapshot')['diagnostic']['busy']
+    assert page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select'),e=>[e.value,e.checked])")==before
+    pending=next(f for f in value['pending'] if f['label']=='Unresolved')
+    key=pending['key'].split(':',1)[1]
+    applied=worker.evaluate("async ({id,key})=>{const [frame]=await chrome.scripting.executeScript({target:{tabId:id},func:async key=>autoApplyContent.fill([{key,value:'Synthetic fact',status:'RESOLVED'}]),args:[key]});return frame.result}",dict(id=tab_id,key=key))
+    assert applied['filled']==1
+    expect(page.locator('#missing')).to_have_value('Synthetic fact')
+    fixture_delay(worker,release=['write'])
+    worker.evaluate('()=>heldFill')
+    expect(page.locator('#writing')).to_have_value('I enjoy building useful local tools.')
+    assert page.evaluate('submissions')==0
+
+
+def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, extension_server):
+    context,worker,extension_id=loaded_extension
+    server,requests=extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)',dict(server=server,key=KEY))
+    page=context.new_page();page.goto(server+'/job.html')
+    tab_id=worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id',page.url)
+    worker.evaluate('id=>autoApplySidebar(id,"open")',tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel=next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#analysis-summary')).to_have_text('No form controls found.')
+    page.locator('body').evaluate("e=>e.insertAdjacentHTML('afterbegin','<form><label>Full name<input value=synthetic></label></form>')")
+    expect(panel.locator('#page-analysis')).to_be_hidden()
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#analysis-summary')).to_have_text('All inspected controls are filled.')
+    worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot'))await new Promise(r=>globalThis.releaseAnalysis=r);return analysisFetch(url,...args);};}")
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#send-structure')).to_be_disabled()
+    worker.evaluate("async()=>{for(let i=0;i<100 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10))}")
+    page.locator('label').evaluate("e=>e.firstChild.textContent='Different question'")
+    worker.evaluate('()=>releaseAnalysis()')
+    expect(panel.locator('#send-structure')).to_be_enabled()
+    expect(panel.locator('#page-analysis')).to_be_hidden()
+    assert all(path not in {'/ext/applied','/ext/answers','/ext/remember'} for path,_,_ in requests)
+    worker.evaluate("()=>{globalThis.fetch=async(url,...args)=>String(url).endsWith('/ext/snapshot')?{ok:true,status:200,json:async()=>({ok:true,filename:'legacy.json'})}:analysisFetch(url,...args)}")
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#error')).to_contain_text('requires the updated local dashboard')
+    expect(panel.locator('#page-analysis')).to_be_hidden()

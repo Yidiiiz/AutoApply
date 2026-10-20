@@ -218,7 +218,7 @@
   function questionText(element) {
     if (!element) return '';
     const copy=element.cloneNode(true);
-    copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"]').forEach(node=>node.remove());
+    copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"],[class*="single-value"],[class*="singleValue"]').forEach(node=>node.remove());
     return text(copy);
   }
   function label(element) {
@@ -526,16 +526,20 @@
     return true;
   }
 
+  const controlSelector='input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"]),[role="textbox"],[role="checkbox"],[role="radio"],[role="switch"]';
+  function scannerControls() {
+    return Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
+      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") && exposedFile(element) : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
+        !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
+        !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
+        !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
+  }
   async function scan() {
     const started = performance.now();
     const previousRecords = records;
     records = new Map();
     const fields = [];
-    const controls = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
-      .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") && exposedFile(element) : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
-        !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
-        !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
-        !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
+    const controls = scannerControls();
     const grouped = new Set();
     const repeated = new Set();
     const keys = new Set();
@@ -1633,18 +1637,78 @@
     })) return null;
     return pageStructure();
   }
+  const diagnosticExcluded=element=>Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
+    element.matches('input[type="hidden"],input[type="password"]') || /captcha|honeypot|honey.?pot|fax|website_confirm|password|secret|token|api.?key/i.test([element.id,element.name,element.getAttribute('autocomplete')].join(' '));
+  function structureOf(element) {
+    const style=getComputedStyle(element),rect=element.getBoundingClientRect();
+    const row={tag:element.tagName.toLowerCase(),visible:Boolean(rect.width && rect.height && style.display!=='none' && style.visibility!=='hidden'),
+      disabled:Boolean(element.disabled || element.matches(':disabled')),readonly:Boolean(element.readOnly),
+      display:style.display,visibility:style.visibility,opacity:Number(style.opacity),
+      rect:[rect.x,rect.y,rect.width,rect.height].map(n=>Math.round(Math.max(-100000,Math.min(100000,n))*100)/100),
+      transformed:style.transform!=='none',transform:style.transform.slice(0,200)};
+    for(const attr of ['role','type','id','name','class','data-automation-id','aria-label','aria-labelledby','aria-controls','aria-owns','aria-haspopup','aria-expanded','aria-disabled','aria-readonly','aria-hidden','inputmode','aria-autocomplete']) {
+      const value=element.getAttribute(attr);if(value)row[attr]=value.slice(0,300);
+    }
+    return row;
+  }
+  // No scan, focus, clicks, keys, or menu opening: retain all live filling handles.
+  function inspectPage() {
+    const started=performance.now();
+    const identity=snapshotIdentity(),detected=new Set(scannerControls()),fields=[],grouped=new Set();let truncated=false;
+    for(const element of document.querySelectorAll(controlSelector)) {
+      if(diagnosticExcluded(element) || ['submit','reset','image','button'].includes(element.type) && !element.matches('[aria-haspopup="listbox"],[role="combobox"]') || grouped.has(element))continue;
+      if(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])') || element.closest('[role="combobox"]') && !element.matches('[role="combobox"]'))continue;
+      const kind=element.tagName==='SELECT'?'select':element.matches('[role="combobox"],[aria-haspopup="listbox"]')?'combobox':element.tagName==='TEXTAREA'||element.isContentEditable?'textarea':element.type || element.getAttribute('role') || 'text';
+      const supported=['text','textarea','select','radio','checkbox','combobox','file','date','number','email','tel','url'].includes(kind);
+      const container=['radio','checkbox'].includes(kind)?choiceContainer(element):null;
+      let members=['radio','checkbox'].includes(kind)?Array.from(document.querySelectorAll('input')).filter(other=>other.type===kind && other.form===element.form && (kind==='radio' && element.name?other.name===element.name:choiceContainer(other)===container && (container || other===element))):[element];
+      if(!members.length)members=[element];
+      members.forEach(member=>grouped.add(member));
+      const fieldLabel=kind==='file'?fileLabel(element):members.length>1?choiceQuestion(element)||groupLabel(container,label(element)):label(element);
+      const ancestors=[];for(let parent=element.parentElement;parent && !parent.matches('body,html') && ancestors.length<4;parent=parent.parentElement)ancestors.push(structureOf(parent));
+      const exposed=ancestors.some(parent=>parent.visible && parent.opacity>0 && parent.visibility==='visible');
+      // Include hidden native fallbacks only when related to an exposed field.
+      if(!element.getClientRects().length && !exposed)continue;
+      const optionNodes=kind==='select'?Array.from(element.options).filter(o=>!o.disabled && o.value!==''):kind==='combobox'?comboOptions(element):[];
+      const options=['radio','checkbox'].includes(kind)?members.map(label):optionNodes.map(questionText);
+      const menuContainers=kind==='combobox'?[...new Set([...(element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || '').split(/\s+/).map(id=>document.getElementById(id)),...comboContainer(element).querySelectorAll('[role="listbox"],.react-select__menu')].filter(Boolean))].slice(0,2):[];
+      const field={label:fieldLabel.slice(0,300),kind:supported?kind:'text',required:members.some(e=>e.required || e.getAttribute('aria-required')==='true') || /\*/.test(fieldLabel),
+        multiple:Boolean(kind==='checkbox' && members.length>1 || element.multiple || element.getAttribute('aria-multiselectable')==='true'),
+        detected:supported && detected.has(element) && !(['radio','checkbox'].includes(kind) && !element.closest('form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]')),
+        answered:element.matches('[role="checkbox"],[role="radio"],[role="switch"]') && !element.matches('input')?['true','mixed'].includes(element.getAttribute('aria-checked')):
+          supported?Boolean(occupied({element,members,field:{kind}})):element.matches('[role="textbox"]')?Boolean(clean(element.textContent)):false,
+        options:options.slice(0,20).map(s=>s.slice(0,200)),control:structureOf(element),ancestors,
+        menu:{observed:optionNodes.length>0,count:Math.min(optionNodes.length,10000),roles:[...new Set(optionNodes.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),containers:menuContainers.map(structureOf),option_shapes:optionNodes.slice(0,3).map(structureOf)},
+        reasons:[]};
+      if(!supported)field.reasons.push('unsupported_widget');
+      if(element.readOnly || element.getAttribute('aria-readonly')==='true')field.reasons.push(selectOnlyControl(element)?'readonly_proxy':'readonly');
+      if(element.disabled || element.matches(':disabled') || element.closest('[aria-disabled="true"],[disabled]'))field.reasons.push('disabled');
+      if(ancestors.some(p=>!p.visible || p.opacity===0 || p['aria-hidden']==='true') || element.closest('[hidden],[inert],[aria-hidden="true"]'))field.reasons.push('hidden_parent');
+      if(!field.control.visible)field.reasons.push('hidden_control');
+      if(Number(getComputedStyle(element).opacity)===0)field.reasons.push('transparent_proxy');
+      if(!field.detected)field.reasons.push('omitted_by_scanner');
+      if(kind==='combobox' && !options.length)field.reasons.push('menu_not_exposed');
+      if(fields.length>=50){truncated=true;break;}fields.push(field);
+    }
+    analysisIdentity=identity;
+    return {identity,diagnostic:{reason:'page_analysis',fields,truncated,busy:Boolean(extensionFilling || skillsState.busy),responsive:document.readyState!=='loading',inspection_ms:Math.min(30000,Math.round(performance.now()-started))}};
+  }
+  let analysisIdentity,analysisTimer;
+  new MutationObserver(()=>{if(!analysisIdentity)return;clearTimeout(analysisTimer);analysisTimer=setTimeout(()=>{
+    if(analysisIdentity!==snapshotIdentity()){analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});}
+  },150);}).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['hidden','style','class','aria-label','aria-hidden','disabled','id']});
   function pageStructure() {
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
     const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,[role],[data-automation-id],[contenteditable="true"]';
     for (const element of document.querySelectorAll(selector)) {
-      if (element.closest('#autoapply-sidebar,.autoapply-ask-ai')) continue;
+      if (diagnosticExcluded(element)) continue;
       const row={tag:element.tagName.toLowerCase(), visible:Boolean(element.getClientRects().length && getComputedStyle(element).visibility!=='hidden')};
       for (const attr of ['role','type','id','name','data-automation-id','aria-label']) {
         const value=element.getAttribute(attr); if(value) row[attr]=value.slice(0,2000);
       }
       const labelledby=referencedLabel(element,'aria-labelledby'); if(labelledby)row.labelledby=labelledby.slice(0,2000);
-      if (element.matches('input,textarea,select,button,[role="combobox"]')) row.label=label(element).slice(0,2000);
-      if (element.matches('label,legend,h1,h2,h3,h4,h5,h6,option,button,[role="heading"],[role="option"],[data-automation-id="richText"],[data-automation-id="formLabel"]')) {
+      if (element.matches('input,textarea,select,[role="combobox"]')) row.label=label(element).slice(0,2000);
+      if (element.matches('label,legend,option,[role="option"],[data-automation-id="formLabel"]')) {
         const copy=element.cloneNode(true);
         copy.querySelectorAll('input,textarea,[contenteditable],script,style,[data-automation-id="selectedItem"]').forEach(node=>node.remove());
         if (!element.isContentEditable) row.text=text(copy).slice(0,2000);
@@ -1692,7 +1756,7 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===action.text))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
   globalThis[singleton]=globalThis.autoApplyContent;
   if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
 })();

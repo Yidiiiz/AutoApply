@@ -713,9 +713,9 @@ Chrome runs show a compact progress line with an icon cancel action. The line cl
 
 The extension Chat tab includes Chat and Answer helper. Written fields offer Ask AI, and generated answers stay editable in Answers for that application. Use job description controls whether the saved posting text and link are sent as AI reference context. Scrollbars follow the light or dark theme.
 
-The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Send page structure in the footer sends only form metadata (no input values or file contents) through the paired `POST /ext/snapshot` endpoint. Snapshots are capped at 1 MB and saved under `data/private/snapshots/<host>-<timestamp>.json` for markup debugging.
+The extension keeps Next page and auto-advance in a footer across all tabs. Final submission stays manual. Written-response fields have a small Ask AI button below them that opens Chat → Answer helper. The minimized flag can be dragged vertically; its position is remembered per site. Analyze page in the footer inspects the bound application before or after Autofill. It shows a compact unfilled/omitted count and expandable field findings, then saves a private report through the paired `POST /ext/snapshot` endpoint. Analyzing disables duplicate clicks immediately. Reports stay under 1 MB in `data/private/snapshots/<host>-<timestamp>.json`; the extension shows no local filename.
 
-The small accessible switch beside **Send page structure** enables automatic
+The small accessible switch beside **Analyze page** enables automatic
 captures and defaults on. Its preference persists in extension local storage.
 After known profile/choice resolution and all writing settle, the background
 captures remaining unknown or failed fields even with the sidebar closed.
@@ -728,15 +728,21 @@ A SHA-256 signature covers the tab, URL/step, sanitized structure and unresolved
 field metadata; up to 100 signatures persist in session storage across worker
 restarts. Each signature gets at most two send attempts, with one short retry.
 Changed steps or unresolved sets can capture again. Failures do not block filling;
-the footer offers **Send page structure** for an explicit, repeatable retry.
-Turning the switch off stops automatic captures; manual Send stays available.
+the footer offers **Analyze page** for an explicit, repeatable retry.
+Turning the switch off stops automatic captures; manual Analyze stays available.
 
-Optional snapshot diagnostics retain only `reason: unresolved_fields` and up to
+Automatic snapshot diagnostics retain `reason: unresolved_fields` and up to
 50 field labels/kinds/option lists (labels 300 characters, at most 20 options of
 200 characters each). Values, answers, private profile data and arbitrary metadata
 are discarded. Existing snapshots remain readable. Snapshots are queued for the
 next active review session. They cannot wake the supervisor and do not launch
 code workers or promise automatic fixes.
+
+Manual `reason: page_analysis` reports add a stable ID, timestamp, host and frame/page identities, detected/answered booleans, read-only/disabled/ARIA flags, relationship IDs, parent classes, computed visibility/opacity/transform and bounded rectangles. A server-sanitized `page_url` retains the HTTP(S) origin and source path (at most 2048 characters), strips credentials/query/fragment and validates the host; it stays in the private report. Available menu containers and option shapes include roles, including role-less React Select options. Closed menus are reported as unobserved: Analyze never opens menus or dispatches form events. Up to 50 controls are retained (220 KB client diagnostic budget, 20 choice labels per control, four ancestors); truncation is explicit. The server derives each field's `active` flag from validated geometry, visibility and reasons: hidden responsive alternatives and closed auxiliary panels remain structural context but produce no findings or missing-fact requests. Visible select-only focus proxies, transparent native checkboxes and visible omitted widgets remain assessed; visible disabled controls can explain prerequisites.
+
+Canonical saved-answer resolution is read-only. Findings distinguish available saved answers, unknown mappings, incompatible offered choices, writing and missing user facts, with separate widget/visibility causes. Saved facts and current answers never appear in the report or response. Input, textarea and editable values, file contents, hidden credentials and selected choices are excluded; only answered booleans and structural option labels remain. The server independently validates geometry, nested structures, flags, kinds and bounds and discards unknown keys. Analysis uses no AI provider and remains useful without one or without a saved profile. The concise details note says “Details saved for review.” No code is automatically fixed.
+
+Navigation or changed form structure clears stale results; responses are checked against frame document/page identities before display. During Autofill or writing, inspection remains passive and labels that snapshot as busy. Existing scanner handles, Workday/skills state and answers are preserved. The existing automatic capture switch retains its preference, serial dedupe, two attempts and manual recovery; automatic events do not invoke AI. An active supervisor can read the newest private report and use the existing review/fix workflow.
 
 Main Autofill handles matched skills automatically. The Skills disclosure offers retry, exclusions and cancellation. It searches and verifies one skill at a time. On Workday, current roles verify the checkbox and hidden/disabled To dates. The CC-305 Self Identify form uses the profile name and disability preference, English, and today’s local date (MM/DD/YYYY); Employee ID stays empty.
 
@@ -776,7 +782,7 @@ sidebar does not fill any skills. The duplicate Type to Add Skills prompt is
 hidden from pending and completed Answers; actual questionnaire answers remain actionable.
 
 Autofill, Next page and the attached Auto switch sit at the bottom, followed by the
-text-only Send page structure link. Workday step narration and saved-trace notices
+text-only Analyze page link. Workday step narration and saved-trace notices
 are hidden; step detection and automatic trace collection remain active.
 
 ## Lunar sidebar and dashboard

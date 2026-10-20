@@ -22,7 +22,7 @@ async function showSidebar(tabId, mode='open') {
 chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'open').catch(async error=>{
   console.error(error);await chrome.action.setTitle({tabId:tab.id,title:error.message});await chrome.action.setBadgeText({tabId:tab.id,text:'!'});
 }));
-chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.status==='complete'){
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading')chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});if(change.status==='complete'){
   chrome.storage.session.get(['sidebarTabs','chromeRun']).then(({sidebarTabs={},chromeRun})=>{
     const state=sidebarTabs[tabId] || (chromeRun?.active&&chromeRun.tabId===tabId?'open':null);
     if(state) return showSidebar(tabId,state);
@@ -32,6 +32,7 @@ globalThis.autoApplySidebar=showSidebar;
 let running = false;
 const activeResults = new Map(), writingTasks = new Map();
 const manualActionTabs = new Set();
+const analysisTasks = new Map();
 const skillSelections = new Map();
 const snapshots=snapshotCollector({api,report,delay:ms=>delay(ms),current:result=>activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId) && !pendingSteps.has(result.tabId)});
 function skillContext(result) {
@@ -490,11 +491,39 @@ async function action(message) {
   }
   if (message.type === 'page-snapshot') {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
-    const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent.pageStructure()});
-    const saved=await api('/ext/snapshot',frame.result);
-    const current=activeResults.get(tab.id);
-    if(saved.ok && current?.url===tab.url){current.snapshotFeedback=undefined;await report(current);}
-    return saved;
+    if(!tab?.id || !/^https?:/.test(tab.url || ''))throw Error('Open an application page first.');
+    if(analysisTasks.has(tab.id))return analysisTasks.get(tab.id);
+    const task=(async()=>{
+      // Passive inspection is safe during filling; it never scans or opens menus.
+      const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>{
+        const api=globalThis.autoApplyContent;
+        return api?{...api.inspectPage(),...api.pageStructure()}:null;
+      }});
+      const available=frames.filter(f=>f.result);
+      if(!available.some(f=>f.frameId===0))throw Error('Page inspection unavailable. Reload the application and retry.');
+      const nodes=[],fields=[];let truncated=false,size=0,fieldBytes=0;const encoder=new TextEncoder();
+      for(const frame of available){
+        truncated ||= frame.result.truncated || frame.result.diagnostic.truncated;
+        for(const field of frame.result.diagnostic.fields){const row={...field,frame_id:frame.frameId,page_identity:frame.result.identity};fieldBytes+=encoder.encode(JSON.stringify(row)).length;if(fields.length>=50 || fieldBytes>220000){truncated=true;break;}fields.push(row);}
+      }
+      const diagnostic={reason:'page_analysis',fields,truncated,busy:Boolean(running || skillsRunning || writingTasks.has(tab.id) || activeResults.get(tab.id)?.coverBusy || available.some(f=>f.result.diagnostic.busy)),responsive:available.every(f=>f.result.diagnostic.responsive),inspection_ms:Math.min(30000,available.reduce((sum,f)=>sum+f.result.diagnostic.inspection_ms,0))};
+      const budget=900000-encoder.encode(JSON.stringify(diagnostic)).length;
+      for(const frame of available)for(const node of frame.result.nodes){size+=encoder.encode(JSON.stringify(node)).length+1;if(nodes.length>=10000 || size>budget){truncated=true;break;}nodes.push(node);}
+      async function unchanged(){
+        if((await chrome.tabs.get(tab.id)).url!==tab.url)return false;
+        const latest=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.analysisContext()});
+        return available.every(frame=>latest.some(f=>f.frameId===frame.frameId && f.documentId===frame.documentId && f.result===frame.result.identity));
+      }
+      if(!await unchanged())throw Error('Application changed. Analyze page again.');
+      const context=new URL(tab.url);context.search='';context.hash='';context.username='';context.password='';
+      const saved=await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic});
+      if(!await unchanged())throw Error('Application changed. Analyze page again.');
+      const current=activeResults.get(tab.id);
+      if(saved.ok && current?.url===tab.url){current.snapshotFeedback=undefined;await report(current);}
+      return {...saved,tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
+    })();
+    analysisTasks.set(tab.id,task);
+    try{return await task;}finally{analysisTasks.delete(tab.id);}
   }
   if(message.type==='retry-submission-tracking') {
     const {tabResults={},autofillTabs={}}=await chrome.storage.session.get(['tabResults','autofillTabs']);
@@ -597,6 +626,9 @@ async function drainSteps() {
   stepDrain = setTimeout(drainSteps, 100);
 }
 chrome.runtime.onMessage.addListener((message, sender) => {
+  if(message.type==='analysis-changed' && sender.id===chrome.runtime.id && sender.tab?.id){
+    chrome.runtime.sendMessage({type:'analysis-invalidated',tabId:sender.tab.id}).catch(()=>{});return;
+  }
   if (message.type !== "workday-step" || sender.id !== chrome.runtime.id ||
       !sender.tab?.id || sender.frameId !== 0) return;
   if (activeResults.get(sender.tab.id)?.busy || cancelledTabs.has(sender.tab.id)) return;
@@ -613,6 +645,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return true;
   }
   if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference"].includes(message.type)) return;
+  if(message.type==='page-snapshot'){
+    const bound=Number(new URL(sender.url).searchParams.get('tabId'));
+    if(bound && message.tabId!==bound){respond({error:'Application binding changed. Reopen the sidebar.'});return;}
+  }
   if(['manual-submit','retry-submission-tracking'].includes(message.type) && (sender.url?.split('?')[0]!==chrome.runtime.getURL('sidepanel.html') ||
      sender.tab?.id && !sender.tab.url?.startsWith(chrome.runtime.getURL('')) && sender.tab.id!==message.tabId ||
      new URL(sender.url).searchParams.has('tabId') && Number(new URL(sender.url).searchParams.get('tabId'))!==message.tabId))return;

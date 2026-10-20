@@ -886,3 +886,68 @@ Focused existing demographic/decline/standard-answer and exact-option regression
 passed 38 tests in 12.83s. Python AST, JavaScript syntax and git diff --check passed.
 All evidence here is from local fixtures and synthetic profiles; no live services,
 application submission or applicant-data changes were performed in attempt 2.
+
+
+T060: Replaced the footer Send page structure action with Analyze page while
+preserving its IDs, small text-button placement and automatic-capture preference.
+Fresh passive inspection uses the scanner's existing eligibility helpers without
+running scan, replacing records, opening menus, filling or submitting. It includes
+native/custom controls omitted by scanning, answered/detected flags, required and
+choice metadata, read-only/disabled/ARIA relationships, bounded ancestor geometry,
+classes, opacity/transform, observed menu/option roles and inspection timing.
+Immediate Analyzing state plus background single-flight prevents duplicate saves.
+Compact findings expand above the footer; stale navigation/form/application
+bindings clear them, and busy snapshots explain that filling remains active.
+
+The paired snapshot endpoint independently validates the new nested schema and
+saves a stable ID, timestamp, host, frame/page identity and deterministic findings
+under private snapshots. Unknown keys, input/textarea/editable values, credentials,
+file contents and current selections are excluded. Reports retain answered
+booleans and structural option labels only, at most 50 controls/10000 nodes and
+less than 1 MB. Canonical resolution is read-only and never returns saved facts.
+Analysis requires neither a profile nor an AI provider. No provider enrichment is
+used; closed menus remain explicitly unobserved. Capture does not wake a chat,
+launch a worker or patch code. An active supervisor can inspect the newest report
+and use the existing review/fix workflow. Legacy automatic diagnostics retain the
+serial dedupe, preference, two-attempt retry and manual recovery behavior.
+
+Validation used .venv Python and local fixtures only. The final T060 plus legacy
+snapshot API selection passed 17 tests in 7.22s; the final three actual MV3 Analyze
+cases passed in 12.73s, including fresh inspection, explicit tab binding, immediate
+busy/double-click handling, busy-writing handle preservation, empty/all-filled,
+stale responses, and honest rejection of a legacy response without findings.
+Earlier focused selections passed 14 MV3 T056/T059/T039/T060 cases in 94.39s,
+10 T059/T039/T060 cases in 60.46s, and eight T056/T054/T060 cases in 62.70s.
+The API/provider selection passed 39 tests in 13.96s, including T059 and stubbed
+Codex-provider regressions. Python AST, JavaScript syntax and git diff --check
+passed. Synthetic screenshots (expanded and compact 360px) and a sanitized report
+are in .tmp/review/t060/. Initial test-temp permissions were avoided using unique
+workspace basetemp directories; no global settings were changed.
+
+No full suite, live provider/employer/Discord request, real application submission,
+main applicant-data change, orchestration/runtime edit, worker creation, staging,
+commit, push, deployment, server restart or budget change was performed.
+
+T060 attempt 2 narrow correction: private reports retain inactive structural
+context with a server-derived active flag, while findings/counts exclude hidden
+responsive copies and closed cookie panels. Geometry/ancestor checks preserve
+tiny transparent select-only proxies, styled native checkboxes, visible omitted
+widgets and informational disabled controls. An inactive-only capture says no
+active form controls were found. Reports now retain a host-validated HTTP(S)
+origin/path page_url bounded to 2048 characters, without userinfo, query or
+fragment. The UI note is “Details saved for review.” Existing draft edits remain.
+
+Focused .venv validation: final T060/legacy snapshot API selection passed 19 tests
+in 7.15s; final T060 MV3 selection passed five tests in 24.98s. The two new browser
+cases reuse the sanitized actual T059 demographic fixture at desktop/mobile
+widths: four active variants without duplicates, hidden cookie controls excluded,
+transparent consent/visible unsupported/disabled controls retained, checked custom
+ARIA excluded, and only optional Ethnicity remaining after three known fills.
+Two initial new-browser failures were fixture frame-selection errors, corrected
+before the final run; one API fixture needed its existing proxy reasons retained.
+An offline assessment of the existing sanitized live-inspection.json confirms
+20 raw controls become 14 active, with four demographic proxies and no fallback
+or cookie asks. Same-host job-path distinction, URL secret removal/bounds and
+inactive-only summaries are covered by the API tests. Python AST, JavaScript
+syntax and git diff --check passed. No full/provider suite or live requests were
+run in this correction; the earlier regression evidence above remains historical.

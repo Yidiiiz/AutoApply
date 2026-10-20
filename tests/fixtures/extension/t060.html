@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Analysis fixture</title>
+<style>body{font:16px sans-serif;margin:24px}label{display:block;margin:12px 0}.react-select__control{border:1px solid gray;width:240px;min-height:32px}.proxy{opacity:0;transform:scale(.01);width:1px}.fallback{display:none}</style>
+<form><label for="full">Full name</label><input id="full" required>
+<label for="omitted">Unavailable control</label><input id="omitted" disabled required>
+<label for="proxy">Gender</label><div class="react-select"><div class="react-select__control"><input id="proxy" class="proxy" role="combobox" aria-readonly="true" aria-autocomplete="none" aria-haspopup="listbox" aria-controls="choices" inputmode="none"></div><div id="choices" class="react-select__menu"><div class="react-select__option">Choose not to self-identify</div><div class="react-select__option">Other</div></div><select aria-label="Gender mobile fallback" class="fallback"><option value="">Select</option><option>Other</option></select></div>
+<label for="existing">Existing answer</label><input id="existing" value="PRIVATE_TYPED_VALUE">
+<label for="bio">Biography</label><textarea id="bio">PRIVATE_TEXTAREA_VALUE</textarea>
+<label for="editor">Notes</label><div id="editor" contenteditable="true">PRIVATE_EDITABLE_VALUE</div>
+<input type="hidden" name="token" value="PRIVATE_TOKEN"><input type="password" value="PRIVATE_PASSWORD"><input name="honeypot" value="PRIVATE_HONEYPOT"><input type="file" aria-label="Resume">
+<button type="submit">Submit application</button><button type="button" id="next">Next</button></form>
+<script>window.events=[];document.addEventListener('input',()=>events.push('input'));document.addEventListener('change',()=>events.push('change'));document.querySelector('form').onsubmit=e=>{e.preventDefault();events.push('submit')};document.getElementById('next').onclick=()=>events.push('next');</script>

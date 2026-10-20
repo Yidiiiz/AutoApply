@@ -31,7 +31,7 @@ wide. Long company/job names truncate visually with full title/accessibility tex
 gear, minimize and close never shrink. Active-run controls appear only when
 relevant. Tabs and content have independent scroll space. Autofill and Next page
 share the persistent bottom row, with an attached unlabeled auto-advance switch and a final tiny
-Send page structure utility with an accessible automatic-diagnostics switch. Auto-advance retains the per-profile preference and all
+Analyze page utility with an accessible automatic-diagnostics switch. Auto-advance retains the per-profile preference and all
 existing validation, cancellation and final-submit guards. Actionable sign-in,
 wait, cancellation, retry, upload and writing errors stay visible.
 
@@ -105,17 +105,19 @@ Next page switch keeps its accessible name, focus outline and saved preference;
 its on-state lock is centered in the knob, with no visible Auto label. Final
 review still disables auto-advance and requires an explicit Submit click.
 
-The small switch beside Send page structure defaults on and persists locally.
+The small switch beside Analyze page defaults on and persists locally.
 The background captures settled unknown/failed fields, including after writing,
-using passive structure reads. Automatic and manual success share the short Sent
-inline left of Send page structure, fading after 2.5 seconds and clearing at 2.8.
+using passive structure reads. Automatic success says Sent; manual success says Analyzed,
+inline left of Analyze page, fading after 2.5 seconds and clearing at 2.8.
 Stable capture events and session seen markers prevent rerenders, saved-signature
 reruns and preference changes from replaying success. Automatic failure stays as
 compact Failed with accessible retry detail; manual recovery clears the error.
-Turning automatic capture off hides its feedback; manual Send remains available.
+Turning automatic capture off hides its feedback; manual Analyze remains available.
 There is no separate above-footer success line. These
 snapshots await the next active review session; they never wake a supervisor or
 start automatic code fixes. Local fixture evidence is in .tmp/review/t056/.
 
 
 T057: Hide legacy application status segments and Worker navigation from both layout and keyboard focus. Queue remains the default, and legacy hashes redirect to visible panels. Fixture screenshots at 1440px and 500px verify navigation and horizontal fit. Toolbar actions restore the sidebar rather than toggling it closed; minimized and dismissed states remain separate controls. Chat replacement requires an explicit user request and one eligible field, preserves the full draft, and shows success only after verified replacement. Narrow chat evidence is fixture-only; actual employer acceptance is pending review.
+
+T060: Analyze page keeps the small footer text action and automatic-capture switch. It changes immediately to Analyzing with aria-busy and is disabled until completion. A result-only summary above the footer shows active unfilled and omitted counts; Analysis details expands a bounded, scrollable list of field explanations. Hidden responsive copies and closed auxiliary panels remain report context, excluded from findings. No modal, new tab, empty analysis block or new fill control is introduced. Navigation/form changes clear the analysis. The concise note says “Details saved for review.” Explicit Autofill remains the apply control.

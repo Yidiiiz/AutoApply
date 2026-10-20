@@ -4,6 +4,7 @@ import base64
 import calendar
 from dataclasses import replace
 import json
+import math
 import re
 import time
 import threading
@@ -293,6 +294,178 @@ def trace(dashboard, payload):
     return dict(ok=True, filename=filename)
 
 
+def _analysis_structure(value):
+    if not isinstance(value, dict) or not isinstance(value.get('tag'), str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,30}', value['tag']):
+        raise SettingsRejected('Invalid analysis control')
+    strings = {'tag', 'role', 'type', 'id', 'name', 'class', 'data-automation-id', 'aria-label',
+               'aria-labelledby', 'aria-controls', 'aria-owns', 'aria-haspopup', 'aria-expanded',
+               'aria-disabled', 'aria-readonly', 'aria-hidden', 'inputmode', 'aria-autocomplete', 'display', 'visibility'}
+    row = {}
+    for key in strings & value.keys():
+        if not isinstance(value[key], str):
+            raise SettingsRejected('Invalid analysis attribute')
+        row[key] = value[key][:300]
+    if row.get('type') in {'password', 'hidden'}:
+        raise SettingsRejected('Sensitive analysis control')
+    for key in ('visible', 'disabled', 'readonly', 'transformed'):
+        if type(value.get(key, False)) is not bool:
+            raise SettingsRejected('Invalid analysis flag')
+        row[key] = value.get(key, False)
+    opacity, rect = value.get('opacity', 1), value.get('rect', [0, 0, 0, 0])
+    if (type(opacity) not in (int, float) or not math.isfinite(opacity) or not 0 <= opacity <= 1 or
+            not isinstance(rect, list) or len(rect) != 4 or any(type(n) not in (int, float) or not math.isfinite(n) or abs(n) > 100000 for n in rect)):
+        raise SettingsRejected('Invalid analysis geometry')
+    row.update(opacity=opacity, rect=rect)
+    transform = value.get('transform', 'none')
+    if not isinstance(transform, str) or len(transform) > 200 or not re.fullmatch(r'none|matrix(?:3d)?\([-+0-9.eE, ]+\)', transform):
+        raise SettingsRejected('Invalid analysis transform')
+    row['transform'] = transform
+    return row
+
+
+def _analysis_active(field):
+    """Separate inactive structural context from the current form assessment."""
+    control, parents = field['control'], field['ancestors']
+    def exposed(shape):
+        return (shape['rect'][2] > 0 and shape['rect'][3] > 0 and
+                shape.get('display') != 'none' and shape.get('visibility') not in {'hidden', 'collapse'} and
+                shape.get('aria-hidden') != 'true')
+    if ('hidden_parent' in field['reasons'] or
+            any(not exposed(parent) or parent['opacity'] == 0 for parent in parents)):
+        return False
+    if control.get('display') == 'none' or control.get('visibility') in {'hidden', 'collapse'} or control.get('aria-hidden') == 'true':
+        return False
+    # Transparent native controls and tiny select-only focus proxies are real
+    # controls when their surrounding widget/label is exposed.
+    proxy = (control.get('role') == 'combobox' and 'readonly_proxy' in field['reasons'] or
+             control.get('tag') == 'input' and control.get('type') in {'checkbox', 'radio', 'file'})
+    return bool(exposed(control) and control['opacity'] > 0 or proxy and any(exposed(p) and p['opacity'] > 0 for p in parents))
+
+
+def _analysis_context(value, host):
+    try:
+        parts = urlsplit(value)
+        if parts.scheme not in {'http', 'https'} or parts.hostname != host.lower():
+            raise ValueError()
+        origin = parts.scheme + '://' + parts.hostname + (f':{parts.port}' if parts.port is not None else '')
+        page_url = (origin + (parts.path or '/'))[:2048]
+        # Keep query-based application matching ephemeral; never persist it.
+        context_url = _url(origin + (parts.path or '/') + ('?' + parts.query if parts.query else ''))
+    except (ValueError, TypeError, AttributeError):
+        raise SettingsRejected('Invalid analysis context URL') from None
+    return context_url, page_url
+
+
+def _page_analysis(dashboard, payload, host):
+    diagnostic = payload['diagnostic']
+    fields = diagnostic.get('fields')
+    if not isinstance(fields, list) or len(fields) > 50:
+        raise SettingsRejected('Analysis fields must contain at most 50 items')
+    safe = []
+    reasons = {'unsupported_widget', 'readonly_proxy', 'readonly', 'disabled', 'hidden_parent',
+               'transparent_proxy', 'omitted_by_scanner', 'menu_not_exposed', 'hidden_control'}
+    for field in fields:
+        q = _question(field)
+        options, parents, menu = field.get('options', []), field.get('ancestors', []), field.get('menu', {})
+        why = field.get('reasons', [])
+        if (len(options) > 20 or not isinstance(parents, list) or len(parents) > 4 or
+                not isinstance(why, list) or len(why) > 8 or any(not isinstance(r, str) or r not in reasons for r in why) or
+                not isinstance(menu, dict) or type(menu.get('observed', False)) is not bool or
+                type(menu.get('count', 0)) is not int or not 0 <= menu.get('count', 0) <= 10000 or
+                not isinstance(menu.get('roles', []), list) or len(menu.get('roles', [])) > 10 or
+                any(not isinstance(r, str) or not re.fullmatch(r'[a-z-]{1,30}', r) for r in menu.get('roles', []))):
+            raise SettingsRejected('Invalid analysis field details')
+        containers, option_shapes = menu.get('containers', []), menu.get('option_shapes', [])
+        if not isinstance(containers, list) or len(containers) > 2 or not isinstance(option_shapes, list) or len(option_shapes) > 3:
+            raise SettingsRejected('Invalid analysis menu shape')
+        if type(field.get('multiple', False)) is not bool:
+            raise SettingsRejected('Invalid analysis multiple state')
+        row = dict(label=q.label[:300], kind=field['kind'], multiple=field.get('multiple', False), required=q.required, options=[s[:200] for s in options],
+                   control=_analysis_structure(field.get('control')), ancestors=[_analysis_structure(p) for p in parents],
+                   menu=dict(observed=menu.get('observed', False), count=menu.get('count', 0), roles=menu.get('roles', []),
+                             containers=[_analysis_structure(c) for c in containers], option_shapes=[_analysis_structure(o) for o in option_shapes]), reasons=why)
+        for key in ('detected', 'answered'):
+            if type(field.get(key)) is not bool:
+                raise SettingsRejected('Invalid analysis field state')
+            row[key] = field[key]
+        frame_id, identity = field.get('frame_id', 0), field.get('page_identity', '')
+        if type(frame_id) is not int or not 0 <= frame_id <= 1000000 or not isinstance(identity, str) or len(identity) > 100 or not re.fullmatch(r'[0-9:]*', identity):
+            raise SettingsRejected('Invalid analysis source')
+        row.update(frame_id=frame_id, page_identity=identity)
+        row['active'] = _analysis_active(row)
+        safe.append(row)
+    for key in ('busy', 'responsive', 'truncated'):
+        if type(diagnostic.get(key, False)) is not bool:
+            raise SettingsRejected('Invalid analysis state')
+    elapsed = diagnostic.get('inspection_ms', 0)
+    if type(elapsed) is not int or not 0 <= elapsed <= 30000:
+        raise SettingsRejected('Invalid analysis timing')
+    findings = []
+    context_url, page_url = _analysis_context(payload.get('context_url', 'https://' + host + '/'), host)
+    # Read-only canonical resolution; never call the writer, remember, or fill APIs.
+    with dashboard.connection() as db:
+        app = _application(db, dict(url=context_url))
+        resolver = answers.AnswerResolver(dashboard.config, db)
+        for field in safe:
+            if field['answered'] or not field['active']:
+                continue
+            q = _question(field)
+            why = field['reasons']
+            notes = []
+            if 'readonly_proxy' in why:
+                notes.append('Read-only focus proxy: use its visible parent control, not text entry.')
+            elif 'readonly' in why:
+                notes.append('Read-only field; inspect the associated widget before attempting a fill.')
+            if 'transparent_proxy' in why:
+                notes.append('Input is transparent; parent geometry and classes are captured for review.')
+            if 'hidden_parent' in why or 'hidden_control' in why:
+                notes.append('Hidden ancestor or mobile fallback; use the visible version of this field.')
+            if 'disabled' in why:
+                notes.append('Disabled control; a prerequisite may need completing first.')
+            if not field['detected']:
+                notes.append('Scanner omitted this control; widget or visibility support needs review.')
+            if 'menu_not_exposed' in why:
+                notes.append('Menu is closed or not exposed. Options were not probed; matching is incomplete.')
+            status = 'needs_user_fact'
+            try:
+                resolution = resolver.resolve_result(q, app)
+                if resolution.answer is not None:
+                    try:
+                        check = replace(q, kind='multiselect') if field['multiple'] else q
+                        answers.validate_answer(check, resolution.answer.value)
+                        status = 'ready_for_saved_answer'
+                    except (ValueError, TypeError):
+                        status = 'no_offered_match'
+                elif resolution.descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}:
+                    status = 'needs_user_fact'
+                elif resolution.descriptor.semantic_key in {'UNKNOWN_FIELD', 'REJECTED_FIELD'}:
+                    status = 'unknown_concept'
+                elif q.options and resolver.resolve_result(replace(q, options=[]), app).answer is not None:
+                    status = 'no_offered_match'
+                elif answers.is_writing_question(q):
+                    status = 'needs_writing'
+            except (ValueError, KeyError, TypeError, OSError):
+                status = 'answer_check_unavailable'
+            messages = {
+                'ready_for_saved_answer': 'A saved answer is available. Use Autofill when this control is accessible.',
+                'no_offered_match': 'No saved match among the captured choices; review options and their mapping.',
+                'unknown_concept': 'Label has no trusted mapping; clarify the question or add scanner support.',
+                'needs_user_fact': 'No usable saved fact was found. Review this question; analysis will not guess.',
+                'needs_writing': 'This needs a written answer. Use the answer helper or explicit Autofill.',
+                'answer_check_unavailable': 'Saved-answer check unavailable; structural findings are still saved.'}
+            notes.append(messages[status])
+            findings.append(dict(label=field['label'], kind=q.kind, detected=field['detected'], required=q.required,
+                                 status=status, notes=notes))
+    total, unanswered = sum(field['active'] for field in safe), len(findings)
+    summary = (f'{unanswered} unfilled controls · {sum(not f["detected"] for f in findings)} omitted by scanner'
+               if unanswered else 'All inspected controls are filled.' if total else
+               'No active form controls found.' if safe else 'No form controls found.')
+    return dict(reason='page_analysis', page_url=page_url, fields=safe, findings=findings, summary=summary,
+                busy=diagnostic.get('busy', False), responsive=diagnostic.get('responsive', False), inspection_ms=elapsed,
+                truncated=diagnostic.get('truncated', False), provider='not_used',
+                note='Details saved for review.')
+
+
 def snapshot(dashboard, payload):
     """Save only the documented structural attributes, never field values."""
     host, nodes = payload.get('host'), payload.get('nodes')
@@ -306,6 +479,8 @@ def snapshot(dashboard, payload):
     for node in nodes:
         if not isinstance(node, dict) or not isinstance(node.get('tag'), str):
             raise SettingsRejected('Invalid snapshot node')
+        if node.get('type') in {'password', 'hidden'}:
+            continue
         row = {key: value[:2000] for key, value in node.items() if key in attributes and isinstance(value, str)}
         if row.get('tag') not in text_tags and row.get('role') not in {'heading', 'option'} and row.get('data-automation-id') not in {'richText', 'formLabel'}:
             row.pop('text', None)
@@ -313,6 +488,10 @@ def snapshot(dashboard, payload):
         sanitized.append(row)
     saved = dict(host=host, nodes=sanitized, truncated=payload.get('truncated') is True)
     diagnostic = payload.get('diagnostic')
+    analysis = isinstance(diagnostic, dict) and diagnostic.get('reason') == 'page_analysis'
+    if analysis:
+        saved['diagnostic'] = _page_analysis(dashboard, payload, host)
+        saved.update(id=str(uuid.uuid4()), created_at=now(), source='manual_analysis')
     if isinstance(diagnostic, dict) and diagnostic.get('reason') == 'unresolved_fields':
         fields = diagnostic.get('fields')
         if not isinstance(fields, list) or len(fields) > 50:
@@ -328,12 +507,16 @@ def snapshot(dashboard, payload):
             bounded.append(dict(label=field['label'][:300], kind=field['kind'], options=[option[:200] for option in options]))
         saved['diagnostic'] = dict(reason='unresolved_fields', fields=bounded)
     data = json.dumps(saved, ensure_ascii=False)
-    if len(data.encode('utf-8')) > 1024 * 1024:
+    if len(data.encode('utf-8')) > 1000000:
         raise SettingsRejected('Snapshot exceeds 1 MB')
     directory = dashboard.config.private / 'snapshots'
     directory.mkdir(parents=True, exist_ok=True)
     filename = host.lower() + '-' + str(time.time_ns()) + '.json'
     (directory / filename).write_text(data, encoding='utf-8')
+    if analysis:
+        return dict(ok=True, analysis_id=saved['id'], summary=saved['diagnostic']['summary'],
+                    findings=saved['diagnostic']['findings'], note=saved['diagnostic']['note'],
+                    truncated=saved['truncated'] or saved['diagnostic']['truncated'])
     return dict(ok=True, filename=filename)
 
 
