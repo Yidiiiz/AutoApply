@@ -23,17 +23,20 @@ body {font:16px sans-serif;margin:30px} section {margin:20px 0} label {display:b
                 Veteran Status
               </label><div id="External::Jobs::Equalitymonitoring::Tsselect-react-component-3a786069-da74-4519-a129-e1bf81ac68ba"><div><div class="react-select hide-sm-block css-b62m3t-container" id="application_form_equality_monitoring_Veteran Status"><span class="css-7pg0cj-a11yText" id="react-select-5-live-region"></span><span aria-atomic="false" aria-live="polite" aria-relevant="additions text" class="css-7pg0cj-a11yText"></span><div class="react-select__control css-1s2u09g-control"><div class="react-select__value-container css-1d8n9bt"><div class="react-select__placeholder css-14el2xx-placeholder" id="react-select-5-placeholder">Select...</div><input aria-autocomplete="list" aria-describedby="react-select-5-placeholder" aria-expanded="false" aria-haspopup="true" aria-readonly="true" class="css-1hac4vs-dummyInput" id="application_form_equality_monitoring_veteran_status" inputmode="none" role="combobox" tabindex="0"/></div><div class="react-select__indicators css-1wy0on6"><span class="react-select__indicator-separator css-1okebmr-indicatorSeparator"></span><div aria-hidden="true" class="react-select__indicator react-select__dropdown-indicator css-tlfecz-indicatorContainer"><svg aria-hidden="true" class="css-8mmkcg" focusable="false" height="20" viewbox="0 0 20 20" width="20"><path d="M4.516 7.548c0.436-0.446 1.043-0.481 1.576 0l3.908 3.747 3.908-3.747c0.533-0.481 1.141-0.446 1.574 0 0.436 0.445 0.408 1.197 0 1.615-0.406 0.418-4.695 4.502-4.695 4.502-0.217 0.223-0.502 0.335-0.787 0.335s-0.57-0.112-0.789-0.335c0 0-4.287-4.084-4.695-4.502s-0.436-1.17 0-1.615z"></path></svg></div></div></div><input name="application_form[equality_monitoring_options][]" type="hidden"/></div><select class="hide-at-sm-block" id="application_form_equality_monitoring_Veteran Status"><option value="blank">Select...</option><option value="87472">I am not a protected veteran</option><option value="87474">I choose not to answer</option><option value="87475">Disabled veteran</option><option value="992859">Recently separated veteran</option><option value="992860">Active duty wartime or campaign badge veteran</option><option value="992861">Armed forces service medal veteran</option><option value="992862">I identify as one of more of the classifications of a protected veteran </option></select></div></div></section><button type="submit">Submit application</button></form>
 <script>
-window.submissions=0;window.proxyInputs=0;window.keys=[];window.controlOpens=0;window.fallbackChanges=0;
+window.submissions=0;window.proxyInputs=0;window.keys=[];window.controlOpens=0;window.fallbackChanges=0;window.choiceAttempts={};
 document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();submissions++});
 document.querySelectorAll('.react-select').forEach(widget=>{
  const input=widget.querySelector('[role=combobox]'),control=widget.querySelector('.react-select__control'),fallback=widget.nextElementSibling;
  const listId=input.getAttribute('aria-describedby').replace('-placeholder','-listbox');
  const close=()=>{widget.querySelector('.react-select__menu')?.remove();input.setAttribute('aria-expanded','false');input.removeAttribute('aria-controls');input.removeAttribute('aria-owns')};
- const choose=option=>{close();setTimeout(()=>{
+ const choose=option=>{choiceAttempts[input.id]=(choiceAttempts[input.id]||0)+1;close();setTimeout(()=>{
    widget.querySelector('[class*="placeholder"],.react-select__single-value')?.remove();
    const display=document.createElement('div');display.className='react-select__single-value css-qc6sy-singleValue';display.textContent=option.textContent;
    input.before(display);widget.querySelector('[type=hidden]').value=option.value;
-   if(widget.dataset.reset==='true')setTimeout(()=>{display.remove();widget.querySelector('[type=hidden]').value=''},160);
+   if(['true','once'].includes(widget.dataset.reset)){
+     if(widget.dataset.reset==='once')widget.dataset.reset='false';
+     setTimeout(()=>{display.remove();widget.querySelector('[type=hidden]').value=''},160);
+   }
  },80)};
  const open=()=>{
    if(input.getAttribute('aria-expanded')==='true')return;

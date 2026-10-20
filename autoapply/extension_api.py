@@ -392,6 +392,11 @@ def _page_analysis(dashboard, payload, host):
         if type(frame_id) is not int or not 0 <= frame_id <= 1000000 or not isinstance(identity, str) or len(identity) > 100 or not re.fullmatch(r'[0-9:]*', identity):
             raise SettingsRejected('Invalid analysis source')
         row.update(frame_id=frame_id, page_identity=identity)
+        repair_status = field.get('repair_status')
+        if repair_status is not None:
+            if repair_status not in {'optional_skip', 'unresolved', 'verified', 'verification_failed', 'user_edited'}:
+                raise SettingsRejected('Invalid repair field status')
+            row['repair_status'] = repair_status
         row['active'] = _analysis_active(row)
         safe.append(row)
     for key in ('busy', 'responsive', 'truncated'):
@@ -407,7 +412,8 @@ def _page_analysis(dashboard, payload, host):
         app = _application(db, dict(url=context_url))
         resolver = answers.AnswerResolver(dashboard.config, db)
         for field in safe:
-            if field['answered'] or not field['active']:
+            if (field['answered'] or not field['active'] or field.get('repair_status') == 'verified' and field['kind'] == 'checkbox' or
+                    field.get('repair_status') == 'optional_skip' and not field['required']):
                 continue
             q = _question(field)
             why = field['reasons']
@@ -454,16 +460,40 @@ def _page_analysis(dashboard, payload, host):
                 'needs_writing': 'This needs a written answer. Use the answer helper or explicit Autofill.',
                 'answer_check_unavailable': 'Saved-answer check unavailable; structural findings are still saved.'}
             notes.append(messages[status])
+            if field.get('repair_status') == 'verification_failed':
+                status = 'verification_failed'
+                notes = ['The offered answer did not remain selected after retry. Review this control on the page.']
+            elif field.get('repair_status') == 'user_edited':
+                status = 'user_edited'
+                notes = ['Your edit was preserved. Complete this answer on the page.']
             findings.append(dict(label=field['label'], kind=q.kind, detected=field['detected'], required=q.required,
                                  status=status, notes=notes))
     total, unanswered = sum(field['active'] for field in safe), len(findings)
     summary = (f'{unanswered} unfilled controls · {sum(not f["detected"] for f in findings)} omitted by scanner'
                if unanswered else 'All inspected controls are filled.' if total else
                'No active form controls found.' if safe else 'No form controls found.')
-    return dict(reason='page_analysis', page_url=page_url, fields=safe, findings=findings, summary=summary,
+    repair = diagnostic.get('repair')
+    sanitized_repair = None
+    if repair is not None:
+        if (not isinstance(repair, dict) or type(repair.get('filled')) is not int or not 0 <= repair['filled'] <= 500 or
+                type(repair.get('attempts')) is not int or not 0 <= repair['attempts'] <= 2 or
+                repair.get('stopped') not in {'none', 'user_edit', 'interrupted'} or
+                not isinstance(repair.get('before'), dict) or 'repair' in repair['before']):
+            raise SettingsRejected('Invalid repair diagnosis')
+        before = _page_analysis(dashboard, dict(payload, diagnostic=dict(repair['before'], reason='page_analysis')), host)
+        sanitized_repair = dict(filled=repair['filled'], attempts=repair['attempts'], stopped=repair['stopped'],
+                                before=before)
+        if total:
+            summary = f'Filled {repair["filled"]} \u00b7 {unanswered} need attention'
+        if repair['stopped'] != 'none':
+            summary += ' \u00b7 Repair stopped; review and retry'
+    result = dict(reason='page_analysis', page_url=page_url, fields=safe, findings=findings, summary=summary,
                 busy=diagnostic.get('busy', False), responsive=diagnostic.get('responsive', False), inspection_ms=elapsed,
                 truncated=diagnostic.get('truncated', False), provider='not_used',
                 note='Details saved for review.')
+    if sanitized_repair is not None:
+        result['repair'] = sanitized_repair
+    return result
 
 
 def snapshot(dashboard, payload):

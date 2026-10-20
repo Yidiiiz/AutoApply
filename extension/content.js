@@ -142,6 +142,106 @@
   const text = element => clean(element?.textContent);
   const normal = value => clean(value).toLowerCase();
 
+  // This capability exists only for an explicit, document-bound Analyze request.
+  // Values stay in this isolated document, never in the structural report.
+  let repairSession, repairExecuting=false, repairSynthetic=false, repairRevision=0;
+  const repairEdited=new WeakSet();
+  const repairNodes=new WeakMap();let repairNodeId=0;
+  for(const event of ['beforeinput','input','change','keydown']) document.addEventListener(event,e=>{
+    if(e.isTrusted && !repairSynthetic && !e.target.closest?.('#autoapply-sidebar,.autoapply-ask-ai')){
+      repairRevision++;
+      if(event!=='keydown')repairEdited.add(e.target);
+      if(event!=='keydown' && analysisIdentity && !repairExecuting){
+        analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});
+      }
+    }
+  },true);
+  function repairShape(){
+    return JSON.stringify([location.href,workdayState()?.step,Array.from(document.querySelectorAll('form,h1,h2,h3,'+controlSelector))
+      .filter(el=>!diagnosticExcluded(el)).map(el=>{
+        if(!repairNodes.has(el))repairNodes.set(el,++repairNodeId);
+        return [repairNodes.get(el),el.tagName,el.id,el.getAttribute('name'),el.getAttribute('type'),
+          el.matches('h1,h2,h3')?questionText(el):label(el)];
+      })]);
+  }
+  function assertRepair(token=repairSession?.token){
+    if(!repairSession || token!==repairSession.token || repairSession.shape!==repairShape() ||
+       repairSession.revision!==repairRevision)throw Error('Application or answer changed. Analyze page again.');
+  }
+  function checkRepair(){if(repairExecuting)assertRepair();}
+  function repairDispatch(operation){
+    // Native input/change events from a scripted click can themselves be trusted.
+    const previous=repairSynthetic;repairSynthetic=true;
+    try{return operation();}finally{repairSynthetic=previous;}
+  }
+  async function repairOperation(token,operation){
+    assertRepair(token);repairExecuting=true;
+    try{return await operation();}finally{repairExecuting=false;}
+  }
+  async function repairStart(token){
+    if(extensionFilling || skillsState.busy)throw Error('Application is busy. Wait and retry.');
+    analysisIdentity=undefined;
+    repairSession={token,shape:repairShape(),revision:repairRevision,verified:new Map(),outcomes:new Map(),menus:new Map()};
+    return repairOperation(token,async()=>{
+      const result=await scan({repair:true});assertRepair(token);
+      return {...result,fields:repairFields()};
+    });
+  }
+  function repairFields(){
+    if(signInPage())return [];
+    return Array.from(records.values()).filter(r=>!r.members.some(e=>repairEdited.has(e)) &&
+      !diagnosticExcluded(r.element) && !isSkillsField(r.element) &&
+      !r.element.closest('a[href]') && !(r.element.tagName==='BUTTON' && r.element.type!=='button') &&
+      !isPrompt(r.element) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
+      ['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind))
+      .map(r=>({...r.field,answered:occupied(r)}));
+  }
+  async function repairOptions(token){
+    return repairOperation(token,async()=>{
+      const keys=repairFields().filter(f=>!f.answered && f.kind==='combobox').map(f=>f.key);
+      await collectOptions(keys);assertRepair(token);
+      return repairFields().filter(f=>!f.answered && !repairSession.verified.has(f.key));
+    });
+  }
+  async function repairFill(token,answers){
+    return repairOperation(token,async()=>{
+      const allowed=new Set(repairFields().filter(f=>!f.answered).map(f=>f.key));
+      for(const answer of answers){
+        assertRepair(token);
+        if(!allowed.has(answer.key))continue;
+        const record=records.get(answer.key);
+        repairSession.outcomes.set(record.element,answer.status==='OPTIONAL_SKIP'?'optional_skip':'unresolved');
+        if(answer.status!=='RESOLVED')continue;
+        // No force, files, section preparation, writing, or implicit phone picker.
+        const result=await fillFields([{key:answer.key,status:'RESOLVED',value:answer.value,source:answer.source,verify_settled:true}]);
+        await pause(400);assertRepair(token);refreshRecord(record);
+        const done=result.completed[0];
+        if(done && (occupied(record) || record.field.kind==='checkbox' && answer.value===false) &&
+           JSON.stringify(valueOf(record))===JSON.stringify(done.value)){
+          repairSession.verified.set(answer.key,{record,value:done.value,completed:done});
+          repairSession.outcomes.set(record.element,'verified');
+        }else repairSession.outcomes.set(record.element,'verification_failed');
+      }
+      return {ok:true};
+    });
+  }
+  function repairFinish(token){
+    if(repairSession?.token!==token || repairSession.shape!==repairShape())throw Error('Application changed. Analyze page again.');
+    const completed=[];
+    for(const {record,value,completed:answer} of repairSession.verified.values()){
+      const retained=record.element.isConnected && JSON.stringify(valueOf(record))===JSON.stringify(value);
+      repairSession.outcomes.set(record.element,retained?'verified':'verification_failed');
+      if(retained)completed.push({...answer});
+    }
+    for(const record of records.values())if(record.members.some(e=>repairEdited.has(e)))
+      repairSession.outcomes.set(record.element,'user_edited');
+    // Ordinary result data stays separate from the sanitized structural capture.
+    // Reuse these records; scanning again could reopen menus or replace keys.
+    return {filled:completed.length,completed,fields:Array.from(records.values(),record=>({...record.field,
+      answered:occupied(record)||completed.some(answer=>answer.key===record.field.key)})),
+      stopped:repairSession.revision!==repairRevision?'user_edit':'none'};
+  }
+
   function visible(element) {
     if (element.disabled || element.readOnly || element.matches(":disabled") || element.getAttribute("aria-disabled") === "true" || element.getAttribute("aria-readonly") === "true" || element.closest("[hidden], [inert], [aria-hidden='true'], [aria-disabled='true'], [disabled]")) return false;
     const rect = element.getBoundingClientRect();
@@ -284,6 +384,7 @@
     return null;
   }
   function keypress(element, key) {
+    checkRepair();
     trace("keyboard","keydown "+key,element);
     for (const type of ["keydown", "keyup"]) element.dispatchEvent(new KeyboardEvent(type, {key, code: key, bubbles: true}));
   }
@@ -329,6 +430,7 @@
     return comboOptions(element);
   }
   async function openCombo(element) {
+    checkRepair();
     trace("dropdown","opened",element);
     openedCombos.add(element);
     const selectOnly = selectOnlyControl(element);
@@ -341,22 +443,24 @@
     if (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])')) { element.click(); return; }
     keypress(element, "ArrowDown");
     if (!element.getAttribute("list") && !await waitFor(() => comboOptions(element).length, 120) && element.getAttribute('aria-expanded') !== 'true') {
-      element.click();
+      checkRepair();element.click();
       if (await waitFor(() => comboOptions(element).length, 120) || element.getAttribute('aria-expanded') === 'true') return;
       const control = element.closest('[class*="-control"],[class*="__control"]') || comboContainer(element) || element;
       const toggle = control.querySelector('button[type="button"][aria-label*="Toggle"],button[type="button"][aria-label*="Open"],[class*="dropdown-indicator"],[class*="indicatorContainer"]');
       const target = toggle && visible(toggle) ? toggle : control;
-      target.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
+      checkRepair();target.dispatchEvent(new MouseEvent("mousedown", {bubbles: true, button: 0}));
       target.click();
     }
   }
-  function closeCombo(element) { keypress(element, "Escape"); element.blur(); openedCombos.delete(element); }
+  function closeCombo(element) {
+    checkRepair(); keypress(element, "Escape"); element.blur(); openedCombos.delete(element); }
   function comboInput(element) {
     return element.matches("input,textarea") ? element : element.querySelector("input,textarea") ||
       (element.isContentEditable ? element :
         comboContainer(element).querySelector('input[data-automation-id="searchBox"],input[role="searchbox"]'));
   }
   function searchCombo(element, value) {
+    checkRepair();
     const input = comboInput(element);
     if (!input || input.readOnly || input.disabled || input.getAttribute('aria-readonly') === 'true') return false;
     input.focus();
@@ -534,7 +638,7 @@
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
   }
-  async function scan() {
+  async function scan({repair = false} = {}) {
     const started = performance.now();
     const previousRecords = records;
     records = new Map();
@@ -592,7 +696,7 @@
     // Non-searchable widgets must expose their actual menu before profile matching.
     // Their aria-autocomplete=list describes navigation, not a partial search result.
     for (const record of records.values()) {
-      if (record.field.kind !== 'combobox' || !selectOnlyControl(record.element) || occupied(record)) continue;
+      if (repair || record.field.kind !== 'combobox' || !selectOnlyControl(record.element) || occupied(record)) continue;
       try {
         await openCombo(record.element);
         record.field.options = (await settledComboOptions(record.element, 1000)).map(text);
@@ -606,11 +710,16 @@
   async function collectOptions(keys) {
     const started = performance.now(), fields = [];
     for (const key of keys) {
+      checkRepair();
       const record = records.get(key);
       if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
       try {
         await openCombo(record.element);
-        record.field.options = (await settledComboOptions(record.element, 3000)).map(text);
+        const options=await settledComboOptions(record.element, 3000);
+        record.field.options = options.map(text);
+        if(repairExecuting)repairSession.menus.set(record.element,{options:record.field.options,
+          roles:[...new Set(options.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),
+          shapes:options.slice(0,3).map(structureOf)});
         record.field.answered = occupied(record) || !record.field.options.length && displayedChoice(record.element);
         fields.push({...record.field});
       } finally { closeCombo(record.element); }
@@ -654,6 +763,7 @@
   }
 
   function nativeSet(element, property, value) {
+    checkRepair();
     if(property==="value" && !element.matches('input[type="password"],input[type="file"]'))trace("field","typed",element,{value});
     let prototype = Object.getPrototypeOf(element);
     while (prototype) {
@@ -664,6 +774,7 @@
     element[property] = value;
   }
   function events(element) {
+    checkRepair();
     for (const type of ["input", "change", "blur"]) element.dispatchEvent(new Event(type, {bubbles: true}));
   }
   function best(options, value, getText = item => item) {
@@ -702,6 +813,7 @@
       options.find(option => /^(cell|mobile phone)$/i.test(clean(getText(option)))) : undefined);
   }
   function mark(record, color) {
+    checkRepair();
     for (const element of record.members) {
       const target = record.field.kind === "file" && !visible(element) ? fileContainer(element) : element;
       target.style.outline = `2px solid ${color}`;
@@ -730,6 +842,7 @@
         if (option) break;
       }
       if (!option){trace("dropdown","skipped",element,{reason:"no matching option",value});return false;}
+      if(repairExecuting && option.closest('a[href],button:not([type="button"]),input[type="submit"],input[type="image"]'))return false;
       const selected = text(option);
       const container = comboContainer(element);
       const fallback = container.nextElementSibling;
@@ -792,6 +905,7 @@
   }
 
   async function phoneValue(element, value, field) {
+    if(repairExecuting)return value;
     if(/phone.*extension|extension.*phone/i.test(field.label)) return '';
     if(field.kind!=='tel'&&!/phone|mobile/i.test(field.label)) return value;
     const digits=String(value).replace(/\D/g,'');
@@ -836,6 +950,7 @@
     try {
     const summary = {completed: [], filled: 0, needs_input: [], needs_writing: [], pending: [], writing: [], errors: [], skipped: 0};
     for (const answer of answers) {
+      checkRepair();
       const record = refreshRecord(records.get(answer.key));
       if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
       let {element, members, field} = record;
@@ -927,13 +1042,14 @@
             for (const member of matches) {
               const current=currentControl(member);
               if(field.kind==='checkbox') verified=await setCheckbox(current,true) && verified;
-              else {if(!current.checked) current.click();verified=Boolean(await waitFor(()=>currentControl(member).checked,500)) && verified;}
+              else {checkRepair();if(!current.checked) repairDispatch(()=>current.click());verified=Boolean(await waitFor(()=>currentControl(member).checked,500)) && verified;}
             }
             refreshRecord(record);
             if(!verified || field.kind==='checkbox' && record.members.some(member=>Boolean(member.checked)!==values.includes(label(member)))) {unresolved(false);continue;}
           }
         } else {
           const value = String(await phoneValue(element, answer.value ?? "", field));
+          checkRepair();
           if (field.max_length !== null && value.length > field.max_length) { unresolved(false); continue; }
           if (element.isContentEditable || !("value" in element)){trace("field","typed",element,{value});element.textContent = value;}
           else {
@@ -1123,13 +1239,14 @@
     return Array.from(document.querySelectorAll('input,[role="combobox"]')).filter(el=>visible(el) && isSkillsField(el) && !el.parentElement?.closest('[role="combobox"]'));
   }
   function pointerClick(element, current=()=>true) {
+    checkRepair();
     for (const type of ['pointerover','pointerdown','mousedown','pointerup','mouseup']) {
       const EventType=type.startsWith('pointer')?PointerEvent:MouseEvent;
       if (!element.isConnected || !current()) return false;
-      element.dispatchEvent(new EventType(type,{bubbles:true,button:0,pointerId:1,pointerType:'mouse'}));
+      checkRepair();repairDispatch(()=>element.dispatchEvent(new EventType(type,{bubbles:true,button:0,pointerId:1,pointerType:'mouse'})));
     }
     if (!element.isConnected || !current()) return false;
-    element.click();
+    checkRepair();repairDispatch(()=>element.click());
     return true;
   }
   let skillsCancelled=false, skillsState={busy:false,progress:''};
@@ -1317,12 +1434,14 @@
   }
   const checked = input => input.checked || input.getAttribute('aria-checked')==='true';
   async function setCheckbox(input, value) {
+    checkRepair();
     input=currentControl(input);
     if(Boolean(checked(input))===value) return true;
-    input.click();
+    checkRepair();repairDispatch(()=>input.click());
     if(await waitFor(()=>Boolean(checked(currentControl(input)))===value,150)) return true;
     const wrapper=input.closest('[data-automation-id^="formField"]') || input.parentElement;
-    const targets=[...Array.from(input.labels||[]),input.closest('label'),wrapper.querySelector('[role="checkbox"]'),input.nextElementSibling].filter(el=>el && visible(el));
+    const targets=[...Array.from(input.labels||[]),input.closest('label'),wrapper.querySelector('[role="checkbox"]'),input.nextElementSibling].filter(el=>el && visible(el) &&
+      (!repairExecuting || el.matches('label,[role="checkbox"],[data-automation-id="checkbox"]')));
     for(const target of new Set(targets)) {
       pointerClick(target);
       if(await waitFor(()=>Boolean(checked(currentControl(input)))===value,300)) return true;
@@ -1652,7 +1771,7 @@
     return row;
   }
   // No scan, focus, clicks, keys, or menu opening: retain all live filling handles.
-  function inspectPage() {
+  function inspectPage({repair = false} = {}) {
     const started=performance.now();
     const identity=snapshotIdentity(),detected=new Set(scannerControls()),fields=[],grouped=new Set();let truncated=false;
     for(const element of document.querySelectorAll(controlSelector)) {
@@ -1670,7 +1789,8 @@
       // Include hidden native fallbacks only when related to an exposed field.
       if(!element.getClientRects().length && !exposed)continue;
       const optionNodes=kind==='select'?Array.from(element.options).filter(o=>!o.disabled && o.value!==''):kind==='combobox'?comboOptions(element):[];
-      const options=['radio','checkbox'].includes(kind)?members.map(label):optionNodes.map(questionText);
+      const observed=repair?repairSession?.menus.get(element):null;
+      const options=['radio','checkbox'].includes(kind)?members.map(label):observed?.options || optionNodes.map(questionText);
       const menuContainers=kind==='combobox'?[...new Set([...(element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || '').split(/\s+/).map(id=>document.getElementById(id)),...comboContainer(element).querySelectorAll('[role="listbox"],.react-select__menu')].filter(Boolean))].slice(0,2):[];
       const field={label:fieldLabel.slice(0,300),kind:supported?kind:'text',required:members.some(e=>e.required || e.getAttribute('aria-required')==='true') || /\*/.test(fieldLabel),
         multiple:Boolean(kind==='checkbox' && members.length>1 || element.multiple || element.getAttribute('aria-multiselectable')==='true'),
@@ -1678,8 +1798,10 @@
         answered:element.matches('[role="checkbox"],[role="radio"],[role="switch"]') && !element.matches('input')?['true','mixed'].includes(element.getAttribute('aria-checked')):
           supported?Boolean(occupied({element,members,field:{kind}})):element.matches('[role="textbox"]')?Boolean(clean(element.textContent)):false,
         options:options.slice(0,20).map(s=>s.slice(0,200)),control:structureOf(element),ancestors,
-        menu:{observed:optionNodes.length>0,count:Math.min(optionNodes.length,10000),roles:[...new Set(optionNodes.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),containers:menuContainers.map(structureOf),option_shapes:optionNodes.slice(0,3).map(structureOf)},
+        menu:{observed:options.length>0,count:Math.min(options.length,10000),roles:observed?.roles || [...new Set(optionNodes.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),containers:menuContainers.map(structureOf),option_shapes:observed?.shapes || optionNodes.slice(0,3).map(structureOf)},
         reasons:[]};
+      const outcome=repair?repairSession?.outcomes.get(element):null;
+      if(outcome)field.repair_status=outcome;
       if(!supported)field.reasons.push('unsupported_widget');
       if(element.readOnly || element.getAttribute('aria-readonly')==='true')field.reasons.push(selectOnlyControl(element)?'readonly_proxy':'readonly');
       if(element.disabled || element.matches(':disabled') || element.closest('[aria-disabled="true"],[disabled]'))field.reasons.push('disabled');
@@ -1691,11 +1813,11 @@
       if(fields.length>=50){truncated=true;break;}fields.push(field);
     }
     analysisIdentity=identity;
-    return {identity,diagnostic:{reason:'page_analysis',fields,truncated,busy:Boolean(extensionFilling || skillsState.busy),responsive:document.readyState!=='loading',inspection_ms:Math.min(30000,Math.round(performance.now()-started))}};
+    return {identity,edit_revision:repairRevision,diagnostic:{reason:'page_analysis',fields,truncated,busy:Boolean(extensionFilling || skillsState.busy),responsive:document.readyState!=='loading',inspection_ms:Math.min(30000,Math.round(performance.now()-started))}};
   }
   let analysisIdentity,analysisTimer;
   new MutationObserver(()=>{if(!analysisIdentity)return;clearTimeout(analysisTimer);analysisTimer=setTimeout(()=>{
-    if(analysisIdentity!==snapshotIdentity()){analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});}
+    if(!repairExecuting && analysisIdentity!==snapshotIdentity()){analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});}
   },150);}).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['hidden','style','class','aria-label','aria-hidden','disabled','id']});
   function pageStructure() {
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
@@ -1710,7 +1832,7 @@
       if (element.matches('input,textarea,select,[role="combobox"]')) row.label=label(element).slice(0,2000);
       if (element.matches('label,legend,option,[role="option"],[data-automation-id="formLabel"]')) {
         const copy=element.cloneNode(true);
-        copy.querySelectorAll('input,textarea,[contenteditable],script,style,[data-automation-id="selectedItem"]').forEach(node=>node.remove());
+        copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"],[class*="single-value"],[class*="singleValue"]').forEach(node=>node.remove());
         if (!element.isContentEditable) row.text=text(copy).slice(0,2000);
       }
       const bytes=encoder.encode(JSON.stringify(row)).length;
@@ -1756,7 +1878,7 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===action.text))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
   globalThis[singleton]=globalThis.autoApplyContent;
   if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
 })();

@@ -155,7 +155,7 @@ function renderAnalysis(value){
     const item=document.createElement('li'),title=document.createElement('strong');title.textContent=finding.label;item.append(title);
     for(const note of (finding.notes || []).slice(0,8)){const p=document.createElement('p');p.textContent=note;item.append(p);}list.append(item);
   }
-  element('analysis-note').textContent=(value.busy?'Autofill is active; this is a passive snapshot. Recheck when it finishes. ': '')+(value.truncated?'Bounded capture; some controls were omitted. ': '')+(value.note || 'Details saved for review.');
+  element('analysis-note').textContent=(value.truncated?'Bounded capture; some controls were omitted. ': '')+(value.note || 'Details saved for review.');
   element('page-analysis').hidden=false;
 }
 chrome.runtime.onMessage.addListener(message=>{if(message.type==='analysis-invalidated' && message.tabId===(tabId || analysisBinding?.tabId || result?.tabId)){clearAnalysis();clearSnapshotStatus();}});

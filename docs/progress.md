@@ -951,3 +951,80 @@ or cookie asks. Same-host job-path distinction, URL secret removal/bounds and
 inactive-only summaries are covered by the API tests. Python AST, JavaScript
 syntax and git diff --check passed. No full/provider suite or live requests were
 run in this correction; the earlier regression evidence above remains historical.
+
+T063: Explicit Analyze now repairs the current unfilled application instead of
+only returning a passive description. It uses the existing /ext/answers grounded
+saved-profile/preferences resolver and shared fill machinery, refreshes actual
+choices, retries unresolved supported widgets once, and verifies retained values.
+The compact footer action retains immediate busy feedback and coalesces duplicate
+requests. A fresh post-repair capture shows Filled N · M need attention, with only
+current issues; optional skips and inactive responsive copies are excluded.
+
+Repair binds the tab, Chrome document IDs, current application, form/step shape
+and trusted edit revision. Manual values and deliberate empty/unchecked edits are
+preserved. Competing Autofill/Skills/answer/cover writes are excluded, including
+Autofill's final asynchronous preference/navigation window. User edits or changed
+documents/steps stop pending writes; failures release controls and retain verified
+partial progress. Structural before/after diagnoses, observed offered choices,
+verified counts and bounded interruption categories are independently sanitized
+by the snapshot endpoint, without applicant values, submitted option IDs, files
+or provider-generated code. Automatic capture and its preference remain passive.
+
+The actual MV3 local tests run Analyze before Autofill, including the existing
+capture-derived T059 Pinpoint demographics. A first dropdown selection visibly
+resets; Analyze refreshes choices and retries, retaining both its displayed label
+and submitted value, with exactly two selection attempts. Additional DOM checks
+cover text/checkbox/native-select fills, unknown facts, preserved manual answers,
+manual unchecked consent, duplicate requests, stale same-URL documents and form
+replacement, edits cleared back to empty, reopened sidebar/iframe tab binding,
+partial progress after API failure, and rejection of an adjacent Next button as
+a checkbox fallback. Auto-advance enabled does not trigger Next/Submit, section
+creation, upload, cover generation or writing as an Analyze side effect.
+
+Limits: this is bounded repair of existing supported controls, not dynamic code
+patching. Unsupported widgets still need an offline code fix. Composite section
+dates, Skills prompts, section/history preparation, uploads and written answers
+remain in their explicit existing workflows. Structural transitions fail closed;
+no missing personal or legal fact is guessed. Only local HTTP fixtures, temporary
+profiles and stubbed APIs/providers were used; no live service was contacted.
+
+Final T063 validation used worktree .venv Python: 15 actual MV3 T063/T060 tests
+passed in 108.27s; the strengthened adjacent-navigation checkbox regression passed
+separately in 8.37s, asserting real failed checkbox activation attempts. The final
+T056/T059/chat mutation-guard selection passed 11 tests in 73.59s. The focused
+T063/T060/T059/T056/legacy snapshot API selection passed 43 tests in 18.06s;
+stubbed Codex choice-provider tests passed four tests, and the existing grounded
+choice API regression passed one. JavaScript syntax, Python AST and diff checks
+passed. Initial passive-only expectations and synthetic checkbox event handling
+were corrected before the final passing runs. No full suite, live employer,
+provider or Discord calls, application submission, applicant-data change,
+worker/orchestration/runtime change, staging, commit, push, deployment, budget
+reset or stash operation was performed.
+
+T063 review correction: Analyze now reconciles the existing current Autofill
+result from the document-bound repair records, without a further scan. Verified
+answers update completed answers, field state/options, pending questions and
+filled counts by the preserved frame/field keys. Country repaired to the actual
+submitted value `us` no longer remains in Fill; the unknown personal fact stays
+pending. Repeated Analyze does not duplicate completed answers or counts, and
+existing completed/manual answers, application identity and writing queues remain.
+Actual answer values travel only through the ordinary result/Answers path, never
+the sanitized structural snapshot. Result persistence rechecks the same current
+object, application, document and trusted edit revision across asynchronous reads
+and writes. Analyze before Autofill still creates no duplicate pending result.
+
+New source regressions cover the initial NEEDS_INPUT Country response followed by
+successful Analyze and repeat Analyze, and a trusted keyboard edit while the
+serialized result-report storage read is held. Both passed individually, as did
+the supervisor's original pending-Country MV3 regression. The initial edit test
+used a synthetic select event and an obsolete UI error expectation; it now uses
+a trusted keyboard event and checks invalidation plus preserved current answers.
+Final worktree .venv validation: all 12 T063 MV3 cases passed in 114.66s,
+including duplicate/busy, stale document/step/edit, partial progress, iframe,
+final asynchronous Autofill guard and failed-checkbox navigation fallback. The
+supervisor pending regression passed separately in 5.05s. An earlier selection
+hit a transient busy rejection in the iframe case; the final complete T063
+selection passed. JavaScript syntax, Python AST and git diff --check passed.
+No API implementation changed in this correction; earlier API evidence above is
+historical. Only extension/background.js, extension/content.js,
+tests/test_extension.py and this progress note were edited for the review fix.

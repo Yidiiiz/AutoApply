@@ -1345,3 +1345,38 @@ def test_t060_page_paths_distinguishable_without_url_secrets(http_dashboard, con
     payload = analysis_payload(context_url='https://fixture.test/' + 'a'*3000)
     assert ext(http_dashboard, 'POST', '/ext/snapshot', payload)[0] == 200
     assert all(len(json.loads(p.read_text(encoding='utf-8'))['diagnostic']['page_url']) <= 2048 for p in (config.private/'snapshots').glob('*.json'))
+
+
+def test_t063_repair_diagnosis_before_after_sanitized(http_dashboard, config, monkeypatch):
+    from autoapply import codex_writer
+    monkeypatch.setattr(codex_writer.CodexWritingProvider, 'generate_response', lambda *a, **k: pytest.fail('Snapshot must not invoke a provider'))
+    payload = analysis_payload()
+    before = json.loads(json.dumps(payload['diagnostic']))
+    before['fields'][0]['value'] = 'PRIVATE_BEFORE'
+    before['answer'] = 'PRIVATE_ANSWER'
+    payload['diagnostic']['fields'][0].update(answered=True, repair_status='verified', value='PRIVATE_AFTER')
+    original = payload['diagnostic']['fields'][0]
+    payload['diagnostic']['fields'] += [dict(original, label='Unknown personal fact', required=True, answered=False, repair_status='unresolved'),
+                                      dict(original, label='Ethnicity', required=False, answered=False, repair_status='optional_skip'),
+                                      dict(original, label='Contact consent', kind='checkbox', answered=False, repair_status='verification_failed')]
+    payload['diagnostic']['repair'] = dict(filled=1, attempts=2, stopped='none', before=before, answers=['PRIVATE_REPAIR'])
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/snapshot', payload)
+    assert status == 200 and result['summary'] == 'Filled 1 \u00b7 2 need attention', result
+    assert {f['label'] for f in result['findings']} == {'Unknown personal fact','Contact consent'}
+    assert result['findings'][-1]['status'] == 'verification_failed'
+    saved=json.loads(next((config.private/'snapshots').glob('*.json')).read_text(encoding='utf-8'))
+    report=saved['diagnostic']
+    assert report['repair']['before']['fields'][0]['answered'] is False
+    assert report['fields'][0]['answered'] is True
+    assert report['repair']['filled']==1 and report['repair']['attempts']==2
+    assert 'PRIVATE' not in json.dumps(saved)+json.dumps(result)
+    payload['diagnostic']['repair']['stopped']='user_edit'
+    assert 'Repair stopped' in ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]['summary']
+
+
+@pytest.mark.parametrize('change', [dict(filled=True),dict(filled=501),dict(attempts=3),dict(stopped='PRIVATE'),dict(before={'repair':{}})])
+def test_t063_repair_report_bounds(http_dashboard, change):
+    payload=analysis_payload()
+    payload['diagnostic']['repair']=dict(filled=0,attempts=1,stopped='none',before={'fields':[]})
+    payload['diagnostic']['repair'].update(change)
+    assert ext(http_dashboard,'POST','/ext/snapshot',payload)[0]==400

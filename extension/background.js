@@ -33,6 +33,8 @@ let running = false;
 const activeResults = new Map(), writingTasks = new Map();
 const manualActionTabs = new Set();
 const analysisTasks = new Map();
+let analysisBlockers=0;
+let autofillTasks=0;
 const skillSelections = new Map();
 const snapshots=snapshotCollector({api,report,delay:ms=>delay(ms),current:result=>activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId) && !pendingSteps.has(result.tabId)});
 function skillContext(result) {
@@ -63,17 +65,20 @@ async function fillMatchedSkills(result) {
 }
 let reporting = Promise.resolve();
 
-function report(result) {
+function report(result, valid) {
   reporting = reporting.catch(() => {}).then(async () => {
   const {tabResults = {}, applicationAnswers={}} = await chrome.storage.session.get(["tabResults","applicationAnswers"]);
+  if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   if(result.url){
     const key=String(result.matched?.application_id || result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]);
     const saved=applicationAnswers[key] || [];
     for(const answer of result.completed || [])if(answer.source==="AI"){const old=saved.findIndex(item=>item.label===answer.label);if(old>=0)saved.splice(old,1);saved.push({...answer,url:result.url});}
     result.aiAnswers=saved;applicationAnswers[key]=saved;await chrome.storage.session.set({applicationAnswers});
   }
+  if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   if (result.tabId) tabResults[result.tabId] = result;
   await chrome.storage.session.set({lastResult: result, tabResults});
+  if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
   return result;
   });
@@ -296,6 +301,12 @@ async function rescanRevealed(result) {
 }
 
 export async function autofill(tabId, application, advanceCount = 0) {
+  autofillTasks++;
+  try{return await autofillCurrent(tabId,application,advanceCount);}
+  finally{autofillTasks--;}
+}
+async function autofillCurrent(tabId, application, advanceCount = 0) {
+  if (analysisTasks.size) return {error: "Application is busy analyzing. Wait and retry."};
   if (running) return {error: "Autofill is already running."};
   running = true;
   let result = {busy: true, progress: "Scanning application..."};
@@ -423,6 +434,8 @@ function validChatAction(action,context){
 }
 let skillsRunning=false;
 async function action(message) {
+  if(analysisTasks.size && ['autofill','autofill-skills','chat-replace','fill-answer','cover-letter','next-page','manual-submit','page-context','load-options'].includes(message.type))
+    throw Error('Application is busy analyzing. Wait and retry.');
   if(message.type==='skill-selection') {
     const id=message.tabId || (await chrome.tabs.query({active:true,currentWindow:true}))[0]?.id;
     if(message.selection)skillSelections.set(id,message.selection);
@@ -443,7 +456,7 @@ async function action(message) {
       const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:cancel=>cancel?globalThis.autoApplyContent?.cancelSkills():globalThis.autoApplyContent?.skillsStatus(),args:[message.type==='cancel-skills']});
       return frames.find(f=>f.result?.busy)?.result || frames.find(f=>f.result?.progress)?.result || {};
     }
-    if(running || skillsRunning) throw Error('Wait for autofill to finish.');
+    if(running || skillsRunning || analysisTasks.size) throw Error('Application is busy. Wait and retry.');
     skillsRunning=true;
     try {
       const profile=message.skills ? {skills:message.skills} : await api('/ext/profile-sections');
@@ -462,7 +475,7 @@ async function action(message) {
   if(['chat-context','chat-replace'].includes(message.type)) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
     if(!tab?.id || !/^https?:/.test(tab.url||''))throw Error('Open an application page first.');
-    const busy=()=>running || skillsRunning || writingTasks.has(tab.id) || activeResults.get(tab.id)?.coverBusy;
+    const busy=()=>running || skillsRunning || analysisTasks.size || writingTasks.has(tab.id) || activeResults.get(tab.id)?.coverBusy;
     if(message.type==='chat-context') {
       await showSidebar(tab.id,'open');
       const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:options=>globalThis.autoApplyContent.chatContext(options),args:[{passive:Boolean(busy()),request:typeof message.request==='string'?message.request.slice(0,12000):''}]});
@@ -493,12 +506,50 @@ async function action(message) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
     if(!tab?.id || !/^https?:/.test(tab.url || ''))throw Error('Open an application page first.');
     if(analysisTasks.has(tab.id))return analysisTasks.get(tab.id);
+    if(running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id) || manualActionTabs.size || batchBusy ||
+       activeResults.get(tab.id)?.busy || activeResults.get(tab.id)?.coverBusy || activeResults.get(tab.id)?.waiting ||
+       activeResults.get(tab.id)?.writing?.length && !activeResults.get(tab.id)?.writingSettled)
+      throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
     const task=(async()=>{
-      // Passive inspection is safe during filling; it never scans or opens menus.
-      const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>{
+      const current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined;
+      const inspect=(after=false)=>chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:after=>{
         const api=globalThis.autoApplyContent;
-        return api?{...api.inspectPage(),...api.pageStructure()}:null;
-      }});
+        return api?{...api.inspectPage({repair:after}),...api.pageStructure()}:null;
+      },args:[after]});
+      const before=await inspect();
+      const targets=before.filter(f=>f.result);
+      if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
+      const started=[];const token=crypto.randomUUID();let stopped='none',attempts=0,filled=0;
+      async function bound(frame,method,args=[]){
+        if((await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)
+          throw Error('Application changed. Analyze page again.');
+        const [value]=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:[frame.documentId]},
+          func:async(method,args)=>{try{return await globalThis.autoApplyContent[method](...args);}catch(error){return {error:error.message};}},args:[method,[token,...args]]});
+        if(value?.documentId!==frame.documentId || value?.result?.error)throw Error(value?.result?.error || 'Application changed. Analyze page again.');
+        return value.result;
+      }
+      // Prepare only the existing controls. Retry known unresolved widgets once,
+      // rediscovering live choices and resolving through the usual grounded API.
+      try{
+        for(const frame of targets){
+          const prepared=await bound(frame,'repairStart');started.push(frame);
+          for(let pass=0;pass<2;pass++){
+            let fields=await bound(frame,'repairOptions');
+            if(pass)fields=fields.filter(f=>['combobox','select','checkbox','radio'].includes(f.kind));
+            if(!fields.length)break;
+            attempts=Math.max(attempts,pass+1);
+            const response=await api('/ext/answers',{url:tab.url,application_id,page:prepared.page,fields});
+            await bound(frame,'repairFill',[response.answers || []]);
+          }
+        }
+      }catch{stopped='interrupted';}
+      const repaired=[];
+      for(const frame of started){const result=await bound(frame,'repairFinish');repaired.push({...frame,result});filled+=result.filled;if(result.stopped!=='none')stopped=result.stopped;}
+      // Authorized fills can change the snapshot identity. Bind the fresh post
+      // capture independently instead of comparing it to the unfilled snapshot.
+      const frames=await inspect(true);
+      if(!targets.every(old=>frames.some(f=>f.frameId===old.frameId && f.documentId===old.documentId)))throw Error('Application changed. Analyze page again.');
       const available=frames.filter(f=>f.result);
       if(!available.some(f=>f.frameId===0))throw Error('Page inspection unavailable. Reload the application and retry.');
       const nodes=[],fields=[];let truncated=false,size=0,fieldBytes=0;const encoder=new TextEncoder();
@@ -506,20 +557,46 @@ async function action(message) {
         truncated ||= frame.result.truncated || frame.result.diagnostic.truncated;
         for(const field of frame.result.diagnostic.fields){const row={...field,frame_id:frame.frameId,page_identity:frame.result.identity};fieldBytes+=encoder.encode(JSON.stringify(row)).length;if(fields.length>=50 || fieldBytes>220000){truncated=true;break;}fields.push(row);}
       }
-      const diagnostic={reason:'page_analysis',fields,truncated,busy:Boolean(running || skillsRunning || writingTasks.has(tab.id) || activeResults.get(tab.id)?.coverBusy || available.some(f=>f.result.diagnostic.busy)),responsive:available.every(f=>f.result.diagnostic.responsive),inspection_ms:Math.min(30000,available.reduce((sum,f)=>sum+f.result.diagnostic.inspection_ms,0))};
-      const budget=900000-encoder.encode(JSON.stringify(diagnostic)).length;
+      const beforeFields=[];let beforeBytes=0;
+      for(const frame of targets){
+        truncated ||= frame.result.truncated || frame.result.diagnostic.truncated;
+        for(const field of frame.result.diagnostic.fields){
+          const row={...field,frame_id:frame.frameId,page_identity:frame.result.identity};
+          beforeBytes+=encoder.encode(JSON.stringify(row)).length;
+          if(beforeFields.length>=50 || beforeBytes>220000){truncated=true;break;}beforeFields.push(row);
+        }
+      }
+      const diagnostic={reason:'page_analysis',fields,truncated,repair:{filled,attempts,stopped,before:{fields:beforeFields}},busy:false,responsive:available.every(f=>f.result.diagnostic.responsive),inspection_ms:Math.min(30000,available.reduce((sum,f)=>sum+f.result.diagnostic.inspection_ms,0))};
+      const budget=800000-encoder.encode(JSON.stringify(diagnostic)).length;
       for(const frame of available)for(const node of frame.result.nodes){size+=encoder.encode(JSON.stringify(node)).length+1;if(nodes.length>=10000 || size>budget){truncated=true;break;}nodes.push(node);}
       async function unchanged(){
-        if((await chrome.tabs.get(tab.id)).url!==tab.url)return false;
-        const latest=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.analysisContext()});
-        return available.every(frame=>latest.some(f=>f.frameId===frame.frameId && f.documentId===frame.documentId && f.result===frame.result.identity));
+        if((await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)return false;
+        const latest=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.repairContext()});
+        return available.every(frame=>latest.some(f=>f.frameId===frame.frameId && f.documentId===frame.documentId && f.result?.identity===frame.result.identity && f.result.revision===frame.result.edit_revision));
       }
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
       const context=new URL(tab.url);context.search='';context.hash='';context.username='';context.password='';
       const saved=await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic});
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
-      const current=activeResults.get(tab.id);
-      if(saved.ok && current?.url===tab.url){current.snapshotFeedback=undefined;await report(current);}
+      if(saved.ok && current?.url===tab.url && current.fields &&
+         Object.entries(current.pageIdentities || {}).every(([id,page])=>targets.some(frame=>String(frame.frameId)===id && frame.documentId===page.documentId))){
+        const live=new Map(repaired.flatMap(frame=>frame.result.fields.map(field=>[`${frame.frameId}:${field.key}`,{...field,key:`${frame.frameId}:${field.key}`}])));
+        const completed=[...(current.completed || [])];let added=0;
+        for(const frame of repaired)for(const answer of frame.result.completed){
+          const item={...answer,key:`${frame.frameId}:${answer.key}`},index=completed.findIndex(old=>old.key===item.key);
+          if(index<0){completed.push(item);added++;}else completed[index]=item;
+        }
+        const pending=current.pending.map(field=>({...field,...live.get(field.key)})).filter(field=>!live.get(field.key)?.answered);
+        const updated={...current,snapshotFeedback:undefined,completed,pending,
+          fields:current.fields.map(field=>({...field,...live.get(field.key)})),
+          pageIdentities:Object.fromEntries(available.map(frame=>[frame.frameId,{identity:frame.result.identity,documentId:frame.documentId}])),
+          summary:{...current.summary,filled:current.summary.filled+added,needs_input:pending.map(field=>field.label)}};
+        await report(updated,unchanged);
+        if(!await unchanged())throw Error('Application changed. Analyze page again.');
+        Object.assign(current,updated);
+      }
+      if(!await unchanged())throw Error('Application changed. Analyze page again.');
       return {...saved,tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
     })();
     analysisTasks.set(tab.id,task);
@@ -576,11 +653,12 @@ async function action(message) {
     if(await clickNext(current) && !running)return autofill(current.tabId,current.matched);
     return current;
   }
-  if (running) throw new Error("Wait for autofill to finish.");
+  if (running || analysisTasks.size) throw new Error("Application is busy. Wait and retry.");
   const {lastResult, tabResults={}} = await chrome.storage.session.get(['lastResult','tabResults']);
   const stored=message.tabId?tabResults[message.tabId]:lastResult;
   const result=activeResults.get(stored?.tabId) || stored;
   if (result?.tabId) activeResults.set(result.tabId, result);
+  if(analysisTasks.size)throw Error('Application is busy analyzing. Wait and retry.');
   if (!result?.page) throw new Error("Run autofill on an application first.");
   if (message.type === 'load-options') {
     await loadOptions(result, message.key);
@@ -617,7 +695,7 @@ globalThis.autoApplyAutofill = autofill;
 const pendingSteps = new Set();
 let stepDrain;
 async function drainSteps() {
-  if (running || batchBusy) { stepDrain = setTimeout(drainSteps, 500); return; }
+  if (running || batchBusy || analysisTasks.size) { stepDrain = setTimeout(drainSteps, 500); return; }
   const tabId = pendingSteps.values().next().value;
   if (tabId === undefined) return;
   pendingSteps.delete(tabId);
@@ -631,7 +709,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
   if (message.type !== "workday-step" || sender.id !== chrome.runtime.id ||
       !sender.tab?.id || sender.frameId !== 0) return;
-  if (activeResults.get(sender.tab.id)?.busy || cancelledTabs.has(sender.tab.id)) return;
+  if (analysisTasks.has(sender.tab.id) || activeResults.get(sender.tab.id)?.busy || cancelledTabs.has(sender.tab.id)) return;
   const previous=activeResults.get(sender.tab.id);
   if(previous){previous.stalePage=true;previous.snapshotFeedback=undefined;report(previous);}
   pendingSteps.add(sender.tab.id);
@@ -658,7 +736,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     action(message).then(respond,error=>respond({error:error.message})).finally(()=>manualActionTabs.delete(message.tabId));
     return true;
   }
-  action(message).then(respond, error => respond({error: error.message}));
+  const blocksAnalysis=['autofill','autofill-skills','chat-replace','fill-answer','cover-letter','next-page','page-context','load-options'].includes(message.type);
+  if(blocksAnalysis)analysisBlockers++;
+  action(message).then(respond, error => respond({error: error.message})).finally(()=>{if(blocksAnalysis)analysisBlockers--;});
   return true;
 });
 chrome.commands.onCommand.addListener(command => {

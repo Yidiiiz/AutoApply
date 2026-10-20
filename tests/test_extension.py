@@ -148,14 +148,12 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     page.locator('h1').evaluate("e=>e.textContent='Changed step'")
     worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
     assert len(snapshots()) == 2
-    # Manual Analyze remains repeatable and must not invoke the scanner.
-    worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{globalThis.savedScan=autoApplyContent.scan;autoApplyContent.scan=()=>{throw Error('diagnostics rescanned')};}})", tab_id)
+    # Explicit Analyze remains repeatable; automatic capture above remains passive.
     for _ in range(2):
         panel.locator('#send-structure').click()
         expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     assert len(snapshots()) == 4
     assert panel.evaluate("()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left;}")
-    worker.evaluate('id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=globalThis.savedScan;}})', tab_id)
     # Final-review preference stays checked, disabled, and manual-only.
     panel.locator('#auto-advance').check()
     value.update(next_action=dict(kind='submit'), writing=[], pending=[])
@@ -388,7 +386,7 @@ def extension_server(config, db):
                 answers = []
                 for field in payload["fields"]:
                     label = field["label"]
-                    if payload.get('url', '').endswith('/t059-pinpoint-demographics.html'):
+                    if payload.get('url', '').endswith('/t059-pinpoint-demographics.html') and label in {'Gender','Disability','Veteran Status','Ethnicity'}:
                         synthetic = {'Gender': 'Choose not to self-identify',
                                      'Disability': 'Yes, I have a disability, or have had one in the past',
                                      'Veteran Status': 'I am not a protected veteran'}
@@ -3157,7 +3155,7 @@ def test_t057_chat_busy_mutation_guards(tmp_path):
     code=source[source.index('function chatReplacementIntent('):source.index('  if (message.type === "page-context")')]
     # Execute the shipped action branch with synthetic Chrome APIs and busy maps.
     code += 'throw Error("unexpected branch");}'
-    script="const assert=require('node:assert/strict');let running=false,edits=0,reads=0;const writingTasks=new Map(),activeResults=new Map(),tab={id:1,url:'https://example.test/apply'};const showSidebar=async()=>{};const chrome={tabs:{get:async()=>tab},scripting:{executeScript:async spec=>{reads++;return [{result:{fields:[],document:'doc'},documentId:'doc'}];}}};\n"+code+"""
+    script="const assert=require('node:assert/strict');let running=false,edits=0,reads=0;const analysisTasks=new Map(),writingTasks=new Map(),activeResults=new Map(),tab={id:1,url:'https://example.test/apply'};const showSidebar=async()=>{};const chrome={tabs:{get:async()=>tab},scripting:{executeScript:async spec=>{reads++;return [{result:{fields:[],document:'doc'},documentId:'doc'}];}}};\n"+code+"""
 (async()=>{
 const ctx={tabId:1,url:tab.url,document:'doc',documentId:'doc',fields:[{key:'k',label:'Cover letter',kind:'textarea',max_length:null}],current_key:'k'};
 const message={type:'chat-replace',tabId:1,context:ctx,request:'replace current field with that',action:{type:'replace_text',key:'k',text:'draft'}};
@@ -3297,24 +3295,25 @@ def test_t060_capture_derived_active_variants(loaded_extension, extension_server
     demographics = [f for f in active if f['kind'] in {'combobox', 'select'}]
     assert len(demographics) == 4 and {f['kind'] for f in demographics} == {kind}
     assert len({f['label'] for f in demographics}) == 4
-    assert len(report['findings']) == 7, report
+    assert len(report['repair']['before']['findings']) == 7, report
+    assert len(report['findings']) == 2, report
+    assert report['repair']['filled'] == 3
     assert not any('cookies' in f['label'] or 'Already checked' in f['label'] for f in report['findings'])
-    assert any(f['label'] == 'Application consent' for f in report['findings'])
+    assert any(f['label'] == 'Application consent' for f in report['repair']['before']['findings'])
     unsupported = next(f for f in report['findings'] if f['label'] == 'Visible unsupported preference')
     assert not unsupported['detected'] and any('Scanner omitted' in n for n in unsupported['notes'])
     assert any('Disabled control' in n for f in report['findings'] if f['label'] == 'Visible prerequisite' for n in f['notes'])
     assert any(not f['active'] for f in report['fields'])
     page.locator('#analysis-extras').evaluate('e=>e.remove()')
-    filled = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
-    assert filled['summary']['filled'] == 3, filled
     report = analyze()
-    assert [f['label'] for f in report['findings']] == ['Ethnicity']
-    assert not report['findings'][0]['required']
+    assert report['repair']['filled'] == 0
+    assert report['findings'] == []
+    assert sum(f['answered'] for f in report['fields'] if f['active']) == 3
     assert page.evaluate('submissions') == 0
     assert not any(path == '/ext/applied' for path, _, _ in requests)
 
 
-def test_t060_fresh_analysis_singleflight_bound_passive_report(loaded_extension, extension_server, config):
+def test_t060_fresh_analysis_singleflight_bound_repair_report(loaded_extension, extension_server, config):
     context, worker, extension_id = loaded_extension
     server, requests = extension_server
     worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
@@ -3332,23 +3331,21 @@ def test_t060_fresh_analysis_singleflight_bound_passive_report(loaded_extension,
     other = context.new_page()
     other.goto(server+'/job.html')
     worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.analysisCalls=0;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot')){analysisCalls++;await new Promise(r=>globalThis.releaseAnalysis=r);}return analysisFetch(url,...args);};}")
-    before = page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select,[contenteditable]'),e=>[e.value,e.checked,e.textContent])")
     panel.locator('#send-structure').evaluate('e=>{e.click();e.click()}')
     expect(panel.locator('#send-structure')).to_have_text('Analyzing\u2026')
     expect(panel.locator('#send-structure')).to_be_disabled()
     expect(panel.locator('#send-structure')).to_have_attribute('aria-busy','true')
-    assert worker.evaluate("async()=>{for(let i=0;i<100 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10));return analysisCalls}") == 1
+    assert worker.evaluate("async()=>{for(let i=0;i<600 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10));return analysisCalls}") == 1
     worker.evaluate('()=>releaseAnalysis()')
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     expect(panel.locator('#page-analysis')).to_be_visible()
-    expect(panel.locator('#analysis-summary')).to_contain_text('unfilled controls')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 1')
     expect(panel.locator('#analysis-details')).not_to_have_attribute('open','')
     panel.locator('#analysis-details summary').click()
     expect(panel.locator('#analysis-findings')).to_contain_text('Scanner omitted')
-    expect(panel.locator('#analysis-findings')).to_contain_text('Read-only focus proxy')
-    expect(panel.locator('#analysis-findings')).to_contain_text('saved answer is available')
-    assert page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select,[contenteditable]'),e=>[e.value,e.checked,e.textContent])") == before
-    assert page.evaluate('events') == []
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(page.locator('#existing')).to_have_value('PRIVATE_TYPED_VALUE')
+    assert not any(e in {'submit','next'} for e in page.evaluate('events'))
     payload = next(p for path,_,p in requests if path=='/ext/snapshot')
     assert payload['context_url'] == page.url
     proxy = next(f for f in payload['diagnostic']['fields'] if f['control'].get('id')=='proxy')
@@ -3358,7 +3355,8 @@ def test_t060_fresh_analysis_singleflight_bound_passive_report(loaded_extension,
     assert any(not f['detected'] and f['control'].get('id')=='omitted' for f in payload['diagnostic']['fields'])
     saved = next((config.private/'snapshots').glob('127.0.0.1-*.json')).read_text(encoding='utf-8')
     assert 'PRIVATE_' not in json.dumps(payload)+saved
-    assert not any(path in {'/ext/answers','/ext/write','/ext/chat','/ext/remember','/ext/applied'} for path,_,_ in requests)
+    assert any(path == '/ext/answers' for path,_,_ in requests)
+    assert not any(path in {'/ext/write','/ext/chat','/ext/remember','/ext/applied'} for path,_,_ in requests)
     shots=ROOT/'.tmp/review/t060';shots.mkdir(parents=True,exist_ok=True)
     (shots/'latest-analysis.json').write_text(saved,encoding='utf-8')
     page.screenshot(path=str(shots/'fresh-analysis.png'))
@@ -3387,8 +3385,9 @@ def test_t060_analysis_busy_preserves_scanner_handles(loaded_extension, extensio
     worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=()=>{throw Error('Analysis rescanned')};}})",tab_id)
     before=page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select'),e=>[e.value,e.checked])")
     panel.locator('#send-structure').click()
-    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
-    assert next(p for path,_,p in requests if path=='/ext/snapshot')['diagnostic']['busy']
+    expect(panel.locator('#error')).to_contain_text('busy')
+    expect(panel.locator('#send-structure')).to_be_enabled()
+    assert not any(path=='/ext/snapshot' for path,_,_ in requests)
     assert page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select'),e=>[e.value,e.checked])")==before
     pending=next(f for f in value['pending'] if f['label']=='Unresolved')
     key=pending['key'].split(':',1)[1]
@@ -3415,11 +3414,11 @@ def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, exte
     page.locator('body').evaluate("e=>e.insertAdjacentHTML('afterbegin','<form><label>Full name<input value=synthetic></label></form>')")
     expect(panel.locator('#page-analysis')).to_be_hidden()
     panel.locator('#send-structure').click()
-    expect(panel.locator('#analysis-summary')).to_have_text('All inspected controls are filled.')
+    expect(panel.locator('#analysis-summary')).to_have_text('Filled 0 \u00b7 0 need attention')
     worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot'))await new Promise(r=>globalThis.releaseAnalysis=r);return analysisFetch(url,...args);};}")
     panel.locator('#send-structure').click()
     expect(panel.locator('#send-structure')).to_be_disabled()
-    worker.evaluate("async()=>{for(let i=0;i<100 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10))}")
+    worker.evaluate("async()=>{for(let i=0;i<600 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10))}")
     page.locator('label').evaluate("e=>e.firstChild.textContent='Different question'")
     worker.evaluate('()=>releaseAnalysis()')
     expect(panel.locator('#send-structure')).to_be_enabled()
@@ -3429,3 +3428,326 @@ def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, exte
     panel.locator('#send-structure').click()
     expect(panel.locator('#error')).to_contain_text('requires the updated local dashboard')
     expect(panel.locator('#page-analysis')).to_be_hidden()
+
+
+def t063_page(loaded_extension, extension_server):
+    context, worker, extension_id = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY, autoSendStructure=False))
+    page = context.new_page()
+    page.route('**/t063.html', lambda route: route.fulfill(path=str(FIXTURES/'t063.html'), content_type='text/html'))
+    page.goto(server+'/t063.html')
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id', page.url)
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+    panel = next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    return page, worker, tab_id, panel, requests
+
+
+def test_t063_analyze_alone_recovers_failed_capture_widget(loaded_extension, extension_server, config):
+    page, worker, tab_id, requests = t059_page(loaded_extension, extension_server)
+    page.set_viewport_size(dict(width=1100, height=850))
+    page.locator('.react-select').first.evaluate("e=>e.dataset.reset='once'")
+    page.locator('form').evaluate('''form=>form.insertAdjacentHTML('afterbegin', `
+      <label>Full name<input id="full" required></label>
+      <label>Contact consent<input id="consent" type="checkbox" required></label>
+      <label>Existing answer<input id="manual" value="PRIVATE_MANUAL"></label>
+      <label>Unknown personal fact<input id="unknown" required></label>
+      <label>Resume<input type="file"></label>
+      <label>Why this role?<textarea></textarea></label>
+      <button type="button" onclick="submissions++">Next</button>
+      <button type="button" onclick="submissions++">Add education</button>`)''')
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    panel = page.frame_locator('#autoapply-sidebar iframe')
+    expect(panel.locator('#auto-advance')).to_be_enabled()
+    panel.locator('#auto-advance').check()
+    expect(panel.locator('#auto-send-structure')).to_be_enabled()
+    panel.locator('#auto-send-structure').uncheck()
+    panel.locator('#auto-send-structure').check()
+    expect(panel.locator('#auto-send-structure')).to_be_enabled()
+    assert not any(path=='/ext/answers' for path,_,_ in requests)
+    expect(page.locator('#full')).to_be_empty()
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=30000)
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 5')
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(page.locator('#consent')).to_be_checked()
+    expect(page.locator('#manual')).to_have_value('PRIVATE_MANUAL')
+    expect(page.locator('#unknown')).to_be_empty()
+    page.wait_for_timeout(450)
+    assert page.locator('.react-select input[type=hidden]').evaluate_all('(es)=>es.map(e=>e.value)') == ['87423','','87467','87472']
+    assert page.evaluate('choiceAttempts.application_form_equality_monitoring_gender') == 2
+    assert page.locator('.react-select__single-value').all_text_contents() == [
+        'Choose not to self-identify','Yes, I have a disability, or have had one in the past','I am not a protected veteran']
+    assert page.evaluate('[submissions,proxyInputs,fallbackChanges,keys.includes("Enter")]') == [0,0,0,False]
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 0
+    expect(page.locator('textarea')).to_be_empty()
+    payload = next(p for path,_,p in requests if path=='/ext/snapshot')
+    saved = json.loads(max((config.private/'snapshots').glob('*.json'), key=lambda p:p.stat().st_mtime_ns).read_text(encoding='utf-8'))
+    report = saved['diagnostic']
+    assert report['repair']['filled'] == 5 and report['repair']['attempts'] == 2
+    assert report['repair']['stopped'] == 'none'
+    gender=next(f for f in report['fields'] if f['label']=='Gender')
+    assert gender['menu']['observed'] and gender['menu']['count']==3
+    assert gender['options']==['Male','Female','Choose not to self-identify']
+    assert any(f['label']=='Gender' and not f['answered'] for f in report['repair']['before']['fields'])
+    assert any(f['label']=='Gender' and f['answered'] for f in report['fields'])
+    assert {'Unknown personal fact','Resume','Why this role?'} == {f['label'] for f in report['findings']}
+    serialized = json.dumps(payload)+json.dumps(saved)
+    assert all(secret not in serialized for secret in ['PRIVATE_MANUAL','Fixture Student','student@example.test','87423','87467'])
+    assert not any(path in {'/ext/profile-sections','/ext/resume','/ext/write','/ext/cover-letter','/ext/applied','/ext/remember','/ext/chat','/ext/match'} for path,_,_ in requests)
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=15000)
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
+    assert page.evaluate('choiceAttempts.application_form_equality_monitoring_gender') == 2
+
+
+def t063_hold_answers(worker):
+    worker.evaluate('''()=>{globalThis.repairFetch=fetch;globalThis.answerCalls=0;
+      globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/answers')){
+        answerCalls++;await new Promise(r=>globalThis.releaseAnswers=r);
+      }return repairFetch(url,...args);};}''')
+
+
+def test_t063_analyze_reconciles_existing_autofill_pending_and_counts(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    page.locator('input[type=file],textarea').evaluate_all("es=>es.forEach(e=>e.closest('label').remove())")
+    worker.evaluate('''()=>{globalThis.pendingFetch=fetch;let first=true;globalThis.fetch=async(url,...args)=>{
+      const response=await pendingFetch(url,...args);
+      if(first&&String(url).endsWith('/ext/answers')){first=false;const data=await response.json();
+        for(const answer of data.answers){const field=JSON.parse(args[0].body).fields.find(f=>f.key===answer.key);
+          if(field?.label==='Country'){answer.status='NEEDS_INPUT';answer.value=null;}}
+        return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}});
+      }return response;};}''')
+    initial = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    worker.evaluate('()=>{globalThis.fetch=pendingFetch}')
+    assert {f['label'] for f in initial['pending']} == {'Country', 'Unknown personal fact'}
+    expect(panel.locator('#needs-input .prompt').filter(has_text='Country')).to_have_count(1)
+    expect(page.locator('#country')).to_have_value('')
+    for attempt in range(2):
+        panel.locator('#send-structure').click()
+        expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
+        expect(page.locator('#country')).to_have_value('us')
+        expect(page.locator('#manual')).to_have_value('PRIVATE_MANUAL')
+        expect(page.locator('#unknown')).to_be_empty()
+        current = worker.evaluate("async id=>(await chrome.storage.session.get('tabResults')).tabResults[id]", tab_id)
+        assert [f['label'] for f in current['pending']] == ['Unknown personal fact']
+        assert current['summary']['needs_input'] == ['Unknown personal fact']
+        assert current['summary']['filled'] == initial['summary']['filled'] + 1
+        assert len(current['completed']) == len(initial['completed']) + 1
+        assert all(answer in current['completed'] for answer in initial['completed'])
+        country = next(f for f in current['fields'] if f['label'] == 'Country')
+        assert country['answered'] and country['options'] == ['United States', 'Canada']
+        answer = next(f for f in current['completed'] if f['label'] == 'Country')
+        assert answer['key'] == country['key'] and answer['value'] == 'United States'
+        assert current['matched'] == initial['matched'] and current['writing'] == initial['writing']
+        expect(panel.locator('#needs-input .prompt').filter(has_text='Country')).to_have_count(0)
+        expect(panel.locator('#needs-input .prompt').filter(has_text='Unknown personal fact')).to_have_count(1)
+        expect(panel.locator('#autofill .fill-count')).to_have_text(f"{initial['summary']['filled'] + 1} fields filled")
+        expect(panel.locator('#analysis-summary')).to_contain_text(f'Filled {1 if attempt == 0 else 0}')
+    payloads = [p for path, _, p in requests if path == '/ext/snapshot']
+    assert all(secret not in json.dumps(payloads) for secret in ['PRIVATE_MANUAL', 'Fixture Student', 'student@example.test'])
+    assert page.evaluate('actions') == []
+
+
+def test_t063_reconciliation_rechecks_user_edit_during_report_read(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    page.locator('input[type=file],textarea').evaluate_all("es=>es.forEach(e=>e.closest('label').remove())")
+    # Leave Country pending until explicit Analyze, then pause its result report
+    # after the saved snapshot response, inside the serialized storage read.
+    worker.evaluate('''()=>{globalThis.pendingFetch=fetch;globalThis.fetch=async(url,...args)=>{
+      const response=await pendingFetch(url,...args);
+      if(String(url).endsWith('/ext/answers')){const data=await response.json();
+        for(const answer of data.answers){const field=JSON.parse(args[0].body).fields.find(f=>f.key===answer.key);
+          if(field?.label==='Country'){answer.status='NEEDS_INPUT';answer.value=null;}}
+        return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}});
+      }return response;};}''')
+    initial = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    worker.evaluate('''()=>{globalThis.reportRead=chrome.storage.session.get.bind(chrome.storage.session);let hold=false;
+      chrome.storage.session.get=async keys=>{const result=await reportRead(keys);
+        if(hold&&Array.isArray(keys)&&keys.includes('applicationAnswers')){
+          hold=false;await new Promise(r=>globalThis.releaseRepairReport=r);
+        }return result;};
+      globalThis.fetch=async(url,...args)=>{const response=await pendingFetch(url,...args);
+        if(String(url).endsWith('/ext/snapshot'))hold=true;return response;};}''')
+    panel.locator('#send-structure').click()
+    assert worker.evaluate('''async()=>{for(let i=0;i<1000&&!globalThis.releaseRepairReport;i++)await new Promise(r=>setTimeout(r,10));return Boolean(globalThis.releaseRepairReport)}''')
+    expect(page.locator('#country')).to_have_value('us')
+    page.locator('#country').press('ArrowDown')
+    worker.evaluate('()=>releaseRepairReport()')
+    expect(panel.locator('#send-structure')).to_be_enabled(timeout=15000)
+    # Trusted edits invalidate the analysis UI while its request is in flight.
+    expect(panel.locator('#snapshot-status')).not_to_have_text('Analyzed')
+    expect(page.locator('#country')).to_have_value('Canada')
+    current = worker.evaluate("async id=>(await chrome.storage.session.get('tabResults')).tabResults[id]", tab_id)
+    assert current['summary']['filled'] == initial['summary']['filled']
+    assert all(answer in current['completed'] for answer in initial['completed'])
+    assert not any(f['label']=='Country' and f['value']=='United States' for f in current['completed'])
+    assert any(f['label']=='Unknown personal fact' for f in current['pending'])
+
+
+def t063_answers_pending(worker):
+    return worker.evaluate('''async()=>{for(let i=0;i<500&&!globalThis.releaseAnswers;i++)await new Promise(r=>setTimeout(r,10));return answerCalls}''')
+
+
+def test_t063_duplicate_and_busy_mutation_exclusion(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    t063_hold_answers(worker)
+    panel.locator('#send-structure').evaluate('e=>{e.click();e.click()}')
+    expect(panel.locator('#send-structure')).to_have_attribute('aria-busy','true')
+    assert t063_answers_pending(worker) == 1
+    panel.evaluate('''()=>{globalThis.secondAnalysis=chrome.runtime.sendMessage({type:'page-snapshot',tabId:Number(new URL(location.href).searchParams.get('tabId'))});return true;}''')
+    for kind in ['autofill','autofill-skills','fill-answer','cover-letter','chat-replace','next-page']:
+        result = panel.evaluate('(type)=>chrome.runtime.sendMessage({type,tabId:Number(new URL(location.href).searchParams.get("tabId"))})', kind)
+        assert re.search('busy.*retry', result.get('error',''), re.I), result
+    direct = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert 'busy' in direct['error']
+    expect(page.locator('#full')).to_be_empty()
+    assert page.evaluate('actions') == []
+    worker.evaluate('()=>{globalThis.fetch=repairFetch;releaseAnswers()}')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
+    duplicate = panel.evaluate('()=>secondAnalysis')
+    assert duplicate['ok'] and duplicate['summary'].startswith('Filled 4')
+    assert len([1 for path,_,_ in requests if path=='/ext/snapshot']) == 1
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(page.locator('#email')).to_have_value('student@example.test')
+    expect(page.locator('#consent')).to_be_checked()
+    expect(page.locator('#country')).to_have_value('us')
+    expect(page.locator('#manual')).to_have_value('PRIVATE_MANUAL')
+    assert page.evaluate('actions') == []
+
+
+@pytest.mark.parametrize('change',['document','step','edit'])
+def test_t063_delayed_answer_stale_document_step_and_user_edit(loaded_extension, extension_server, change):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    t063_hold_answers(worker)
+    panel.locator('#send-structure').click()
+    assert t063_answers_pending(worker) == 1
+    if change == 'document':
+        page.reload()
+        page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
+        panel = next(f for f in page.frames if '/sidepanel.html' in f.url)
+    elif change == 'step':
+        page.locator('form').evaluate('e=>{const fresh=e.cloneNode(true);e.replaceWith(fresh)}')
+    else:
+        page.locator('#full').fill('PRIVATE_NEW_MANUAL')
+        page.locator('#full').fill('')
+    worker.evaluate('()=>{globalThis.fetch=repairFetch;releaseAnswers()}')
+    expect(panel.locator('#send-structure')).to_be_enabled(timeout=15000)
+    worker.evaluate('async()=>{for(let i=0;i<100;i++)await new Promise(r=>setTimeout(r,10))}')
+    expect(page.locator('#full')).to_be_empty()
+    expect(page.locator('#email')).to_be_empty()
+    expect(page.locator('#consent')).not_to_be_checked()
+    expect(page.locator('#country')).to_have_value('')
+    assert page.evaluate('actions') == []
+    if change == 'edit':
+        expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
+        expect(panel.locator('#analysis-summary')).to_contain_text('Repair stopped')
+    else:
+        assert not any(path=='/ext/snapshot' for path,_,_ in requests)
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
+    if change == 'edit':
+        expect(page.locator('#full')).to_be_empty()
+        expect(page.locator('#email')).to_have_value('student@example.test')
+    else:
+        expect(page.locator('#full')).to_have_value('Fixture Student')
+    assert page.evaluate('actions') == []
+
+
+def test_t063_partial_progress_survives_failed_retry(loaded_extension, extension_server, config):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    page.locator('#consent').evaluate("e=>e.addEventListener('change',()=>setTimeout(()=>e.checked=false,100))")
+    worker.evaluate('''()=>{globalThis.repairFetch=fetch;let calls=0;globalThis.fetch=(url,...args)=>{
+      if(String(url).endsWith('/ext/answers')&&++calls===2)return Promise.reject(new TypeError('fixture offline'));
+      return repairFetch(url,...args);};}''')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Repair stopped')
+    expect(page.locator('#consent')).not_to_be_checked()
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(page.locator('#country')).to_have_value('us')
+    report=json.loads(next((config.private/'snapshots').glob('*.json')).read_text(encoding='utf-8'))['diagnostic']
+    assert report['repair']['filled']==3
+    assert next(f for f in report['findings'] if f['label']=='Contact consent')['status']=='verification_failed'
+    expect(panel.locator('#send-structure')).to_be_enabled()
+    assert page.evaluate('actions') == []
+
+
+def test_t063_iframe_bound_repair_after_sidebar_reopens(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
+    page.locator('form').evaluate("e=>e.insertAdjacentHTML('afterend','<iframe id=application src=/frame.html></iframe>')")
+    expect(page.frame_locator('#application').locator('#name')).to_be_empty()
+    # Reopening the actual sidebar preserves the explicit tab binding even when another tab is active.
+    panel.locator('#close').click()
+    worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
+    other=loaded_extension[0].new_page()
+    other.goto(extension_server[0]+'/job.html')
+    page.frame_locator('#autoapply-sidebar iframe').locator('#send-structure').click()
+    panel=page.frame_locator('#autoapply-sidebar iframe')
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(page.frame_locator('#application').locator('#name')).to_have_value('Embedded Student')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 5')
+    assert page.frame_locator('#application').locator('body').evaluate('()=>submissions')==0
+    assert page.evaluate('actions')==[]
+    assert not any(path=='/ext/applied' for path,_,_ in requests)
+
+
+def test_t063_manual_unchecked_answer_is_preserved(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests=t063_page(loaded_extension, extension_server)
+    page.locator('#consent').check()
+    page.locator('#consent').uncheck()
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=15000)
+    expect(page.locator('#consent')).not_to_be_checked()
+    expect(page.locator('#full')).to_have_value('Fixture Student')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
+    payload=next(p for path,_,p in requests if path=='/ext/snapshot')
+    assert next(f for f in payload['diagnostic']['fields'] if f['label']=='Contact consent')['repair_status']=='user_edited'
+    assert page.evaluate('actions')==[]
+
+
+def test_t063_analyze_waits_for_autofill_final_async_guard(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests=t063_page(loaded_extension, extension_server)
+    # No writing/cover task: hold the ordinary final auto-advance preference read,
+    # after the legacy main busy flag has already been cleared.
+    page.locator('textarea').evaluate('e=>e.closest("label").remove()')
+    page.locator('input[type=file]').evaluate('e=>e.closest("label").remove()')
+    worker.evaluate('''id=>{globalThis.finalFetch=fetch;globalThis.fetch=async(url,...args)=>{
+      if(String(url).endsWith('/ext/ping')){
+        const {tabResults={}}=await chrome.storage.session.get('tabResults');
+        if(tabResults[id]?.summary&&!tabResults[id].busy)await new Promise(r=>globalThis.releaseFinalFill=r);
+      }return finalFetch(url,...args);
+    };globalThis.finalFill=autoApplyAutofill(id);return true;}''',tab_id)
+    assert worker.evaluate('''async()=>{for(let i=0;i<1000&&!globalThis.releaseFinalFill;i++)await new Promise(r=>setTimeout(r,10));return Boolean(globalThis.releaseFinalFill)}''')
+    response=panel.evaluate('''()=>chrome.runtime.sendMessage({type:'page-snapshot',tabId:Number(new URL(location.href).searchParams.get('tabId'))})''')
+    assert 'busy' in response.get('error',''),response
+    assert not any(path=='/ext/snapshot' for path,_,_ in requests)
+    worker.evaluate('()=>{globalThis.fetch=finalFetch;releaseFinalFill()}')
+    worker.evaluate('()=>finalFill')
+    assert page.evaluate('actions')==[]
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=10000)
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
+
+
+def test_t063_failed_checkbox_does_not_activate_adjacent_navigation(loaded_extension, extension_server):
+    page, worker, tab_id, panel, requests=t063_page(loaded_extension, extension_server)
+    page.locator('#consent').evaluate('''e=>{
+      window.checkboxAttempts=0;
+      e.addEventListener('click',event=>{checkboxAttempts++;event.preventDefault()});
+      const label=e.closest('label');label.htmlFor=e.id;label.after(e);
+      const next=document.createElement('button');next.type='button';next.textContent='Next';
+      next.onclick=()=>actions.push('unsafe checkbox fallback');e.after(next);
+    }''')
+    panel.locator('#send-structure').click()
+    expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=20000)
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
+    expect(page.locator('#consent')).not_to_be_checked()
+    expect(page.locator('#country')).to_have_value('us')
+    assert page.evaluate('checkboxAttempts')>=2
+    payload=next(p for path,_,p in requests if path=='/ext/snapshot')
+    assert next(f for f in payload['diagnostic']['fields'] if f['label']=='Contact consent')['repair_status']=='verification_failed'
+    assert page.evaluate('actions')==[]
