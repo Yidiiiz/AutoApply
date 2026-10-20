@@ -383,7 +383,13 @@ def extension_server():
                 answers = []
                 for field in payload["fields"]:
                     label = field["label"]
-                    if field["kind"] == "file":
+                    if payload.get('url', '').endswith('/t059-pinpoint-demographics.html'):
+                        synthetic = {'Gender': 'Choose not to self-identify',
+                                     'Disability': 'Yes, I have a disability, or have had one in the past',
+                                     'Veteran Status': 'I am not a protected veteran'}
+                        value = fit_options(synthetic[label], field['options']) if label in synthetic and field['options'] else None
+                        status = 'RESOLVED' if value else 'OPTIONAL_SKIP' if label == 'Ethnicity' else 'NEEDS_INPUT'
+                    elif field["kind"] == "file":
                         status, value = "FILE", "cover_letter" if "Cover" in label else "resume"
                     elif label == "Why this role?":
                         status, value = "NEEDS_WRITING", None
@@ -3162,3 +3168,94 @@ await assert.rejects(()=>action({...message,request:'ordinary chat'}),/not autho
     path=tmp_path/'busy.js';path.write_text(script,encoding='utf-8')
     result=subprocess.run(['node',str(path)],capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stderr
+
+
+def t059_page(loaded_extension, extension_server):
+    context, worker, _ = loaded_extension
+    server, requests = extension_server
+    worker.evaluate('config=>chrome.storage.local.set(config)', dict(server=server, key=KEY))
+    page = context.new_page()
+    page.route('**/t059-pinpoint-demographics.html', lambda route: route.fulfill(
+        path=str(FIXTURES/'t059-pinpoint-demographics.html'), content_type='text/html'))
+    page.goto(server+'/t059-pinpoint-demographics.html')
+    tab_id = worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id', page.url)
+    return page, worker, tab_id, requests
+
+
+def test_t059_captured_pinpoint_demographics(loaded_extension, extension_server):
+    page, worker, tab_id, requests = t059_page(loaded_extension, extension_server)
+    result = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert 'error' not in result, result
+    fields = result['fields']
+    assert len(fields) == 4 and len({f['key'] for f in fields}) == 4
+    assert [f['label'] for f in fields] == ['Gender', 'Ethnicity', 'Disability', 'Veteran Status']
+    assert all(f['kind'] == 'combobox' and not f['options_partial'] for f in fields)
+    collected = [payload for path, _, payload in requests if path == '/ext/answers' and any(f['options'] for f in payload['fields'])]
+    assert collected and [len(f['options']) for f in collected[0]['fields']] == [3, 8, 3, 7], result
+    assert result['summary']['filled'] == 3, result
+    assert [f['label'] for f in result['pending']] == ['Ethnicity']
+    assert len(result['completed']) == 3
+    page.wait_for_timeout(500)
+    assert page.locator('.react-select input[type=hidden]').evaluate_all('(els)=>els.map(e=>e.value)') == ['87423', '', '87467', '87472']
+    assert page.locator('.react-select__single-value').all_text_contents() == [
+        'Choose not to self-identify', 'Yes, I have a disability, or have had one in the past', 'I am not a protected veteran']
+    assert page.locator('select').evaluate_all('(els)=>els.map(e=>e.value)') == ['blank'] * 4
+    assert page.locator('[role=combobox]').evaluate_all('(els)=>els.every(e=>getComputedStyle(e).opacity==="0"&&e.getBoundingClientRect().width<1&&!e.value)')
+    assert page.evaluate('[submissions,proxyInputs,fallbackChanges,keys.includes("Enter")]') == [0, 0, 0, False]
+    assert page.evaluate('controlOpens') >= 4
+    panel = page.frame_locator('#autoapply-sidebar iframe')
+    expect(panel.locator('#fill-section')).to_contain_text('Ethnicity')
+    panel.locator('#tab-answers').click()
+    for name in ['Gender', 'Disability', 'Veteran Status']:
+        expect(panel.locator('#completed-answers')).to_contain_text(name)
+    # Occupied manual choices survive subsequent autofill, including the missing-preference ethnicity.
+    page.locator('.react-select__control').nth(1).click()
+    page.locator('.react-select__option', has_text='Asian').click()
+    page.wait_for_timeout(150)
+    again = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
+    assert again['summary']['filled'] == 0
+    assert page.locator('.react-select input[type=hidden]').evaluate_all('(els)=>els.map(e=>e.value)') == ['87423', '87431', '87467', '87472']
+    assert not any(path == '/ext/applied' for path, _, _ in requests)
+
+
+@pytest.mark.parametrize('failure', ['reset', 'hidden-only', 'display-only', 'wrong-id'])
+def test_t059_select_only_requires_retained_commit(loaded_extension, extension_server, failure):
+    page, worker, tab_id, _ = t059_page(loaded_extension, extension_server)
+    page.evaluate('''failure=>{
+      const widget=document.querySelector('.react-select');
+      if(failure==='reset')widget.dataset.reset='true';
+      else new MutationObserver(()=>{
+        const display=widget.querySelector('.react-select__single-value'), hidden=widget.querySelector('[type=hidden]');
+        if(failure==='hidden-only')display?.remove();
+        else if(hidden.value && hidden.value !== 'wrong')hidden.value=failure==='wrong-id'?'wrong':'';
+      }).observe(widget,{childList:true,subtree:true,attributes:true,attributeFilter:['value']});
+    }''', failure)
+    value = worker.evaluate('''async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>{
+      const scan=await autoApplyContent.scan(),field=scan.fields[0];
+      return autoApplyContent.fill([{key:field.key,status:'RESOLVED',value:'Choose not to self-identify'}]);
+    }}))[0].result''', tab_id)
+    assert value['filled'] == 0 and value['needs_input'] == ['Gender'], value
+    assert page.evaluate('[submissions,proxyInputs]') == [0, 0]
+
+
+def test_t059_readonly_guards_and_responsive_fallback(loaded_extension, extension_server):
+    page, worker, tab_id, _ = t059_page(loaded_extension, extension_server)
+    page.evaluate('''()=>{
+      const form=document.querySelector('form'), original=document.querySelector('section');
+      for(const attr of ['hidden','inert','aria-disabled','disabled','aria-hidden']){
+        const clone=original.cloneNode(true);clone.setAttribute(attr,attr.startsWith('aria-')?'true':'');form.append(clone);
+      }
+      for(const css of ['display:none','opacity:0','visibility:hidden']){
+        const clone=original.cloneNode(true);clone.style=css;form.append(clone);
+      }
+      form.insertAdjacentHTML('beforeend','<label>Readonly text<input readonly></label><label>Readonly email<input type=email aria-readonly=true></label><label>Readonly textarea<textarea readonly></textarea></label><label>Readonly combo<input role=combobox aria-readonly=true aria-haspopup=true></label>');
+    }''')
+    result = worker.evaluate('''async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:async()=>({
+      scan:await autoApplyContent.scan(),chat:await autoApplyContent.chatContext()
+    })}))[0].result''', tab_id)
+    assert len(result['scan']['fields']) == 4
+    assert result['chat']['fields'] == []
+    page.set_viewport_size(dict(width=480, height=800))
+    mobile = worker.evaluate('async id=>(await chrome.scripting.executeScript({target:{tabId:id},func:()=>autoApplyContent.scan()}))[0].result', tab_id)
+    assert len(mobile['fields']) == 4 and all(f['kind'] == 'select' for f in mobile['fields'])
+    assert len({f['key'] for f in mobile['fields']}) == 4

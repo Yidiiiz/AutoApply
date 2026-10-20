@@ -143,7 +143,7 @@
   const normal = value => clean(value).toLowerCase();
 
   function visible(element) {
-    if (element.disabled || element.readOnly || element.matches(":disabled") || element.getAttribute("aria-disabled") === "true" || element.getAttribute("aria-readonly") === "true" || element.closest("[hidden], [inert], [aria-hidden='true']")) return false;
+    if (element.disabled || element.readOnly || element.matches(":disabled") || element.getAttribute("aria-disabled") === "true" || element.getAttribute("aria-readonly") === "true" || element.closest("[hidden], [inert], [aria-hidden='true'], [aria-disabled='true'], [disabled]")) return false;
     const rect = element.getBoundingClientRect();
     if (!rect.width || !rect.height || rect.right + scrollX <= 0 || rect.bottom + scrollY <= 0) return false;
     for (let node = element; node instanceof Element; node = node.parentElement) {
@@ -154,6 +154,7 @@
   }
 
   function interactiveVisible(element) {
+    if (selectOnlyControl(element)) return true;
     if (visible(element)) return true;
     if (!element.matches('input[type="checkbox"],input[type="radio"]') ||
         !element.isConnected || element.disabled || element.readOnly || element.matches(':disabled') ||
@@ -166,6 +167,21 @@
     return [...Array.from(element.labels || []), element.closest('label'),
       element.parentElement.querySelector('[data-automation-id="checkbox"],[role="checkbox"]')]
       .some(node=>node && visible(node) && (questionText(node) || node.getBoundingClientRect().width>1));
+  }
+  function selectOnlyControl(element) {
+    // React Select's non-searchable input is a focus proxy, not a writable field.
+    if (!element.matches('input[role="combobox"][aria-haspopup]') ||
+        !(element.readOnly || element.getAttribute('aria-readonly') === 'true') ||
+        !(element.inputMode === 'none' || element.getAttribute('aria-autocomplete') === 'none') ||
+        !element.isConnected || element.matches(':disabled') ||
+        element.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]')) return null;
+    const control = element.closest('[class*="__control"],[class*="-control"]');
+    const style = getComputedStyle(element);
+    for (let node = element.parentElement; node && node !== control; node = node.parentElement) {
+      const parentStyle = getComputedStyle(node);
+      if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden' || parentStyle.opacity === '0') return null;
+    }
+    return control && visible(control) && style.display !== 'none' && style.visibility !== 'hidden' ? control : null;
   }
   function choiceContainer(element) {
     if (['current','fluent'].includes(sectionField(element))) return element;
@@ -290,9 +306,11 @@
     const lists = ids.map(id => document.getElementById(id)).filter(Boolean);
     if (!lists.length) {
       lists.push(comboContainer(element));
-      if (openedCombos.has(element) || element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement) lists.push(...document.querySelectorAll('[data-automation-id="activeListContainer"],[data-automation-id="responsiveMonikerPrompt"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
+      if (!selectOnlyControl(element) && (openedCombos.has(element) || element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement)) lists.push(...document.querySelectorAll('[data-automation-id="activeListContainer"],[data-automation-id="responsiveMonikerPrompt"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
     }
-    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"],option,[data-automation-id="menuItem"],[data-automation-id="promptOption"]')).map(option=>option.closest('[data-automation-id="menuItem"]') || option)))]
+    const selector = '[role="option"],option,[data-automation-id="menuItem"],[data-automation-id="promptOption"]' +
+      (selectOnlyControl(element) ? ',.react-select__menu .react-select__option' : '');
+    return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll(selector)).map(option=>option.closest('[data-automation-id="menuItem"]') || option)))]
       .filter(option => !option.closest('[data-automation-id="selectedItemList"]') && !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
         (text(option) || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
@@ -313,6 +331,12 @@
   async function openCombo(element) {
     trace("dropdown","opened",element);
     openedCombos.add(element);
+    const selectOnly = selectOnlyControl(element);
+    if (selectOnly) {
+      if (element.getAttribute('aria-expanded') !== 'true') pointerClick(selectOnly);
+      return;
+    }
+    if (element.readOnly || element.getAttribute('aria-readonly') === 'true') return;
     element.focus();
     if (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])')) { element.click(); return; }
     keypress(element, "ArrowDown");
@@ -334,7 +358,7 @@
   }
   function searchCombo(element, value) {
     const input = comboInput(element);
-    if (!input || input.readOnly || input.disabled) return false;
+    if (!input || input.readOnly || input.disabled || input.getAttribute('aria-readonly') === 'true') return false;
     input.focus();
     if (input instanceof HTMLInputElement) {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
@@ -547,7 +571,7 @@
       container=questionContainer(container);
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
         options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
-          element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
+          element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(!selectOnlyControl(element) && comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
         section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       records.set(key, {element, members, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
@@ -560,6 +584,15 @@
       const current = records.get(key);
       current.field = {...current.field, ...old.field}; current.dateElements = old.dateElements; current.savedDate = old.savedDate;
       for (const date of old.dateElements.slice(1)) { records.delete(date.dataset.autoapplyKey); }
+    }
+    // Non-searchable widgets must expose their actual menu before profile matching.
+    // Their aria-autocomplete=list describes navigation, not a partial search result.
+    for (const record of records.values()) {
+      if (record.field.kind !== 'combobox' || !selectOnlyControl(record.element) || occupied(record)) continue;
+      try {
+        await openCombo(record.element);
+        record.field.options = (await settledComboOptions(record.element, 1000)).map(text);
+      } finally { closeCombo(record.element); }
     }
     const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
     previousStep = workdayState();
@@ -694,6 +727,10 @@
       }
       if (!option){trace("dropdown","skipped",element,{reason:"no matching option",value});return false;}
       const selected = text(option);
+      const container = comboContainer(element);
+      const fallback = container.nextElementSibling;
+      const submittedValue = selectOnlyControl(element) && fallback?.matches('select') && fallback.id === container.id ?
+        Array.from(fallback.options).find(choice => normal(choice.text) === normal(selected))?.value : null;
       const choices = comboOptions(element).map(text);
       if (option.tagName === "OPTION" && element.getAttribute("list")) {
         nativeSet(element, "value", selected);
@@ -728,6 +765,13 @@
           const container = comboContainer(element);
           const singleValue = text(container.querySelector('[class*="singleValue"],[class*="single-value"]'));
           const closed = element.getAttribute("aria-expanded") === "false";
+          if (selectOnlyControl(element)) {
+            const hidden = container.querySelector('input[type="hidden"]');
+            if (!closed || normal(singleValue) !== normal(selected) || hidden &&
+                (!clean(hidden.value) || submittedValue != null && hidden.value !== submittedValue)) {stableSince=0;return false;}
+            if (!stableSince) stableSince=Date.now();
+            return Date.now()-stableSince>=300;
+          }
           return matchesSelected || option.getAttribute("aria-selected") === "true" ||
             closed && Boolean(singleValue) && !container.querySelector('[class*="placeholder"]') ||
             closed && normal(element.value) === normal(selected);
@@ -808,7 +852,12 @@
       };
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
       if (answer.status === "NEEDS_INPUT") { unresolved(false); continue; }
-      if (answer.status === "OPTIONAL_SKIP") { summary.skipped++; continue; }
+      if (answer.status === "OPTIONAL_SKIP") {
+        // A select-only widget with no matching saved choice stays available in Fill.
+        if (selectOnlyControl(element)) unresolved(false);
+        else summary.skipped++;
+        continue;
+      }
       if (!["RESOLVED", "FILE"].includes(answer.status)) { unresolved(false); continue; }
       try {
         if (record.dateElements) {

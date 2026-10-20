@@ -692,7 +692,18 @@ class AnswerResolver:
         if path == 'skills' and isinstance(value, list) and q.kind in {'text', 'textarea'}:
             value = ', '.join(str(v) for v in value)
         if not isinstance(value, list):
-            value = fit_options(str(value), q.options)
+            selected = fit_options(str(value), q.options)
+            # A saved affirmative disability status supports this standard disclosure,
+            # but never arbitrary Yes-prefixed claims or a current-No/history inference.
+            from .field_mapping import semantic_key
+            if (selected is None and path == 'demographics.disability'
+                    and semantic_key(q.label) == path and normalize(value) == 'yes'
+                    and q.kind in {'select', 'combobox', 'radio'}):
+                affirmative = [o for o in q.options if normalize(o) ==
+                               'yes i have a disability or have had one in the past']
+                competing = [o for o in q.options if normalize(o).startswith('yes ')]
+                selected = affirmative[0] if len(affirmative) == len(competing) == 1 else None
+            value = selected
         if value is None:
             return None
         try:

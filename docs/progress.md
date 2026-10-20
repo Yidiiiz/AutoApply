@@ -825,3 +825,64 @@ remains. Checks used synthetic profiles, stubbed providers and fixture-only HTTP
 with external browser traffic blocked. Only the four T058 scope files were edited;
 no workers, live employer/Discord access, private applicant edits, process/runtime/
 budget changes, staging, commits, pushes or deployment were performed.
+
+### T059 - captured Pinpoint select-only demographic controls (2026-10-19)
+
+Implemented a narrow selectable-readonly combobox path for an enabled focus proxy
+with an operative visible parent control. Ordinary readonly fields and chat remain
+protected. Scan opens the real control to enumerate complete options; menu lookup
+supports captured role-less React Select option DIVs within that widget only.
+Readonly proxies are never searched/typed into. Selection requires a settled,
+matching display plus populated submitted value (and matching option ID when the
+same-ID responsive SELECT supplies that mapping). The fallback SELECT is read for
+verification only on desktop. Missing optional choices remain available in Fill;
+occupied choices are preserved.
+
+The focused fixture retains only the four labels, nested controls and offered
+options from the Oct 19 public capture. Its proxy opacity/relative position/.01
+scale and role-less menu structure use the supervisor's local structure/menu
+capture; local event handlers simulate open/close and delayed selection commits.
+No external scripts, endpoint actions or applicant values are retained. Running
+HEAD's original scanner against this fixture reproduced 0 detected fields with 4
+widgets present. The new browser flow detects four unique comboboxes, collects
+3/8/3/7 choices, fills three exact synthetic offered answers, leaves ethnicity
+pending, shows Fill/Answers, retains hidden IDs/display, preserves a later manual
+choice, and never types into the proxy or submits. Other focused cases reject
+reset, display-only, hidden-only and wrong-ID commits, and cover readonly/chat,
+disabled/inert/hidden guards and the mobile fallback without duplicate controls.
+
+Attempt 2 resolves the previous server mapping blocker within the expanded scope.
+The existing resolver now maps an explicit, nonconflicting saved disability Yes
+or true to the unique standard offered `Yes, I have a disability, or have had one
+in the past` choice, only for independently recognized disability-status controls.
+Generic option matching and saved preferences are unchanged. Missing/conflicting
+facts, duplicate/competing affirmative options, accommodation claims and unrelated
+questions abstain; current No does not imply never having had a disability.
+Declines, exact plain Yes/No and REQUIRE_USER/DO_NOT_ANSWER policies retain their
+behavior. Canonical and legacy saved Yes are tested through /ext/answers for both
+select and combobox fields, with canonical/legacy synthetic decline preferences
+and explicit nonveteran status. All three applicable choices resolve with profile
+provenance, ethnicity remains OPTIONAL_SKIP, profile bytes are unchanged, and no
+writing provider is called. API checks and the existing MV3 fixture separately
+verify the same exact choice contract; this is not a live MV3/provider integration
+claim. Browser product changes from attempt 1 were preserved unchanged.
+
+Validation: final T059 selection: 7 passed in 37.57s; JavaScript syntax, Python AST
+and git diff --check passed. Focused existing-regression results are recorded below.
+Only T059 scope files were edited; no live services, applications, ignored applicant
+data, orchestration/runtime/budgets, workers, staging, commits, push or deployment.
+The focused combined run passed 23 tests in 145.62s: T059 (before adding the
+wrong-ID case), both T057 Pinpoint phone/consent variants, both Workday SPA refill
+variants, Greenhouse combobox/hidden-upload/date behavior, upload-label variants,
+preselected-country/replaced-upload, T048 inert-row skills variants and T057 chat
+busy guards. The final 7-test T059 rerun includes wrong-ID verification. No full
+suite was run or claimed.
+
+Attempt 2 validation with .venv Python: T059 API/browser selection passed 23 tests
+in 42.30s; after adding the competing-affirmative guard and canonical/provider
+assertions, the final API selection passed 18 tests in 7.32s. The six MV3 browser
+cases passed in the combined run and their code was unchanged in attempt 2.
+Focused existing demographic/decline/standard-answer and exact-option regressions
+passed 38 tests in 12.83s. Python AST, JavaScript syntax and git diff --check passed.
+All evidence here is from local fixtures and synthetic profiles; no live services,
+application submission or applicant-data changes were performed in attempt 2.

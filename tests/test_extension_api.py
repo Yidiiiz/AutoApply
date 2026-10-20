@@ -1143,3 +1143,84 @@ def test_t057_chat_quoted_literal(http_dashboard,writing_provider,quote):
         messages=[dict(role='user',text='replace current field with '+quote+'No'+quote)]))
     assert status==200 and value['replacement_mode']=='literal' and value['actions'][0]['text']=='No'
     assert not writing_provider.requests
+
+
+@pytest.mark.parametrize('kind', ['select', 'combobox'])
+@pytest.mark.parametrize('source', ['demographics', 'application_preferences'])
+def test_t059_captured_pinpoint_demographic_preferences(http_dashboard, config, writing_provider, source, kind):
+    from pathlib import Path
+    from bs4 import BeautifulSoup
+    profile = config.profile
+    profile['application_preferences'] = dict(gender='Decline to self-identify', race='Decline to self-identify',
+                                               veteran='not a protected veteran')
+    profile[source] = {**profile.get(source, {}), 'disability': 'Yes'}
+    if source == 'demographics':
+        profile[source].update(gender='Decline to self-identify', race='Decline to self-identify',
+                               veteran_status='not a protected veteran')
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    before = (config.private/'profile.yaml').read_bytes()
+    capture = BeautifulSoup((Path(__file__).parent/'fixtures/extension/t059-pinpoint-demographics.html').read_text(encoding='utf-8'), 'html.parser')
+    fields = []
+    for section in capture.select('section'):
+        fields.append(dict(key=str(len(fields)), label=section.label.get_text(strip=True), kind=kind,
+                           required=False, options_partial=False,
+                           options=[o.get_text(strip=True) for o in section.select('select option')[1:]]))
+    status, result, _ = ext(http_dashboard, 'POST', '/ext/answers', dict(url='https://fixture.test/apply', fields=fields))
+    assert status == 200
+    answers = result['answers']
+    # The MV3 fixture consumes these same three exact offered choices and leaves ethnicity pending.
+    assert [a['status'] for a in answers] == ['RESOLVED', 'OPTIONAL_SKIP', 'RESOLVED', 'RESOLVED']
+    assert [a['value'] for a in answers] == ['Choose not to self-identify', None,
+        'Yes, I have a disability, or have had one in the past', 'I am not a protected veteran']
+    assert answers[2]['source'] == 'profile:demographics.disability'
+    assert not writing_provider.requests
+    assert (config.private/'profile.yaml').read_bytes() == before
+
+
+@pytest.mark.parametrize('saved,legacy,label,options,expected', [
+    (True, None, 'Disability status', ['Yes, I have a disability, or have had one in the past'],
+     'Yes, I have a disability, or have had one in the past'),
+    ('Yes', 'No', 'Disability', ['Yes, I have a disability, or have had one in the past'], None),
+    (None, None, 'Disability', ['Yes, I have a disability, or have had one in the past'], None),
+    ('No', None, 'Disability', ['No, I do not have a disability and have never had one'], None),
+    ('Decline', None, 'Disability', ['Yes, I have a disability, or have had one in the past', 'Prefer not to say'], 'Prefer not to say'),
+    ('Yes', None, 'Disability', ['Yes, I have a disability, or have had one in the past'] * 2, None),
+    ('Yes', None, 'Disability', ['Yes, I have a disability, or have had one in the past',
+                               'YES I have a disability or have had one in the past'], None),
+    ('Yes', None, 'Disability', ['Yes, I have a disability, or have had one in the past',
+                               'Yes, I have a disability'], None),
+    ('Yes', None, 'Disability', ['Yes, I require an accommodation'], None),
+    ('Yes', None, 'Do you certify medical fitness?', ['Yes, I have a disability, or have had one in the past'], None),
+    ('Yes', None, 'Disability', ['Yes', 'No'], 'Yes'),
+    ('No', None, 'Disability', ['Yes', 'No'], 'No'),
+])
+def test_t059_disability_mapping_guards(config, db, saved, legacy, label, options, expected):
+    from autoapply.answers import AnswerResolver, fit_options
+    from autoapply.models import Question
+    profile = config.profile
+    profile['demographics'] = {'disability': saved}
+    profile['application_preferences'] = {'disability': legacy}
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    before = (config.private/'profile.yaml').read_bytes()
+    resolver = AnswerResolver(config, db)
+    for kind in ['select', 'combobox']:
+        result = resolver.resolve_result(Question('disability', label, kind, False, options), dict(id=0, company='Fixture'))
+        assert (result.answer.value if result.answer else None) == expected
+        if expected is not None:
+            assert result.answer.source == 'profile:demographics.disability'
+            assert result.answer.evidence == ['demographics.disability']
+    assert fit_options('Yes', ['Yes, I have a disability, or have had one in the past']) is None
+    assert (config.private/'profile.yaml').read_bytes() == before
+
+
+@pytest.mark.parametrize('policy', ['REQUIRE_USER', 'DO_NOT_ANSWER'])
+def test_t059_disability_mapping_respects_policy(config, db, policy):
+    from autoapply.answers import AnswerResolver
+    from autoapply.models import Question
+    profile = config.profile
+    profile['demographics'] = {'disability': 'Yes'}
+    profile['autofill_policies'] = {'demographics.disability': policy}
+    (config.private/'profile.yaml').write_text(yaml.safe_dump(profile), encoding='utf-8')
+    q = Question('disability', 'Disability', 'combobox', False,
+                 ['Yes, I have a disability, or have had one in the past'])
+    assert AnswerResolver(config, db).resolve(q, dict(id=0, company='Fixture')) is None
