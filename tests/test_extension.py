@@ -2481,7 +2481,8 @@ def test_t049_one_click_skills_and_layout(loaded_extension, extension_server, th
     assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
     boxes=[panel.locator(selector).bounding_box() for selector in ('#company','#job','#run-controls','#settings')]
     assert boxes[0]['x']+boxes[0]['width']<=boxes[3]['x']+1
-    assert boxes[1]['y']+boxes[1]['height']<=boxes[2]['y']+1
+    assert boxes[1]['x']+boxes[1]['width']<=boxes[2]['x']+1
+    assert abs(boxes[1]['y']-boxes[2]['y'])<=5
     expect(panel.locator('#progress')).to_be_empty()
     expect(panel.locator('#skills-progress')).to_have_text('1 matched')
     footer=panel.locator('.page-navigation').bounding_box()
@@ -3906,4 +3907,4 @@ def test_t065_direct_mv3_lifecycle_and_queue_visuals():
                             capture_output=True, text=True, timeout=150)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads((ROOT / '.tmp/review/t065/direct-result.json').read_text())
-    assert report['ok'] and len(report['checks']) >= 40
+    assert report['ok'] and len(report['checks']) >= 74

@@ -25,7 +25,7 @@ sidebar remain available manually on other pages.
 
 ## Extension API
 
-Settings → Dashboard shows the Chrome extension pairing key with Copy and
+Settings → Dashboard shows the masked Chrome extension pairing key with Reveal, Copy and
 Regenerate controls. Regeneration revokes the previous key. Every `/ext/*`
 operation requires `X-AutoApply-Key`; CORS and OPTIONS preflight allow only
 `chrome-extension://` origins, GET/POST and Content-Type/X-AutoApply-Key headers.
@@ -98,11 +98,11 @@ Start from the repository directory:
 ```
 
 Visit `http://127.0.0.1:8765/`. Omit `--no-browser` to open the local page
-automatically. Ctrl+C stops the server. The liveness interval defaults to 30
+automatically. Ctrl+C stops the server. The background wake-up interval defaults to 30
 minutes and must be at least 5; the port defaults to 8765.
 
 Startup skips full history validation/export and listing maintenance. The HTTP
-server begins serving before the first background liveness sweep and browser
+server begins serving before the first background daily check and browser
 launch. The page loads immediately with an empty queue, then fetches its lists.
 Queue reads cache the existing selector's ranked rows, with candidate details
 fetched in one query. Database commits, profile edits, configuration changes and published history
@@ -278,7 +278,7 @@ come from the last atomically published report and can remain visible after exit
 | `POST /api/run` | JSON `{count: 5}`; HTTP 202 with `{pid: ...}`, 400 for invalid counts, 409 when busy |
 | `POST /api/pause` | Sets `paused=true`, returns current status |
 | `POST /api/resume` | Sets `paused=false`, returns current status |
-| `GET /api/settings` | Safe fields grouped into sections, locked safety fields and restart note |
+| `GET /api/settings` | Safe fields, source URLs, daily-check status, locked safety fields and save-effect notes |
 | `POST /api/settings` | JSON `{changes: {"jobs.max_listing_age_days": 21}}`; saved values and note; 400 with per-field `errors` |
 | `GET /api/resume` | Current filename, size, SHA-256 prefix, UTC modification time and archived PDF metadata |
 | `GET /api/resume/file` | Current PDF with inline disposition for preview |
@@ -309,7 +309,8 @@ imports `PAGE` and substitutes the CSP nonce and initial queue data.
 
 Settings uses a section menu for General, Discovery, Filling, Dashboard, Resume
 and Safety. Editable fields have inline validation. A footer provides Discard and
-Save changes while edits are pending and shows the local saved time after success.
+Save changes while edits are pending. After success, compact inline Saved feedback
+disappears after three seconds; it does not overlay the form.
 Light and dark themes use the same dashboard palette. The editable settings are:
 
 | Setting | Accepted values |
@@ -324,13 +325,12 @@ Light and dark themes use the same dashboard palette. The editable settings are:
 | `application.confirmation_timeout_seconds` | Integer 5..120 |
 | `processing.max_applications_per_day` | Integer 1..500 |
 | `dashboard.default_batch_size` | Integer 1..10; default 5 |
-| `dashboard.liveness_minutes` | Integer 5..1440; default 30 |
 
 Automatic submission and headless mode display locked Off values for semi-auto
 operation. Locked booleans display Off/On; retry budgets retain their numeric
 values. Retry budgets and Discord enablement are locked with reasons. Any
 attempt to write these or an unknown key is rejected before any file changes.
-No secrets, environment files or token values are exposed by settings endpoints.
+Settings never expose environment files or source credentials. The pairing key is intentionally available in its masked, revealable control.
 If the existing private YAML has automatic submission enabled, saving is refused
 until it is disabled outside the dashboard; settings never rewrite an enabled
 automatic-submission value.
@@ -339,10 +339,11 @@ Saving reads the current YAML, merges only changed keys, and replaces it using
 an fsynced temporary file in the same directory with bounded PermissionError
 retries. A timestamped UTC backup preserves the previous bytes under
 `data/private/backups/config-<utc>.yaml`; at most 20 config backups are retained.
-YAML comments may be lost in the saved file. The running worker picks up settings
-at its next start. Restart the dashboard for its liveness interval; a saved
-interval replaces the CLI's default 30, while other explicit CLI intervals take
-precedence. New page loads use the saved batch default.
+YAML comments may be lost in the saved file. The UI shows a concise save-effect note.
+Source URLs apply to the next discovery action; running workers pick up changes
+at their next start. The obsolete Background interval control is hidden; legacy
+configuration and the CLI wake-up option remain compatible. New page loads use
+the saved batch default.
 
 Resume shows the current PDF, size, last modified time, hash prefix and Preview
 link above a styled PDF drop zone and archive list. Choose file opens the hidden
@@ -385,39 +386,91 @@ application processing loop. Source discovery may open a source browser when
 LinkedIn or Handshake discovery is enabled in existing configuration.
 The page polls the job once per second and updates the list when discovery ends.
 **Find new listings** is a directly visible search-plus icon in the Queue action bar, with an accessible name, title and busy state. Listing checks remain in a small disclosure; there is no More menu. It is separate from Reload data: it calls `POST /api/refresh`
-and scans job sources, which can take minutes. During discovery the icon is busy;
-its accessible name and tooltip include **Searching... 1m 12s**. Completion shows the local finish time, duration and
-`result.new` listing count. The last completion metadata persists in localStorage
-through page reloads; unavailable polling retries without starting another search.
+and performs quick source discovery without repeating expensive liveness checks.
+GitHub compares remote HEAD, avoids fetching an unchanged revision, and skips
+parsing/ingestion for an unchanged SHA. Changed revisions may skip only exact
+unchanged table fingerprints in the same source/document/table context on the
+same local day. A changed/reordered/reopened row reparses the full table.
+No current browser adapter proves ordering, so LinkedIn/Handshake traverse all
+configured queries/pages within their caps; known rows from another query, page
+or source never create a boundary. Unordered, pinned and unknown-date rows cannot
+short-circuit discovery. Discovery can still take minutes. During discovery the icon is busy;
+its accessible name and tooltip include **Searching... 1m 12s**. Queue shows
+**Last updated N hours/days ago** from the latest successful quick or daily
+discovery timestamp persisted in SQLite. The existing `/api/status` payload
+publishes this timestamp plus compact activity/error metadata; reloads and new
+browsers use the same durable value. Failures preserve the last success and show
+Last check incomplete separately. An active daily check disables the discovery
+button, including after reload; a racing manual request reuses that daily check
+without starting another scan. Unavailable polling retries without a new search.
 Only one refresh may run per dashboard. A busy worker lock returns HTTP 409 with
-`worker running` immediately; a second refresh returns `refresh already running`.
+`worker running` immediately; a second quick refresh returns `refresh already running`.
 The server retains the latest 20 refresh jobs in memory. There are no submit,
 review-unlock, hold-clearing or attempt-reset endpoints.
 
+Settings ? Discovery also edits the actual configured source URLs. Choose GitHub,
+LinkedIn or Handshake explicitly, then add/remove/edit and save. Only public HTTPS
+repository/search URLs supported by those adapters are accepted (20 per type,
+2048 characters each). Credentials, token parameters, unsupported hosts/paths,
+custom ports, fragments and duplicate URLs are rejected before any file change.
+Invalid existing credential-bearing URLs are hidden, preserved and must be fixed
+outside the editor. Disabled source flags and existing adapter options survive URL
+edits; disabled GitHub rows are labeled Disabled. Saving a search URL does not enable its source. Other sites require manual
+listing entry and are not presented as discovery adapters.
+
+Pairing controls use a compact masked value with accessible reveal/copy buttons
+and inline copy feedback. Settings and Answers footers align with their form
+column and stay in document flow. While a local list entry is being edited, the
+global Answers footer is hidden and local Done/Cancel remain available. Done
+exposes the global save controls only when it changes the profile; Cancel does
+not create a change. Saved feedback is compact and expires after three seconds.
+Additional education and Other links use the
+same item editor spacing, input widths and right-aligned add/actions controls.
+Minimum confidence help recommends 0.98 as a resolver score, not a probability;
+saving unrelated settings never changes the configured value.
+
+The settings API accepts the virtual change key `discovery.sources` with all
+three URL arrays: `{github: [...], linkedin: [...], handshake: [...]}`. Existing
+configuration paths remain `github_sources[].url` and each browser source's
+`search_urls`. SQLite's additive `discovery_contexts` table records fingerprints
+and canonical-URL membership under source URL/query/document/table/page keys.
+Membership from another context is never evidence of a stopping boundary.
+
 ## Liveness and safety limits
 
-A background sweep starts immediately and repeats after each configured interval.
-It probes at most 100 eligible queued/retry listings per sweep with at most four
-concurrent probe threads. Each also fetches and stores public descriptions shorter
-than 200 characters, using the same cap and pool. HTTP calls run without database
-write locks and use bounded timeouts (15 seconds per request). Candidates missing
-descriptions go first, then least recently checked candidates, so the queue rotates
-through the cap. Probe failures count as `UNKNOWN`; `described` counts enrichment.
-After all probes finish, descriptions and retirement results are written in one
-short batch with one history flush. Dashboard and its connections reuse the
-canonical initialized `db.history`; the existing archive revision token avoids
-rescanning unchanged records and invalidates readers after another exporter writes.
-The next queue rebuild re-evaluates eligibility using the stored text: PhD
-rejections leave the queue without retiring or changing application state.
-The page shows sweep start/end times, counts, errors and results; this monitoring
-state stays in memory and resets when the dashboard restarts.
+A background daily check catches up when the dashboard opens and checks again at
+local midnight while the server stays alive. Nothing runs while the server is off.
+The configured background interval controls additional wake-ups; a pending retry
+can wake sooner. Successful discovery and liveness timestamps/status are stored in
+SQLite under `daily_full_check`, independently, across dashboard restarts.
+
+Full discovery bypasses SHA/section early exits and traverses every enabled source
+URL, browser query/page, and supported README/README-Off-Season document within the
+configured page/result caps. The cap is per browser query or repository document.
+These limits are shown in Settings ? Discovery. It does not infer closures from
+rows absent from an incomplete source context. Browser authentication/layout and
+pagination errors prevent daily success.
+
+Daily liveness checks every relevant active, nonfinal, non-protected listing in
+chunks of at most 100 with four concurrent probes. Missing public descriptions
+are enriched in the same pass. Probes use bounded request timeouts and run without
+a database write lock. `UNKNOWN`, errors and interruption never mark the phase
+successful. A completed discovery phase is reused if liveness needs retry.
+Retries use durable 15/30/60-minute backoff, at most four attempts per local day
+and source signature. A new day or changed sources resets both backoff and the
+failed-attempt budget.
+A successful full check is not repeated that day unless discovery settings change.
+Settings ? Discovery shows the last successful full-check time and incomplete state.
+Detailed per-listing probe observations remain in memory.
 
 `OPEN` and `UNKNOWN` do not change application state. Definitive `CLOSED` or
 `REMOVED` results use `db.mark_listing_closed` and a `CLOSED` lifecycle transition
 with a recorded event. Each retirement rechecks the current application inside a
 short transaction; applications claimed or held by a worker during the probe
-are skipped. Attempts are not consumed or reset. Sweeps never acquire
-`worker.lock`; refresh holds it only while discovery runs. Separate
+are skipped. Attempts are not consumed or reset. Daily full checks and quick refresh share singleflight state and hold
+`worker.lock` for their duration; a busy worker defers daily work. HTTP reads
+never start or wait for a scan. The internal capped sweep helper remains available
+for offline/manual callers without claiming daily completion. Separate
 SQLite connections reuse the CLI-initialized schema without repeated startup
 maintenance; list reads use read-only connections. The cached queue connection
 serializes access across request threads.
@@ -839,10 +892,25 @@ restart reuses the tab without automatically refilling reviewed fields. Progress
 is a slim line with an explicit review/wait state; completed runs collapse into
 Last run with a bounded details list.
 
-Queue has one compact list layout. Job titles have safe external-link icons;
-not-eligible uses a labeled icon and retains its reason dialog and Undo.
-Listing-check help, grid controls and Queue cover-letter generation are removed.
-Column headers stay visible while scrolling, and top/bottom pagination share page
-and page-size state. Already stored descriptions appear as escaped text, limited
-to three preview lines with Show more/less when needed; reads do not scrape.
-Discovery shows elapsed hours/days, with failed updates labeled explicitly.
+Queue defaults to compact List rows without description previews. List/Grid is
+saved in the browser; Grid shows already scraped descriptions as escaped text,
+capped to three lines with Expand/Collapse. Reads do not scrape descriptions.
+Safe external-link title icons, eligibility reasons/Undo and manual Applied remain.
+Select top N replaces the entire selection with the first N filtered, sorted
+eligible applications; invalid N preserves selection. Top/bottom pagination share
+page and size. Sticky headers meet the navbar without a row-content gap.
+
+T066: Daily discovery and full liveness run while the local server is alive, once
+successfully per local day and source configuration. Failed attempts/backoff are
+scoped to that day and configuration. Quick discovery remains bounded and reuses
+an active daily check. Last updated uses the persisted successful discovery time;
+failed checks retain that age and show a compact incomplete hint. Settings expose
+supported source URLs and disabled flags, with no obsolete background interval.
+Saved feedback is transient; local Answers editors retain Done/Cancel without a
+global footer covering inputs. Global Save/Discard appears after local Done.
+
+Extension run controls share the job row: borderless SVG Pause/Resume, Skip and
+Cancel. Counts and detailed error status remain available to assistive technology
+and tooltips. The auto-next track is 28x16 with a proportional knob/lock and a
+32px label target. Existing run holds, pause/cancel/skip and explicit manual
+submission behavior are unchanged.

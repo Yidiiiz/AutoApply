@@ -104,6 +104,205 @@ def finish_refresh(dashboard, job_id):
     return job
 
 
+def test_t066_daily_restart_local_midnight_and_bounded_chunks(dashboard, config, db, listing, monkeypatch):
+    ids = queue(db, config, listing, 7)
+    monkeypatch.setattr('autoapply.dashboard.SWEEP_CAP', 3)
+    scan_calls, urls = [], []
+    async def full_scan(config, db, **options):
+        scan_calls.append(options)
+        return {'errors': 0, 'new': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', full_scan)
+    monkeypatch.setattr('autoapply.liveness.listing_state', lambda url: (urls.append(url), 'OPEN')[1])
+    local = timezone(timedelta(hours=-4))
+    start = datetime(2026, 10, 20, 23, 59, tzinfo=local)
+    dashboard.daily_check(start)
+    state = db.setting('daily_full_check')
+    assert state['status'] == 'succeeded' and state['success_day'] == '2026-10-20'
+    assert state['liveness_counts']['checked'] == len(ids) and len(urls) == 7
+    assert scan_calls[0]['full'] is True
+    restarted = Dashboard(config, db)
+    try:
+        restarted.daily_check(start + timedelta(seconds=30))
+        assert len(scan_calls) == 1 and len(urls) == 7
+        restarted.daily_check(start + timedelta(minutes=2))
+        assert len(scan_calls) == 2 and len(urls) == 14
+        assert db.setting('daily_full_check')['success_day'] == '2026-10-21'
+    finally:
+        restarted.close()
+
+
+def test_t066_daily_errors_backoff_partial_success_and_interruption(dashboard, config, db, monkeypatch):
+    start = datetime(2026, 10, 20, 10, tzinfo=timezone.utc)
+    calls = []
+    async def full_scan(config, db, **kwargs):
+        calls.append('scan')
+        return {'errors': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', full_scan)
+    monkeypatch.setattr(dashboard, 'sweep', lambda **kwargs: {'errors': 1, 'checked': 100})
+    dashboard.daily_check(start)
+    state = db.setting('daily_full_check')
+    assert state['status'] == 'failed' and 'success_day' not in state
+    assert state['discovery_day'] == '2026-10-20' and 'liveness_day' not in state
+    dashboard.daily_check(start + timedelta(minutes=1))
+    assert db.setting('daily_full_check')['attempts'] == 1
+    monkeypatch.setattr(dashboard, 'sweep', lambda **kwargs: {'errors': 0, 'interrupted': True})
+    for minutes in (16, 47, 108, 300):
+        dashboard.daily_check(start + timedelta(minutes=minutes))
+    state = db.setting('daily_full_check')
+    assert state['attempts'] == 4 and state['status'] == 'failed'
+    assert calls == ['scan'] and 'success_day' not in state
+
+
+def test_t066_daily_discovery_error_stop_and_locks(dashboard, config, db, monkeypatch):
+    start = datetime(2026, 10, 20, 10, tzinfo=timezone.utc)
+    calls = []
+    async def full_scan(config, db, **kwargs):
+        calls.append('scan')
+        return {'errors': 1}
+    monkeypatch.setattr('autoapply.dashboard.scan', full_scan)
+    with ProcessLock(config.private / 'worker.lock'):
+        dashboard.daily_check(start)
+    assert not calls and db.setting('daily_full_check') is None
+    dashboard._active_refresh = 'quick'
+    dashboard.daily_check(start)
+    dashboard._active_refresh = None
+    assert not calls
+    dashboard.daily_check(start)
+    assert db.setting('daily_full_check')['status'] == 'failed'
+    assert 'discovery_day' not in db.setting('daily_full_check')
+    async def stop_scan(config, db, **kwargs):
+        dashboard._stop.set()
+        return {'errors': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', stop_scan)
+    dashboard.daily_check(start + timedelta(minutes=16))
+    assert db.setting('daily_full_check')['status'] == 'interrupted'
+    assert 'success_day' not in db.setting('daily_full_check')
+
+
+def test_t066_daily_singleflight_does_not_wait_for_quick_refresh(dashboard, monkeypatch, db):
+    started, release = threading.Event(), threading.Event()
+    async def full_scan(config, db, **kwargs):
+        started.set()
+        assert release.wait(3)
+        return {'errors': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', full_scan)
+    thread = threading.Thread(target=dashboard.daily_check)
+    thread.start()
+    try:
+        assert started.wait(2)
+        assert dashboard.start_refresh() == 'daily'
+        assert dashboard.refresh('daily')['status'] == 'running'
+        assert dashboard.status()['discovery']['active'] is True
+        dashboard.daily_check()  # no second scan; returns immediately
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and db.setting('daily_full_check')['status'] == 'succeeded'
+
+
+def test_t066_daily_scheduler_midnight_and_retry_deadlines(dashboard, db):
+    local = datetime.now().astimezone().tzinfo
+    reference = datetime(2026, 10, 20, 23, 59, tzinfo=local)
+    assert dashboard.daily_delay(reference) == 60
+    reference = reference.replace(hour=12, minute=0)
+    db.set_setting('daily_full_check', {'retry_at': (reference + timedelta(minutes=15)).isoformat(),
+                                       'attempt_day': reference.date().isoformat(),
+                                       'signature': dashboard._source_signature()})
+    assert dashboard.daily_delay(reference) == 900
+
+
+def test_t066_failed_retry_scope_rollover_and_source_changes(dashboard, config, db, monkeypatch):
+    start = datetime(2026, 10, 20, 23, 59, tzinfo=timezone(timedelta(hours=-4)))
+    calls = []
+    async def failing_scan(config, db, **options):
+        calls.append(options)
+        return {'errors': 1}
+    monkeypatch.setattr('autoapply.dashboard.scan', failing_scan)
+    dashboard.daily_check(start)
+    dashboard.daily_check(start + timedelta(minutes=2))
+    assert len(calls) == 2  # Yesterday's retry cannot block the new local day.
+    assert db.setting('daily_full_check')['attempts'] == 1
+    reference = start + timedelta(minutes=2)
+    dashboard.daily_check(reference + timedelta(minutes=1))
+    assert len(calls) == 2  # Same scope still honors backoff.
+    for minutes in (16, 47, 108, 300):
+        dashboard.daily_check(reference + timedelta(minutes=minutes))
+    assert len(calls) == 5 and db.setting('daily_full_check')['attempts'] == 4
+    config.data['github_sources'] = [{'url': 'https://github.com/example/changed', 'enabled': True}]
+    dashboard.daily_check(reference + timedelta(minutes=301))
+    assert len(calls) == 6 and db.setting('daily_full_check')['attempts'] == 1
+    # A signature change also invalidates a still-pending retry deadline.
+    config.data['github_sources'][0]['enabled'] = False
+    dashboard.daily_check(reference + timedelta(minutes=302))
+    assert len(calls) == 7 and db.setting('daily_full_check')['attempts'] == 1
+
+
+def test_t066_persisted_quick_daily_success_and_failure(dashboard, config, db, monkeypatch):
+    times = iter(['2026-10-20T12:00:00+00:00'] * 20)
+    monkeypatch.setattr('autoapply.dashboard.now', lambda: next(times))
+    async def good_scan(config, db, **options):
+        return {'errors': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', good_scan)
+    finish_refresh(dashboard, dashboard.start_refresh())
+    success = dashboard.status()['discovery']['successful_at']
+    assert success == '2026-10-20T12:00:00+00:00'
+    restarted = Dashboard(config, db)
+    try:
+        assert restarted.status()['discovery']['successful_at'] == success
+        async def bad_scan(config, db, **options):
+            return {'errors': 1}
+        monkeypatch.setattr('autoapply.dashboard.scan', bad_scan)
+        finish_refresh(restarted, restarted.start_refresh())
+        state = restarted.status()['discovery']
+        assert state['successful_at'] == success and state['status'] == 'failed' and not state['active']
+        monkeypatch.setattr('autoapply.dashboard.now', lambda: '2026-10-21T12:00:00+00:00')
+        monkeypatch.setattr('autoapply.dashboard.scan', good_scan)
+        restarted.daily_check(datetime(2026, 10, 21, 12, tzinfo=timezone.utc))
+        assert restarted.status()['discovery']['successful_at'] == '2026-10-21T12:00:00+00:00'
+        monkeypatch.setattr('autoapply.dashboard.scan', bad_scan)
+        restarted.daily_check(datetime(2026, 10, 22, 12, tzinfo=timezone.utc))
+        assert restarted.status()['discovery']['successful_at'] == '2026-10-21T12:00:00+00:00'
+    finally:
+        restarted.close()
+
+
+def test_t066_daily_rechecks_durable_success_after_lock(dashboard, config, db, monkeypatch):
+    # Simulate another dashboard finishing immediately before our lock succeeds.
+    reference = datetime(2026, 10, 20, 10, tzinfo=timezone.utc)
+    async def full_scan(config, db, **kwargs):
+        return {'errors': 0}
+    monkeypatch.setattr('autoapply.dashboard.scan', full_scan)
+    dashboard.daily_check(reference)
+    completed = db.setting('daily_full_check')
+    db.set_setting('daily_full_check', {})
+    class FinishBeforeLock:
+        def __init__(self, path):
+            self.released = False
+        def __enter__(self):
+            db.set_setting('daily_full_check', completed)
+        def __exit__(self, *args):
+            self.released = True
+    lock = FinishBeforeLock(None)
+    monkeypatch.setattr('autoapply.dashboard.ProcessLock', lambda path: lock)
+    monkeypatch.setattr('autoapply.dashboard.scan', Mock(side_effect=AssertionError('already completed')))
+    dashboard.daily_check(reference)
+    assert lock.released and dashboard._active_refresh is None
+    assert db.setting('daily_full_check') == completed
+
+
+def test_t066_full_sweep_stops_queued_probes(dashboard, config, db, listing, monkeypatch):
+    queue(db, config, listing, 9)
+    calls = []
+    def stop_probe(url):
+        calls.append(url)
+        dashboard._stop.set()
+        return 'OPEN'
+    monkeypatch.setattr('autoapply.liveness.listing_state', stop_probe)
+    result = dashboard.sweep(full=True)
+    assert result['interrupted'] and len(calls) <= 4
+    assert result['checked'] + result['skipped'] == 9
+
+
 @pytest.fixture
 def writing_provider(config, monkeypatch):
     config.data['ai'].update(enabled=True, providers=[{'name': 'fixture', 'type': 'codex_cli', 'billing': 'included'}])
@@ -383,7 +582,9 @@ def test_cv_click_navigates_popup_offline(http_dashboard, config, db, listing, m
             context.route('**/*', respond)
             page = context.new_page()
             page.goto('http://127.0.0.1:8765/')
-            page.locator('#tab-priority').click()
+            dashboard.mark_applied(app_id)
+            page.reload()
+            page.locator('#tab-applications').click()
             writing_provider.result = {'questions': ['Why this role?', 'When can you start?']}
             page.get_by_role('button', name=f'Generate Cover letter for #{app_id}', exact=True).click()
             dialog = page.get_by_role('dialog', name='Cover letter questions')
@@ -843,7 +1044,7 @@ def test_liveness_cap_concurrency_and_rotation(dashboard, config, db, listing, m
 
 def test_periodic_thread_and_interval_validation(dashboard, monkeypatch, config, db):
     called = threading.Event()
-    monkeypatch.setattr(dashboard, 'sweep', called.set)
+    monkeypatch.setattr(dashboard, 'daily_check', called.set)
     dashboard.start()
     assert called.wait(timeout=3)
     assert dashboard.interval == 1800
@@ -859,7 +1060,7 @@ def test_start_does_not_wait_for_first_sweep(dashboard, monkeypatch):
     def slow_sweep():
         started.set()
         assert release.wait(timeout=3)
-    monkeypatch.setattr(dashboard, 'sweep', slow_sweep)
+    monkeypatch.setattr(dashboard, 'daily_check', slow_sweep)
     try:
         dashboard.start()
         assert started.wait(timeout=1)
@@ -961,7 +1162,7 @@ def test_scan_uses_engine_path_and_guards_reserved_records(dashboard, config, db
     events = {i: db.rows('SELECT * FROM events WHERE application_id=?', (i,)) for i in before}
     calls = []
 
-    async def fake_source_scan(engine, force=False):
+    async def fake_source_scan(engine, force=False, **kwargs):
         calls.append(force)
         # Engine.scan maintenance and a source's bulk update cannot rewrite these.
         engine.db.execute("UPDATE applications SET stage='discovery',attempts=attempts+1,status='CLOSED'")
@@ -975,7 +1176,7 @@ def test_scan_uses_engine_path_and_guards_reserved_records(dashboard, config, db
     monkeypatch.setattr(Engine, '_scan', fake_source_scan)
     job = finish_refresh(dashboard, dashboard.start_refresh())
     assert job['status'] == 'succeeded', job
-    assert calls == [True]
+    assert calls == [False]
     for app_id in PROTECTED_APPLICATIONS:
         assert db.application(app_id) == before[app_id]
         assert db.one('SELECT * FROM jobs WHERE id=?', (before[app_id]['job_id'],)) == jobs[app_id]
@@ -1685,7 +1886,7 @@ def test_tab_markup_accessibility_themes_polling_and_csp(http_dashboard):
     assert 'id="dismiss"' in page
     assert 'aria-label="Reload data"' in page and 'Does not search for listings' in page
     assert 'Find new listings' in page and 'prefers-reduced-motion' in page
-    assert '-webkit-line-clamp:3' in page and 'minmax(300px,1fr)' in page
+    assert '-webkit-line-clamp:3' in page and 'minmax(min(300px,100%),1fr)' in page
     assert 'box-shadow' not in page and 'gradient' not in page
 
 
@@ -1840,7 +2041,7 @@ renderStatus({applications:[app]});
 const oldRow=document.getElementById('applications').children[1];renderStatus({applications:[app]});
 assert.equal(document.getElementById('applications').children[1],oldRow);
 for(const tab of tabIds){const toolbar=testTools.find(el=>el.dataset.tools===tab);assert.equal(toolbar.children[0].type,'search');
- assert.equal(typeof views,'undefined');assert.equal(toolbar.children.length,1);
+ assert.equal(views.priority,'list');assert.equal(toolbar.children.length,tab==='priority'?2:1);
  toolbar.children[0].value='no match';toolbar.children[0].listeners.input();assert.match(document.getElementById(bodyIds[tab]).textContent,/No matches/);
  toolbar.children[0].value='';toolbar.children[0].listeners.input();}
 renderApplied({applications:[{...app,marked_at:stamp,reversible:true},{...app,application_id:4504,reversible:false}]});
@@ -1955,12 +2156,17 @@ const originalReload=reload;reload=async()=>[];
  const reloading=reloadData();reloadStarted=Date.now()-2000;updateReloadTime();assert.equal(reloadState.textContent,'Reloading…');
  finishReload([true,true,true,true,true]);await reloading;assert.equal(reloadState.textContent,'');assert.ok(reloadState.title);assert.ok(reloadButton.title.includes(reloadState.title));
  lastReloadAt=Date.now()-12000;updateReloadTime();assert.equal(reloadState.textContent,'');assert.ok(reloadState.title);
- // Discovery uses the server result and persists completion metadata.
+ // Discovery uses durable server success, independent of browser storage or failure.
  searchBusy=true;searchStarted=Date.now()-72000;updateSearchTime();assert.equal(discoveryLabel.textContent,'Searching... 1m 12s');
- finishSearch({status:'succeeded',started_at:'2026-10-08T17:36:01.446586Z',finished_at:'2026-10-08T17:38:06.446586Z',result:{new:7}});
+ applyDiscoveryStatus({successful_at:'2026-10-08T17:38:06.446586Z',active:false,status:'succeeded'});
  assert.match(discoveryState.textContent,/Last updated 0 hours ago/);
- assert.equal(discoveryLabel.textContent,'Find new listings');const saved=storage.get('autoapply.lastSearch');lastSearch=null;restoreSearch();
- assert.equal(lastSearch.newListings,7);assert.equal(lastSearch.duration,125000);assert.equal(storage.get('autoapply.lastSearch'),saved);
+ const successful=lastSearch.finishedAt;finishSearch({status:'failed'});
+ assert.equal(lastSearch.finishedAt,successful);assert.match(discoveryState.textContent,/Last check incomplete/);
+ lastSearch=null;restoreSearch();assert.equal(lastSearch,null);
+ applyDiscoveryStatus({successful_at:'2026-10-08T17:38:06.446586Z',active:true,mode:'daily',status:'running',started_at:'2026-10-08T17:38:06.446586Z'});
+ assert.equal(discovery.disabled,true);assert.match(discoveryLabel.textContent,/Daily check/);assert.equal(lastSearch.finishedAt,successful);
+ applyDiscoveryStatus({successful_at:'2026-10-08T17:38:06.446586Z',active:false,status:'failed'});
+ assert.equal(discovery.disabled,false);assert.match(discoveryState.textContent,/Last updated.*Last check incomplete/);
 
  // Settings navigation, inline validation, unsaved edits and resume text stay offline.
  const setting={path:'dashboard.default_batch_size',label:'Default batch size',type:'number',value:5,min:1,max:10,step:1,help:'Initial size',readonly:false};
@@ -2110,8 +2316,8 @@ def test_content_scroll_and_pagination_layout_offline():
                 assert main.bounding_box()['y'] == before['height']
                 assert page.locator('#rows .item').count() == 50
                 assert page.locator('#pagination-priority .range').inner_text() == '1\u201350 of 103'
-                assert page.get_by_role('button', name='Next page', exact=True).is_enabled()
-                next_page = page.get_by_role('button', name='Next page', exact=True)
+                assert page.locator('#pagination-priority-top').get_by_role('button', name='Next page', exact=True).is_enabled()
+                next_page = page.locator('#pagination-priority').get_by_role('button', name='Next page', exact=True)
                 next_page.focus()
                 next_page.press('Enter')
                 assert next_page.evaluate('(el)=>el===document.activeElement')
@@ -2121,7 +2327,7 @@ def test_content_scroll_and_pagination_layout_offline():
                 page.evaluate("selectTab('priority');")
             page.evaluate("draw('priority');")
             assert page.locator('#rows .list-head button').count() == 6
-            assert page.locator('[data-view]').count() == 0
+            assert page.locator('[data-view]').count() == 2
         finally:
             browser.close()
 
@@ -2152,13 +2358,16 @@ filters.priority='2';draw('priority');assert.equal(head._chromeItems.length,1);a
 all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[1]);filters.priority='';draw('priority');all.checked=true;all.listeners.change();assert.deepEqual([...chromeSelected],[1,2,3]);
 all.checked=false;all.listeners.change();assert.deepEqual([...chromeSelected],[]);
 controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
+chromeSelected.add(4);filters.priority='3';controls.children[0].children[0].value='0';controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2,4]);
+controls.children[0].children[0].value='1';controls.children[1].click();assert.deepEqual([...chromeSelected],[3]);assert.equal(document.getElementById('chrome-run-priority').textContent,'Run (1)');
+filters.priority='';controls.children[0].children[0].value='2';controls.children[1].click();assert.deepEqual([...chromeSelected],[1,2]);
 const compact=makeRow('priority',sample[0]);assert.equal(compact.children[0].className,'chrome-check');assert.equal(compact.children[0].textContent,'');assert.equal(compact.children[0].children[0].attributes['aria-label'],'Select #1 for Chrome');
 assert.equal(typeof makeCard,'undefined');
 let posted=[];post=async(action,body)=>{posted.push({action,body});return {items:[{...sample[0],state:action.endsWith('cancel')?'skipped':'pending'}],poll_age_seconds:null};};
 await startChromeRun();assert.deepEqual(posted[0],{action:'ext-run',body:{application_ids:[1,2]}});
 assert.equal(document.getElementById('chrome-run-panel').hidden,false);assert.match(document.getElementById('chrome-run-hint').textContent,/Open Chrome/);
 renderChromeRun({items:['pending','opened','filled','needs_input','failed','skipped'].map((state,i)=>({...sample[0],application_id:i+1,state})),poll_age_seconds:1});
-assert.match(document.getElementById('chrome-run-status').textContent,/5\/6.*opened.*Fixture/);assert.equal(document.getElementById('chrome-run-items').children.length,0);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
+assert.equal(document.getElementById('chrome-run-status').textContent,'Fixture \u00b7 Intern');assert.match(document.getElementById('chrome-run-status').title,/5\/6.*opened/);assert.equal(document.getElementById('chrome-run-items').children.length,0);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
 await document.getElementById('chrome-run-cancel').listeners.click();assert.equal(posted[1].action,'ext-run/cancel');assert.equal(document.getElementById('chrome-run-cancel').disabled,true);
 assert.equal(document.getElementById('chrome-run-panel').hidden,true);scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/Chrome run finished: 1 skipped/);
 assert.equal(document.getElementById('chrome-last-run').hidden,false);assert.equal(document.getElementById('chrome-last-run').open,false);assert.deepEqual(document.getElementById('chrome-run-items').children.map(item=>item.textContent),['#1 Fixture - Intern - skipped']);assert.equal(document.getElementById('chrome-run-panel').hidden,true);
@@ -2451,9 +2660,12 @@ def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing)
             page = browser.new_page()
             errors, calls = [], []
             finished = False
+            in_progress = False
+            successful_at = None
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.add_init_script("window.cspViolations=[];document.addEventListener('securitypolicyviolation',e=>cspViolations.push(e.effectiveDirective));")
             def respond(route):
+                nonlocal in_progress, successful_at
                 incoming = route.request
                 if not incoming.url.startswith('http://127.0.0.1:8765/'):
                     route.abort(); return
@@ -2461,12 +2673,17 @@ def test_t056_direct_discovery_icon_fixture(http_dashboard, config, db, listing)
                 calls.append((incoming.method, target))
                 # Discovery is a fixture; never launch a source scan.
                 if target == '/api/refresh' and incoming.method == 'POST':
+                    in_progress = True
                     route.fulfill(json=dict(id='fixture-discovery')); return
                 if target == '/api/refresh/fixture-discovery':
+                    if finished:
+                        successful_at = '2026-10-16T20:00:02Z'
                     route.fulfill(json=dict(id='fixture-discovery', status='done' if finished else 'running',
                                            result=dict(new=3), started_at='2026-10-16T20:00:00Z', finished_at='2026-10-16T20:00:02Z')); return
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     status, body, headers = pool.submit(request, server, incoming.method, target, incoming.all_headers(), incoming.post_data).result()
+                if target == '/api/status':
+                    body['discovery'] = dict(successful_at=successful_at, active=in_progress and not finished, mode='quick', status='running' if in_progress and not finished else 'succeeded')
                 route.fulfill(status=status, body=body if isinstance(body, (str, bytes)) else json.dumps(body), headers=headers)
             page.route('**/*', respond)
             for theme in ('light', 'dark'):

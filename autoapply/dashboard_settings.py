@@ -12,12 +12,12 @@ import time
 import yaml
 
 from .archive import atomic_text
-from .config import merge, read_yaml
+from .config import merge, read_yaml, validate_discovery_urls
 from .resume_migration import invalidate_current_state
 from .runtime import ProcessLock
 
 MAX_RESUME_BYTES = 10 * 1024 * 1024
-RESTART_NOTE = 'The running worker picks up settings at its next start. Restart the dashboard for dashboard defaults. YAML comments may be lost when saving.'
+RESTART_NOTE = 'Saved settings apply to the next action; a running worker uses them at its next start.'
 
 
 class SettingsRejected(ValueError):
@@ -42,12 +42,11 @@ SECTIONS = [
         field('polling.handshake_minutes', 'Handshake polling interval', 'number', 5, 1440, 1, 'Minutes between discovery scans.')]),
     ('filling', 'Filling', [
         field('application.delay_seconds', 'Application delay', 'number', 0, 600, 1, 'Seconds between applications.'),
-        field('application.min_confidence', 'Minimum confidence', 'number', .90, 1.0, .01, 'Answer confidence threshold from 0.90 to 1.0.'),
+        field('application.min_confidence', 'Minimum confidence', 'number', .90, 1.0, .01, 'Resolver confidence threshold; 0.98 recommended. This score is not a probability.'),
         field('application.max_pages', 'Maximum pages', 'number', 1, 30, 1, 'Maximum form pages per application.'),
         field('application.confirmation_timeout_seconds', 'Confirmation timeout', 'number', 5, 120, 1, 'Seconds to wait for confirmation.')]),
     ('dashboard', 'Dashboard', [
-        field('dashboard.default_batch_size', 'Default batch size', 'number', 1, 10, 1, 'Initial batch size on the Run tab.', 5),
-        field('dashboard.liveness_minutes', 'Liveness interval', 'number', 5, 1440, 1, 'Minutes between listing checks after dashboard restart.', 30)]),
+        field('dashboard.default_batch_size', 'Default batch size', 'number', 1, 10, 1, 'Initial batch size on the next page load.', 5)]),
     ('resume', 'Resume', []),
     ('safety', 'Safety', [
         field('application.auto_submit', 'Automatic submission', 'boolean', default=False, reason='Always off; final submission stays manual.'),
@@ -96,7 +95,29 @@ class DashboardSettings:
                         f['value'] = False
                     result.append(f)
                 sections.append(dict(key=key, label=label, fields=result))
-            return dict(sections=sections, restart_required_note=RESTART_NOTE, extension_key=self.extension_key())
+            sources, hidden = {}, 0
+            raw = dict(github=[e['url'] for e in data.get('github_sources', [])],
+                       linkedin=data.get('linkedin', {}).get('search_urls', []),
+                       handshake=data.get('handshake', {}).get('search_urls', []))
+            for kind, urls in raw.items():
+                sources[kind] = []
+                for url in urls:
+                    try:
+                        validate_discovery_urls(kind, [url])
+                    except ValueError:
+                        hidden += 1
+                    else:
+                        sources[kind].append(url)
+            with self.connection() as db:
+                daily = db.setting('daily_full_check', {})
+            return dict(sections=sections, restart_required_note=RESTART_NOTE, extension_key=self.extension_key(),
+                        daily_check={k: daily.get(k) for k in ('status', 'successful_at', 'retry_at')},
+                        discovery_limits={k: data.get('discovery', {}).get(k) for k in
+                                          ('max_pages_per_query', 'max_results_per_query')},
+                        discovery_sources=sources, hidden_source_count=hidden,
+                        source_enabled=dict(github=[e.get('enabled', True) for e in data.get('github_sources', [])],
+                                            linkedin=data.get('linkedin', {}).get('enabled', False),
+                                            handshake=data.get('handshake', {}).get('enabled', False)))
 
     def extension_key(self, *, regenerate=False):
         with self.mutex:
@@ -127,6 +148,15 @@ class DashboardSettings:
             raise SettingsRejected('changes must be an object')
         errors = {}
         for path, value in changes.items():
+            if path == 'discovery.sources':
+                try:
+                    if not isinstance(value, dict) or set(value) != {'github', 'linkedin', 'handshake'}:
+                        raise ValueError('Provide URL lists for all three supported source types.')
+                    for kind, urls in value.items():
+                        validate_discovery_urls(kind, urls)
+                except ValueError as exc:
+                    errors[path] = str(exc)
+                continue
             f = EDITABLE.get(path)
             if f is None:
                 errors[path] = 'This setting cannot be changed in the dashboard.'
@@ -147,11 +177,34 @@ class DashboardSettings:
                                        errors={'application.auto_submit': 'Disable automatic submission outside the dashboard first.'})
             update = {}
             for dotted, value in changes.items():
+                if dotted == 'discovery.sources':
+                    current = self._data()
+                    if self.get()['hidden_source_count']:
+                        raise SettingsRejected('Resolve invalid existing sources outside the dashboard before editing URLs.',
+                                               errors={dotted: 'Existing invalid URLs were hidden for privacy.'})
+                    entries = current.get('github_sources', [])
+                    existing = {e['url']: e for e in entries}
+                    replacements = [e for e in entries if e['url'] not in value['github']]
+                    updated = []
+                    for url in value['github']:
+                        if url in existing:
+                            updated.append(existing[url])
+                        elif replacements:
+                            # Editing a URL keeps that source's disabled flag and
+                            # adapter options. Adding a row never enables peers.
+                            updated.append(dict(replacements.pop(0), url=url))
+                        else:
+                            updated.append({'url': url})
+                    update['github_sources'] = updated
+                    for kind in ('linkedin', 'handshake'):
+                        update.setdefault(kind, {})['search_urls'] = value[kind]
+                    continue
                 section, key = dotted.split('.')
                 update.setdefault(section, {})[key] = value
             if changes:
                 self._backup(path, stamp())
                 atomic_text(path, yaml.safe_dump(merge(data, update), sort_keys=False, allow_unicode=True))
+                self.config.data = merge(self.config.data, update)
             return dict(saved=changes, **self.get(), note=RESTART_NOTE)
 
     @staticmethod

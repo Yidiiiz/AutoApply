@@ -4,6 +4,8 @@ import hashlib
 import http.client
 import io
 import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -49,7 +51,7 @@ def request(dashboard, method, path, body=b'', headers=None):
     if method == 'POST':
         values.update({'Origin': 'http://127.0.0.1:8765', 'X-Dashboard-Token': dashboard.token,
                        'Content-Type': 'application/json'})
-    values.update(headers or {})
+    values.update({key.title(): value for key, value in (headers or {}).items()})
     raw = f'{method} {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in values.items()) + '\r\n'
     socket = MemorySocket(raw.encode() + body)
     DashboardHandler(socket, ('127.0.0.1', 1), server)
@@ -68,15 +70,213 @@ def test_exact_fields_and_no_secrets(dashboard, config):
     expected = {'jobs.max_listing_age_days', 'jobs.target_season', 'polling.github_minutes',
                 'polling.linkedin_minutes', 'polling.handshake_minutes', 'application.delay_seconds',
                 'application.min_confidence', 'application.max_pages', 'application.confirmation_timeout_seconds',
-                'processing.max_applications_per_day', 'dashboard.default_batch_size', 'dashboard.liveness_minutes'}
+                'processing.max_applications_per_day', 'dashboard.default_batch_size'}
     assert set(EDITABLE) == expected
     assert set(fields) == expected | {'application.auto_submit', 'browser.headless', 'processing.max_retries', 'discord.enabled'}
     assert 'never expose this' not in json.dumps(data)
     assert fields['application.auto_submit']['value'] is False
     confidence = fields['application.min_confidence']
     assert (confidence['min'], confidence['max'], confidence['step']) == (.90, 1.0, .01)
-    assert confidence['help'] == 'Answer confidence threshold from 0.90 to 1.0.'
+    assert '0.98 recommended' in confidence['help'] and 'not a probability' in confidence['help']
     assert all(set(f) == {'path', 'label', 'type', 'value', 'min', 'max', 'step', 'help', 'readonly', 'reason'} for f in fields.values())
+
+
+def test_t066_source_roundtrip_preserves_disabled_flags(dashboard, config):
+    config.data['github_sources'] = [{'url': 'https://github.com/example/existing', 'enabled': False, 'keep': 'value'}]
+    config.data['linkedin']['enabled'] = False
+    before_confidence = config.data['application']['min_confidence']
+    sources = {'github': ['https://github.com/example/existing', 'https://github.com/example/new'],
+               'linkedin': ['https://www.linkedin.com/jobs/search/?keywords=intern'],
+               'handshake': ['https://school.joinhandshake.com/stu/postings?query=intern']}
+    status, data, _ = request(dashboard, 'POST', '/api/settings', json.dumps({'changes': {'discovery.sources': sources}}).encode())
+    assert status == 200 and data['discovery_sources'] == sources
+    saved = read_yaml(config.private / 'config.yaml')
+    assert saved['github_sources'][0] == config.data['github_sources'][0]
+    assert saved['github_sources'][0]['enabled'] is False
+    assert config.data['linkedin']['enabled'] is False
+    assert config.data['application']['min_confidence'] == before_confidence
+    sources['github'].pop()
+    assert dashboard.settings.save({'discovery.sources': sources})['discovery_sources'] == sources
+    assert Config(config.root).data['linkedin']['enabled'] is False
+    sources['github'][0] = 'https://github.com/example/replacement'
+    dashboard.settings.save({'discovery.sources': sources})
+    assert config.data['github_sources'][0] == {'url': sources['github'][0], 'enabled': False, 'keep': 'value'}
+
+
+@pytest.mark.parametrize('kind,url', [
+    ('github', 'https://github.com/example/jobs?token=secret'),
+    ('github', 'https://user:secret@github.com/example/jobs'),
+    ('github', 'https://github.com/example/jobs/tree/main'),
+    ('linkedin', 'http://www.linkedin.com/jobs/search/'),
+    ('linkedin', 'https://www.linkedin.com.attacker.test/jobs/search/'),
+    ('linkedin', 'https://www.linkedin.com/jobs/search/?session_token=secret'),
+    ('handshake', 'https://127.0.0.1/stu/jobs'),
+    ('handshake', 'https://joinhandshake.com.attacker.test/stu/jobs'),
+    ('handshake', 'https://school.joinhandshake.com:444/stu/jobs'),
+    ('handshake', 'https://arbitrary.test/jobs'),
+])
+def test_t066_source_invalid_save_rolls_back(dashboard, config, kind, url):
+    sources = dashboard.settings.get()['discovery_sources']
+    sources[kind] = [url]
+    before = (config.private / 'config.yaml').read_bytes()
+    status, data, _ = request(dashboard, 'POST', '/api/settings', json.dumps({'changes': {
+        'jobs.target_season': 'Fall 2028', 'discovery.sources': sources}}).encode())
+    assert status == 400 and 'discovery.sources' in data['errors']
+    assert (config.private / 'config.yaml').read_bytes() == before
+    assert not (config.private / 'backups').exists()
+
+
+def test_t066_invalid_existing_credentials_never_render(dashboard, config):
+    config.data['linkedin']['search_urls'] = ['https://www.linkedin.com/jobs/search/?token=fixture-secret']
+    data = dashboard.settings.get()
+    assert 'fixture-secret' not in json.dumps(data)
+    assert data['hidden_source_count'] == 1
+    before = (config.private / 'config.yaml').read_bytes()
+    with pytest.raises(SettingsRejected, match='invalid existing'):
+        dashboard.settings.save({'discovery.sources': data['discovery_sources']})
+    assert (config.private / 'config.yaml').read_bytes() == before
+
+
+def test_t066_settings_profile_browser_fixture(dashboard, config, db):
+    """Actual handler + Chromium, all traffic intercepted, synthetic data only."""
+    from playwright.sync_api import sync_playwright, expect
+    output = Path('.tmp/review/t066')
+    output.mkdir(parents=True, exist_ok=True)
+    db.set_setting('extension_key', 'synthetic-pairing-key-for-offline-fixture')
+    config.data['github_sources'] = [{'url': 'https://github.com/fixture/disabled', 'enabled': False}]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel='chromium', headless=True)
+        try:
+            page = browser.new_page()
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("Object.defineProperty(navigator,'clipboard',{value:{writeText:async value=>{window.fixtureCopied=value;}}});")
+            def respond(route):
+                incoming = route.request
+                if not incoming.url.startswith('http://127.0.0.1:8765/'):
+                    route.abort()
+                    return
+                target = incoming.url.removeprefix('http://127.0.0.1:8765')
+                status, body, headers = request(dashboard, incoming.method, target,
+                                                (incoming.post_data or '').encode(), incoming.all_headers())
+                route.fulfill(status=status, body=body if isinstance(body, (str, bytes)) else json.dumps(body), headers=headers)
+            page.route('**/*', respond)
+            page.emulate_media(color_scheme='dark', reduced_motion='reduce')
+            def uncovered(locator):
+                locator.evaluate("e=>{e.focus();e.scrollIntoView({block:'center'});}")
+                assert locator.evaluate('''e=>{
+                    const r=e.getBoundingClientRect();
+                    const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+                    const overlaps=[...document.querySelectorAll('.settings-footer:not([hidden])')].some(f=>{
+                        if(f.contains(e))return false;
+                        const b=f.getBoundingClientRect();
+                        return r.left<b.right&&r.right>b.left&&r.top<b.bottom&&r.bottom>b.top;
+                    });
+                    return !overlaps&&(hit===e||e.contains(hit));
+                }'''), 'Control is covered by another element'
+            for width in (1440, 390):
+                page.set_viewport_size(dict(width=width, height=1000))
+                successful_at = (datetime.now(timezone.utc) - timedelta(days=2, hours=1)).isoformat()
+                db.set_setting('discovery_status', dict(successful_at=successful_at, status='succeeded', mode='quick'))
+                page.goto('http://127.0.0.1:8765/')
+                expect(page.locator('#discovery-state')).to_have_text('Last updated 2 days ago')
+                # A new document has no browser-local completion cache to fall back on.
+                page.reload()
+                expect(page.locator('#discovery-state')).to_have_text('Last updated 2 days ago')
+                db.set_setting('discovery_status', dict(successful_at=successful_at, status='running', mode='daily',
+                                                       started_at=datetime.now(timezone.utc).isoformat()))
+                dashboard._active_refresh = 'daily'
+                try:
+                    page.reload()
+                    expect(page.locator('#refresh-discovery')).to_be_disabled()
+                    expect(page.locator('#discovery-label')).to_contain_text('Daily check')
+                    expect(page.locator('#discovery-state')).to_have_text('Last updated 2 days ago')
+                    assert dashboard.start_refresh() == 'daily'
+                finally:
+                    dashboard._active_refresh = None
+                db.set_setting('discovery_status', dict(successful_at=successful_at, status='failed', mode='daily'))
+                page.reload()
+                expect(page.locator('#refresh-discovery')).to_be_enabled()
+                expect(page.locator('#discovery-state')).to_have_text('Last updated 2 days ago · Last check incomplete')
+                page.get_by_role('tab', name='Settings', exact=True).click()
+                page.locator('#settings-nav-discovery').click()
+                expect(page.locator('.source-url-row').filter(has_text='Disabled')).to_have_count(1)
+                original = dashboard.settings.get()['discovery_sources']
+                new_url = f'https://github.com/fixture/jobs-{width}'
+                page.get_by_label('New source URL', exact=True).fill(new_url)
+                page.get_by_role('button', name='Add source', exact=True).click()
+                page.locator('#settings-save').click()
+                expect(page.locator('#settings-status')).to_contain_text('Saved')
+                expect(page.locator('#settings-footer')).to_have_class('settings-footer saved-feedback')
+                assert page.locator('#settings-footer').evaluate("e=>getComputedStyle(e).position==='static'&&getComputedStyle(e).borderTopWidth==='0px'")
+                assert dashboard.settings.get()['discovery_sources']['github'][-1] == new_url
+                uncovered(page.get_by_label('New source URL', exact=True))
+                page.screenshot(path=str(output / f'discovery-{width}.png'), full_page=True)
+                expect(page.locator('#settings-footer')).to_be_hidden(timeout=4500)
+                # Invalid URL save leaves the persisted config and enabled flags intact.
+                before = (config.private / 'config.yaml').read_bytes()
+                index = len(original['github']) + 1
+                page.get_by_label(f'GitHub URL {index}', exact=True).fill('https://arbitrary.test/jobs')
+                uncovered(page.get_by_label('New source URL', exact=True))
+                uncovered(page.locator('#settings-save'))
+                page.locator('#settings-save').click()
+                expect(page.locator('.discovery-sources .field-error').first).to_contain_text('matching type')
+                assert (config.private / 'config.yaml').read_bytes() == before
+                page.locator('#settings-discard').click()
+                page.get_by_role('button', name=f'Remove GitHub URL {index}', exact=True).click()
+                page.locator('#settings-save').click()
+                expect(page.locator('#settings-status')).to_contain_text('Saved')
+                assert dashboard.settings.get()['discovery_sources'] == original
+                page.locator('#settings-nav-dashboard').click()
+                expect(page.get_by_text('Background interval', exact=True)).to_have_count(0)
+                expect(page.locator('#extension-key')).to_have_attribute('type', 'password')
+                page.get_by_role('button', name='Reveal pairing key', exact=True).click()
+                expect(page.locator('#extension-key')).to_have_attribute('type', 'text')
+                page.get_by_role('button', name='Copy pairing key', exact=True).click()
+                expect(page.locator('.pairing-status')).to_have_text('Pairing key copied')
+                assert page.evaluate('fixtureCopied') == 'synthetic-pairing-key-for-offline-fixture'
+                page.get_by_role('button', name='Hide pairing key', exact=True).click()
+                page.screenshot(path=str(output / f'pairing-{width}.png'), full_page=True)
+                page.get_by_role('tab', name='Answers', exact=True).click()
+                page.locator('#answers-nav').get_by_role('button', name='Education', exact=True).click()
+                page.get_by_role('button', name='Add education', exact=True).click()
+                expect(page.locator('.answer-card').last).to_be_visible()
+                expect(page.locator('#answers-footer')).to_be_hidden()
+                for control in page.locator('.answer-card').last.locator('input,select,textarea,button').all():
+                    uncovered(control)
+                page.screenshot(path=str(output / f'education-{width}.png'), full_page=True)
+                page.locator('.answer-card').get_by_role('button', name='Cancel', exact=True).click()
+                expect(page.locator('#answers-footer')).to_be_hidden()
+                # Done creates a draft change; Discard restores the original profile.
+                page.get_by_role('button', name='Add education', exact=True).click()
+                page.locator('.answer-card').get_by_label('School', exact=True).fill('Synthetic college')
+                page.locator('.answer-card').get_by_role('button', name='Done', exact=True).click()
+                expect(page.locator('#answers-footer')).to_be_visible()
+                uncovered(page.locator('#answers-discard'))
+                page.locator('#answers-discard').click()
+                expect(page.locator('#answers-footer')).to_be_hidden()
+                page.locator('#answers-nav').get_by_role('button', name='Links', exact=True).click()
+                page.get_by_role('button', name='Add link', exact=True).click()
+                expect(page.locator('#answers-footer')).to_be_hidden()
+                for control in page.locator('.answer-card').last.locator('input,button').all():
+                    uncovered(control)
+                page.screenshot(path=str(output / f'links-{width}.png'), full_page=True)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.get_by_label('Label', exact=True).fill('Synthetic link')
+                page.get_by_label('URL', exact=True).fill('https://example.test/profile')
+                page.locator('.answer-card').get_by_role('button', name='Done', exact=True).click()
+                uncovered(page.locator('#answers-save'))
+                page.locator('#answers-save').click()
+                expect(page.locator('#answers-status')).to_contain_text('Saved')
+                expect(page.locator('#answers-footer')).to_have_class('settings-footer saved-feedback')
+                expect(page.locator('#answers-footer')).to_be_hidden(timeout=4500)
+                page.reload()
+                page.get_by_role('tab', name='Answers', exact=True).click()
+                page.locator('#answers-nav').get_by_role('button', name='Links', exact=True).click()
+                expect(page.locator('#answers-content')).to_contain_text('Synthetic link')
+            assert errors == []
+        finally:
+            browser.close()
 
 
 @pytest.mark.parametrize('path,value', [
@@ -106,7 +306,7 @@ def test_save_merge_backup_and_defaults(dashboard, config):
     changes['dashboard.default_batch_size'] = 8
     status, data, _ = request(dashboard, 'POST', '/api/settings', json.dumps({'changes': changes}).encode())
     assert status == 200 and data['saved'] == changes
-    assert 'next start' in data['note'] and 'comments' in data['note']
+    assert 'next start' in data['note'] and 'comments' not in data['note']
     assert read_yaml(config.private / 'config.yaml')['private_extension'] == {'keep': 'unchanged'}
     backups = list((config.private / 'backups').glob('config-*.yaml'))
     assert len(backups) == 1 and backups[0].read_bytes() == before

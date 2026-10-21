@@ -337,7 +337,7 @@ Node.prototype.querySelector=function(selector){for(const child of this.children
 document.body=new Node('body');
 '''
     script = PAGE.split('<script nonce="__TOKEN__">')[1].split('</script>')[0]
-    script = script[:script.index('loadAnswers();setInterval')]
+    script = script[:script.index("if(!document.getElementById('panel-answers').hidden)loadAnswers();")]
     checks = r'''
 function descendants(el){return [el,...el.children.flatMap(descendants)];}
 answerSection='skills';drawAnswers();
@@ -349,10 +349,13 @@ let remove=descendants(content).find(el=>el.attributes['aria-label']==='Remove R
 assert.equal(answerDirty(),false);
 answerSection='education';drawAnswers();content=document.getElementById('answers-content');
 descendants(content).find(el=>el.tag==='button'&&el.textContent==='Add education').click();
+assert.equal(document.getElementById('answers-footer').hidden,true);
+assert.equal(answerDirty(),false);
 let school=descendants(content).find(el=>el.attributes['aria-label']==='School'&&el.id==='answer-school');
 school.value='Another university';school.listeners.input();
 descendants(content).find(el=>el.tag==='button'&&el.textContent==='Done').click();
 assert.equal(answerChanges.education_history[0].school,'Another university');
+assert.equal(document.getElementById('answers-footer').hidden,false);
 assert.equal(typeof answersData.sections.find(s=>s.key==='education').fields.find(f=>f.path==='education.school').value,'string');
 document.getElementById('answers-discard').click();assert.equal(answerDirty(),false);
 answerSection='overview';answerPreview=[{question:'Veteran Status',answer:'I am not a protected veteran',source:'Rule'},{question:'Unsupported',answer:null,source:'Needs you'}];drawAnswers();
@@ -417,7 +420,7 @@ def test_existing_dashboard_renderers_from_file(tmp_path):
                     strings[target.id] = ast.literal_eval(statement.value)
     script = PAGE.split('<script nonce="__TOKEN__">')[1].split('</script>')[0]
     path = tmp_path / 'existing-renderers.js'
-    path.write_text(strings['harness'] + script[:script.index('restoreSearch();loadSettings')] + strings['assertions'], encoding='utf-8')
+    path.write_text(strings['harness'] + script[:script.index("document.getElementById('tab-settings').addEventListener")] + strings['assertions'], encoding='utf-8')
     result = subprocess.run([executable, str(path)], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
 
@@ -513,7 +516,7 @@ def test_saved_grouped_ui_actions(dashboard, tmp_path):
     assignment = next(n for n in fn.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'harness' for t in n.targets))
     harness = ast.literal_eval(assignment.value)
     script = PAGE.split('<script nonce="__TOKEN__">')[1].split('</script>')[0]
-    script = script[:script.index('loadAnswers();setInterval')]
+    script = script[:script.index("if(!document.getElementById('panel-answers').hidden)loadAnswers();")]
     checks = r'''
 Node.prototype.matches=function(selector){return selector.split(',').includes(this.tag);};
 Node.prototype.querySelector=function(selector){for(const child of this.children){if(child.matches(selector))return child;const nested=child.querySelector(selector);if(nested)return nested;}return null;};

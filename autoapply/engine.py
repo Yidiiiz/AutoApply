@@ -16,7 +16,7 @@ from .browser import Browser, BrowserStartFailed, page_condition, classify_page_
 from .control import Controller
 from .eligibility_questions import assess_eligibility, request_unresolved
 from .models import Answer, Question, State, now
-from .sources import BrowserJobSource, scan_github
+from .sources import BrowserJobSource, scan_github, record_contexts
 from .handoff import ManualHandoffManager, VERIFICATION
 from .security import PreSubmitState, SubmissionClassifier, safe_url
 from .retry import ErrorCategory, SiteError, Failure, Delivery
@@ -153,38 +153,52 @@ class Engine:
         # Count intent, not only confirmations: uncertain submissions also consume the ceiling.
         return self.db.one("SELECT count(*) n FROM applications WHERE substr(submit_intent_at,1,10)=?", (datetime.now(timezone.utc).date().isoformat(),))["n"]
 
-    async def scan(self, force=False):
+    async def scan(self, force=False, *, quick=False, stopped=None):
         if self.fill_only:
             from .fill_batch import discover
             return discover(self.db, self.config)
         self.db.maintain_listings()
         self.db._discovery_batch = True
         try:
-            return await self._scan(force)
+            if not quick and stopped is None:
+                return await self._scan(force)
+            return await self._scan(force, quick=quick, stopped=stopped)
         finally:
             self.db._discovery_batch = False
             self.db.refresh_listing_statistics()
 
-    async def _scan(self, force=False):
-        counts = await scan_github(self.config, self.db, force)
+    async def _scan(self, force=False, *, quick=False, stopped=None):
+        if not quick and stopped is None:
+            counts = await scan_github(self.config, self.db, force)
+        else:
+            counts = await scan_github(self.config, self.db, force, quick=quick, stopped=stopped or (lambda: False))
+        stopped = stopped or (lambda: False)
         for name in ["linkedin", "handshake"]:
+            if stopped():
+                counts['errors'] += 1
+                break
             if not self.config[name]["enabled"]:
                 continue
             last = self.db.setting("scan:" + name, 0)
-            if not force and time.time() - last < self.config["polling"][name + "_minutes"] * 60:
+            if not force and not quick and time.time() - last < self.config["polling"][name + "_minutes"] * 60:
                 continue
-            self.db.set_setting("scan:" + name, time.time())
             try:
                 source = BrowserJobSource(name, self.config, self.browser, self.db)
-                listings = await source.discover()
+                listings = await source.discover(full=force, stopped=stopped)
+                counts['errors'] += source.errors
                 counts["pages_scanned"] += source.pages_scanned
                 counts[name+"_stop_reason"] = source.stop_reason
                 with self.db.ingest_batch():
                     for listing in listings:
+                        if stopped():
+                            raise InterruptedError('Discovery stopped')
                         _, created = self.db.ingest(listing, self.config)
                         counts["new"] += created
                         for metric,value in self.db.last_ingest_result.items():
                             counts[metric] = counts.get(metric,0) + value
+                    record_contexts(self.db, source.observations)
+                if not source.errors:
+                    self.db.set_setting("scan:" + name, time.time())
             except Exception as exc:
                 counts["errors"] += 1
                 self.db.event(None, "source_error", name + ": " + type(exc).__name__)

@@ -403,8 +403,9 @@ function renderRun(run = {}) {
   runPaused = Boolean(run.paused);
   element('run-controls').hidden=!(run.active || run.paused || run.current);
   element('chrome-run-status').textContent=run.error || (run.total ? (run.index || 0)+'/'+run.total+(run.current?' \u00b7 '+(run.phase==='filled'?'Review application':run.phase==='needs_input'?'Waiting for you':run.phase==='failed'?'Review error':'Current application'):'') : '');
+  element('run-controls').title=element('chrome-run-status').textContent;
   const label=runPaused?'Resume run':'Pause run';
-  element('run-pause').textContent=runPaused?'▶':'Ⅱ';
+  element('run-pause').querySelector('path').setAttribute('d',runPaused?'m8 5 11 7-11 7Z':'M8 5v14M16 5v14');
   element('run-pause').setAttribute('aria-label',label);element('run-pause').title=label;
   element('run-skip').disabled=!run.current;
 

@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_revisions (
  source TEXT PRIMARY KEY, revision TEXT, default_branch TEXT, checked_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS discovery_contexts (
+ context_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, checked_day TEXT NOT NULL,
+ members TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS app_queue ON applications(status, retry_at);
 CREATE INDEX IF NOT EXISTS questions_pending ON questions(status, application_id);
 CREATE INDEX IF NOT EXISTS jobs_canonical_url ON jobs(canonical_url);

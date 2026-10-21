@@ -5,9 +5,11 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import hmac
+import hashlib
 from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -19,6 +21,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .database import Database
@@ -140,12 +143,12 @@ class _Connection(Database):
             self._flushing_history = False
 
 
-async def scan(config, db):
+async def scan(config, db, *, full=False, stopped=lambda: False):
     """The scan CLI's discovery-only path, never Engine.run/process_one."""
     from .engine import Engine
     engine = Engine(config, db)
     try:
-        return await engine.scan(force=True)
+        return await engine.scan(force=full, quick=not full, stopped=stopped)
     finally:
         await engine.close()
 
@@ -638,6 +641,15 @@ class Dashboard:
         with self.connection() as db:
             paused = bool(db.setting('paused', False))
             stopping = running and bool(db.setting('stop_requested', False))
+            discovery = db.setting('discovery_status', {})
+            daily = db.setting('daily_full_check', {})
+        # Older daily checks already persisted their discovery success separately.
+        successes = [value for value in (discovery.get('successful_at'), daily.get('discovery_success_at')) if value]
+        discovery['successful_at'] = max(successes) if successes else None
+        with self._mutex:
+            discovery['active'] = self._active_refresh is not None
+        if not discovery['active'] and discovery.get('status') == 'running':
+            discovery.update(status='interrupted', error='Check interrupted')
         report, error = {}, None
         try:
             report = json.loads((self.config.private / 'semi-auto-result.json').read_text(encoding='utf-8'))
@@ -671,7 +683,8 @@ class Dashboard:
                                    ats=job['ats'], url=_safe_url(job['canonical_url']))
         return dict(running=running, paused=paused, stopping=stopping, pid=pid,
                     worker_locked=locked, phase=report.get('phase'), batch_id=report.get('batch_id'),
-                    updated_at=report.get('updated_at'), applications=applications, report_error=error)
+                    updated_at=report.get('updated_at'), applications=applications, report_error=error,
+                    discovery=discovery)
 
     def _retire(self, db, candidate, result):
         app_id = candidate['id']
@@ -694,8 +707,8 @@ class Dashboard:
             db.lifecycle.transition(app_id, State.CLOSED, 'LISTING_CLOSED: Dashboard probe: listing ' + result.lower())
         return True
 
-    def sweep(self):
-        """Probe a fair capped slice of the eligible queue, with no worker lock."""
+    def sweep(self, *, full=False):
+        """Probe a slice, or every relevant listing in bounded daily chunks."""
         if not self._sweep_mutex.acquire(blocking=False):
             return
         counts = dict(checked=0, OPEN=0, UNKNOWN=0, CLOSED=0, REMOVED=0, retired=0, skipped=0, described=0)
@@ -704,38 +717,31 @@ class Dashboard:
             self._sweep.update(running=True, started_at=now(), error=None)
         try:
             with self.connection() as db:
-                candidates = [db.application(i) for i in discover(db, self.config)
+                ids = ([r['id'] for r in db.rows('''SELECT a.id FROM applications a JOIN jobs j ON j.id=a.job_id
+                    WHERE j.listing_active=1 AND a.status NOT IN
+                    ('SUBMITTED','ALREADY_APPLIED','CLOSED','INVALID','DUPLICATE','INELIGIBLE')
+                    AND a.submit_intent_at IS NULL''')] if full else discover(db, self.config))
+                candidates = [db.application(i) for i in ids
                               if i not in PROTECTED_APPLICATIONS]
             with self._mutex:
                 candidates.sort(key=lambda a: (len(a['description'] or '') >= 200,
                                                self._observations.get(a['id'], {}).get('checked_at', '')))
-            candidates = candidates[:SWEEP_CAP]
+            if not full:
+                candidates = candidates[:SWEEP_CAP]
             def probe(app):
+                if self._stop.is_set():
+                    return 'SKIPPED', ''
                 try:
                     result = liveness.listing_state(app['canonical_url'])
                 except Exception:
                     result = 'UNKNOWN'
-                text = descriptions.fetch_description(app['canonical_url']) if len(app['description'] or '') < 200 else ''
+                text = (descriptions.fetch_description(app['canonical_url'])
+                        if not self._stop.is_set() and len(app['description'] or '') < 200 else '')
                 return result, text
             updates = []
-            with ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix='listing-probe') as pool:
-                futures = {pool.submit(probe, app): app for app in candidates
-                           if not self._stop.is_set()}
-                for future in as_completed(futures):
-                    app = futures[future]
-                    try:
-                        result, text = future.result()
-                    except Exception:
-                        result, text = 'UNKNOWN', ''
-                    if result not in {'OPEN', 'UNKNOWN', 'CLOSED', 'REMOVED'}:
-                        result = 'UNKNOWN'
-                    counts['checked'] += 1
-                    counts[result] += 1
-                    with self._mutex:
-                        self._observations[app['id']] = dict(result=result, checked_at=now())
-                    if text or result in {'CLOSED', 'REMOVED'}:
-                        updates.append((app, result, text))
-            if updates:
+            def store_updates():
+                if not updates:
+                    return
                 with self.connection(writable=True) as db:
                     with db.transaction():
                         for app, result, text in updates:
@@ -745,20 +751,161 @@ class Dashboard:
                             if result in {'CLOSED', 'REMOVED'} and not self._stop.is_set():
                                 retired = self._retire(db, app, result)
                                 counts['retired' if retired else 'skipped'] += 1
+                updates.clear()
+            with ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix='listing-probe') as pool:
+                for offset in range(0, len(candidates), SWEEP_CAP):
+                    if self._stop.is_set():
+                        break
+                    futures = {pool.submit(probe, app): app for app in candidates[offset:offset + SWEEP_CAP]}
+                    for future in as_completed(futures):
+                        app = futures[future]
+                        try:
+                            result, text = future.result()
+                        except Exception:
+                            result, text = 'UNKNOWN', ''
+                        if result == 'SKIPPED':
+                            counts['skipped'] += 1
+                            continue
+                        if result not in {'OPEN', 'UNKNOWN', 'CLOSED', 'REMOVED'}:
+                            result = 'UNKNOWN'
+                        counts['checked'] += 1
+                        counts[result] += 1
+                        with self._mutex:
+                            self._observations[app['id']] = dict(result=result, checked_at=now())
+                        if text or result in {'CLOSED', 'REMOVED'}:
+                            updates.append((app, result, text))
+                    store_updates()
         except Exception as exc:
             error = type(exc).__name__
         finally:
             with self._mutex:
                 self._sweep.update(running=False, finished_at=now(), counts=counts, error=error)
             self._sweep_mutex.release()
+        return dict(counts, errors=int(bool(error)) + counts['UNKNOWN'], interrupted=self._stop.is_set())
+
+    def _source_signature(self):
+        value = json.dumps({key: self.config.data.get(key) for key in
+                            ('github_sources', 'linkedin', 'handshake', 'discovery', 'jobs')}, sort_keys=True)
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    def _discovery_status(self, db, **changes):
+        state = db.setting('discovery_status', {})
+        state.update(changes)
+        db.set_setting('discovery_status', state)
+
+    def daily_check(self, reference=None):
+        """One successful full pass per local day, only while this server lives.
+
+        Partial successes survive restart. Failures retry at most four times a
+        day, with durable exponential backoff; no request handler runs this work.
+        """
+        reference = reference or datetime.now().astimezone()
+        day = reference.date().isoformat()
+        source_signature = self._source_signature()
+        def attempt_state(state):
+            same_scope = state.get('attempt_day') == day and state.get('signature') == source_signature
+            return (state.get('attempts', 0), state.get('retry_at')) if same_scope else (0, None)
+        with self._mutex:
+            if self._stop.is_set() or self._active_refresh is not None or self._child_alive():
+                return
+            with self.connection() as db:
+                state = db.setting('daily_full_check', {})
+            if state.get('success_day') == day and state.get('success_signature') == source_signature:
+                return
+            if state.get('signature') != source_signature:
+                state.pop('discovery_day', None)
+                state.pop('liveness_day', None)
+            attempts, retry_at = attempt_state(state)
+            if attempts >= 4 or (retry_at and reference < datetime.fromisoformat(retry_at)):
+                return
+            worker_lock = ProcessLock(self.config.private / 'worker.lock')
+            try:
+                worker_lock.__enter__()
+            except RuntimeError:
+                return
+            # Recheck after acquiring the cross-process lock: another dashboard
+            # may have finished between our initial read and lock acquisition.
+            try:
+                with self.connection() as db:
+                    state = db.setting('daily_full_check', {})
+                attempts, retry_at = attempt_state(state)
+                if ((state.get('success_day') == day and state.get('success_signature') == source_signature)
+                        or attempts >= 4
+                        or (retry_at and reference < datetime.fromisoformat(retry_at))):
+                    worker_lock.__exit__()
+                    return
+                if state.get('signature') != source_signature:
+                    state.pop('discovery_day', None)
+                    state.pop('liveness_day', None)
+            except BaseException:
+                worker_lock.__exit__()
+                raise
+            self._active_refresh = 'daily'
+        state.update(status='running', started_at=reference.isoformat(), attempt_day=day, attempts=attempts + 1,
+                     retry_at=(reference + timedelta(minutes=15 * 2 ** attempts)).isoformat(), error=None,
+                     signature=source_signature)
+        try:
+            with self.connection(writable=True) as db:
+                db.set_setting('daily_full_check', state)
+                self._discovery_status(db, status='running', mode='daily', started_at=state['started_at'], error=None)
+                if state.get('discovery_day') != day:
+                    result = asyncio.run(scan(self.config, db, full=True, stopped=self._stop.is_set))
+                    state['discovery_counts'] = result
+                    if result.get('errors') or self._stop.is_set():
+                        raise RuntimeError('IncompleteDiscovery')
+                    state.update(discovery_day=day, discovery_success_at=now())
+                    db.set_setting('daily_full_check', state)
+                    self._discovery_status(db, successful_at=state['discovery_success_at'])
+            if state.get('liveness_day') != day:
+                result = self.sweep(full=True)
+                state['liveness_counts'] = result
+                if not result or result.get('errors') or result.get('interrupted') or self._stop.is_set():
+                    raise RuntimeError('IncompleteLiveness')
+                state.update(liveness_day=day, liveness_success_at=now())
+            if self._source_signature() != source_signature or self._stop.is_set():
+                raise RuntimeError('DiscoverySettingsChanged')
+            state.update(status='succeeded', success_day=day, successful_at=now(), retry_at=None,
+                         success_signature=source_signature)
+        except Exception as exc:
+            state.update(status='interrupted' if self._stop.is_set() else 'failed', error=type(exc).__name__)
+        finally:
+            try:
+                with self.connection(writable=True) as db:
+                    db.set_setting('daily_full_check', state)
+                    self._discovery_status(db, status=state['status'], error=state.get('error'), finished_at=now())
+            finally:
+                worker_lock.__exit__()
+                with self._mutex:
+                    self._active_refresh = None
+
+    def daily_delay(self, reference=None):
+        reference = reference or datetime.now().astimezone()
+        midnight = datetime.combine(reference.date() + timedelta(days=1), datetime.min.time()).astimezone()
+        delay = min(self.interval, max(1, (midnight - reference).total_seconds()))
+        with self.connection() as db:
+            state = db.setting('daily_full_check', {})
+        retry = (state.get('retry_at') if state.get('attempt_day') == reference.date().isoformat()
+                 and state.get('signature') == self._source_signature() else None)
+        if retry:
+            remaining = (datetime.fromisoformat(retry) - reference).total_seconds()
+            if remaining > 0:
+                delay = min(delay, remaining)
+        return max(1, delay)
 
     def start(self):
         if self._sweep_thread is not None:
             return
         def periodic():
             while not self._stop.is_set():
-                self.sweep()
-                if self._stop.wait(self.interval):
+                try:
+                    self.daily_check()
+                except Exception as exc:
+                    logging.getLogger('autoapply').warning('Daily check deferred: %s', type(exc).__name__)
+                try:
+                    delay = self.daily_delay()
+                except Exception:
+                    delay = 60
+                if self._stop.wait(delay):
                     break
         self._sweep_thread = threading.Thread(target=periodic, name='dashboard-liveness', daemon=True)
         self._sweep_thread.start()
@@ -768,6 +915,8 @@ class Dashboard:
             if self._stop.is_set():
                 raise RefreshRejected('dashboard stopping')
             if self._active_refresh is not None:
+                if self._active_refresh == 'daily':
+                    return 'daily'
                 raise RefreshRejected('refresh already running')
             if self._child_alive():
                 raise RefreshRejected('worker running')
@@ -798,10 +947,16 @@ class Dashboard:
             with self._mutex:
                 self._refreshes[job_id].update(status='running', started_at=now())
             with self.connection(writable=True) as db:
+                self._discovery_status(db, status='running', mode='quick', started_at=now(), error=None)
                 result = asyncio.run(scan(self.config, db))
+                if result.get('errors') or self._stop.is_set():
+                    raise RuntimeError('IncompleteDiscovery')
+                self._discovery_status(db, status='succeeded', successful_at=now(), finished_at=now(), error=None)
             with self._mutex:
                 self._refreshes[job_id].update(status='succeeded', result=result)
         except Exception as exc:
+            with self.connection(writable=True) as db:
+                self._discovery_status(db, status='failed', finished_at=now(), error=type(exc).__name__)
             with self._mutex:
                 self._refreshes[job_id].update(status='failed', error='Discovery failed: ' + type(exc).__name__)
         finally:
@@ -812,6 +967,12 @@ class Dashboard:
 
     def refresh(self, job_id):
         with self._mutex:
+            if job_id == 'daily':
+                with self.connection() as db:
+                    state = db.setting('daily_full_check', {})
+                return dict(id='daily', status='running' if self._active_refresh == 'daily' else state.get('status', 'interrupted'),
+                            started_at=state.get('started_at'), finished_at=state.get('successful_at'),
+                            error='Daily check incomplete' if state.get('status') in {'failed', 'interrupted'} else None)
             job = self._refreshes.get(job_id)
             return dict(job) if job else None
 

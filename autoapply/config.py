@@ -1,11 +1,46 @@
 import copy
 import logging
+import re
+from urllib.parse import urlsplit, parse_qsl
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def validate_discovery_urls(kind, urls):
+    """Only the three existing adapters accept discovery URLs; never credentials."""
+    if kind not in {'github', 'linkedin', 'handshake'} or not isinstance(urls, list) or len(urls) > 20:
+        raise ValueError('Use at most 20 URLs per supported source type.')
+    seen = set()
+    for url in urls:
+        if not isinstance(url, str) or not 1 <= len(url) <= 2048 or any(c.isspace() or ord(c) < 32 for c in url):
+            raise ValueError('Enter a public HTTPS source URL (maximum 2048 characters).')
+        try:
+            parts = urlsplit(url)
+            safe = (parts.scheme == 'https' and parts.hostname and not parts.username and not parts.password
+                    and parts.port in (None, 443) and not parts.fragment and '\\' not in url)
+        except ValueError:
+            safe = False
+        if not safe:
+            raise ValueError('Use public HTTPS URLs without credentials, fragments or custom ports.')
+        host = parts.hostname.lower()
+        supported = (bool(re.fullmatch(r'https://github\.com/[\w.-]+/[\w.-]+/?', url)) if kind == 'github' else
+                     host in {'linkedin.com', 'www.linkedin.com'} and parts.path in {'/jobs/search', '/jobs/search/'} if kind == 'linkedin' else
+                     bool(re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*joinhandshake\.com', host))
+                     and bool(re.fullmatch(r'/(?:stu/)?(?:postings|jobs)/?|/job-search/?', parts.path)))
+        if not supported:
+            raise ValueError('Choose a GitHub repository, LinkedIn jobs search, or Handshake jobs search for its matching type.')
+        if any(re.search(r'token|secret|password|credential|auth|session|key$', k, re.I)
+               for k, _ in parse_qsl(parts.query)):
+            raise ValueError('Source URLs must not contain credentials or access tokens.')
+        identity = url.rstrip('/').removesuffix('.git').lower() if kind == 'github' else url
+        if identity in seen:
+            raise ValueError('Remove duplicate source URLs.')
+        seen.add(identity)
+    return urls
 
 
 def merge(base, override):

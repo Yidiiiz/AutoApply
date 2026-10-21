@@ -1092,3 +1092,35 @@ reconciliation, desktop/narrow queue screenshots, sticky headers and lock states
 JavaScript syntax, Python AST and git diff --check passed. Fixture artifacts:
 .tmp/review/t065. No live services or real applications were used, and no budgets,
 runtime metadata, staging, commits or deployment changed.
+
+
+## T066 - discovery/settings regressions and compact run controls
+
+Preserved the source fingerprints, daily full/quick discovery, bounded liveness
+chunks and source URL validation. Retry/backoff and attempt caps reset with the
+local day or source configuration. Durable successful discovery time survives
+reload and failures; active daily checks are reused. Source flags remain honest,
+the obsolete interval is hidden, and transient save feedback/local Answers
+Done/Cancel no longer cover inputs.
+
+Queue restores persistent List/Grid, defaults to compact List without previews,
+and shows capped, expandable stored descriptions only in Grid. Select top N
+replaces the complete selection after validation. Sticky columns meet the navbar;
+manual Applied/Undo, eligibility, safe title links and both paginations remain.
+Extension controls use borderless SVG icons beside the job title, with accessible
+status detail. Auto-next returns to a proportional 28x16 switch and 32px target.
+No submission or lifecycle behavior changed.
+
+The isolated Chromium/MV3 fixture retains the prior lifecycle cases and passes
+74 checks, including filtered-out/other-tab selection replacement, synchronized
+pagination, 1440/390 scrolled-header point checks, List/Grid persistence, and 360px
+inactive/active/paused/error long-title headers plus switch/keyboard states.
+Screenshots in .tmp/review/t065 were inspected; the synthetic Settings/Answers
+fixture also checks reload/failure age and uncovered controls at 1440/390.
+No live employer, provider, Discord or applicant data was accessed. T067 answer
+accuracy and T068 queue performance remain separate.
+
+Final validation: 476 tests passed across dashboard, settings, answers, sources
+and integrations. The direct MV3 fixture passed 74 checks separately. Python AST,
+JavaScript syntax, dashboard ASCII and git diff --check passed. No staging,
+commits, deployment, runtime metadata or budget changes were made.
