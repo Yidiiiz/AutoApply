@@ -47,6 +47,40 @@
     finally { await endTrace(run); }
   }
   let sidebarHost;
+  let sidebarObserver, sidebarRoot, sidebarRepairTimer, sidebarRepairWindow=0, sidebarRepairs=0;
+  const sidebarVisible=()=>sidebarHost && ['open','minimized'].includes(sidebarHost.dataset.state);
+  function observeSidebarRoot() {
+    sidebarObserver.disconnect();
+    sidebarRoot=document.documentElement;
+    // The host is a direct root child. Never observe the application subtree.
+    sidebarObserver.observe(document,{childList:true});
+    if(sidebarRoot)sidebarObserver.observe(sidebarRoot,{childList:true});
+  }
+  function watchSidebar() {
+    clearTimeout(sidebarRepairTimer);
+    sidebarObserver?.disconnect();
+    if(!sidebarVisible())return;
+    sidebarRepairWindow=0;sidebarRepairs=0;
+    sidebarObserver ||= new MutationObserver(()=>{
+      if(!sidebarVisible())return;
+      if(sidebarRoot!==document.documentElement)observeSidebarRoot();
+      if(sidebarHost.isConnected || sidebarRepairTimer!==undefined)return;
+      // Yield/coalesce hydration changes; read the latest state when repairing.
+      sidebarRepairTimer=setTimeout(()=>{
+        sidebarRepairTimer=undefined;
+        if(!sidebarVisible() || sidebarHost.isConnected || !document.documentElement)return;
+        const now=performance.now();
+        if(now-sidebarRepairWindow>1000){sidebarRepairWindow=now;sidebarRepairs=0;}
+        // A page actively removing our host must not create an endless fight.
+        // A later explicit sidebar intent rearms recovery.
+        if(++sidebarRepairs>5){sidebarObserver.disconnect();return;}
+        document.documentElement.append(sidebarHost);
+      },0);
+    });
+    sidebarRepairTimer=undefined;
+    if(!sidebarHost.isConnected && document.documentElement)document.documentElement.append(sidebarHost);
+    observeSidebarRoot();
+  }
   function sidebar(mode = 'toggle', tabId) {
     if (window !== window.top) return;
     if (!sidebarHost) {
@@ -87,6 +121,7 @@
     sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(400px,100vw)','important');
     sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
     sidebarHost.shadowRoot.querySelector('.collapsed').hidden=state!=='minimized';
+    watchSidebar();
     return state;
   }
   function valueOf({element,members,field,savedDate}) {
@@ -618,21 +653,40 @@
   function enterApplication() {
     if (signInPage() || /review/i.test(workdayState()?.step || '')) return false;
     const manual = manualEntry();
+    // Entry must never replace a real form, including an exposed shadow form.
+    const roots=inspectionRoots();
+    if(roots.truncated || scannerControls().length || roots.some(({root})=>
+      Array.from(root.querySelectorAll(controlSelector)).some(e=>!diagnosticExcluded(e) && visible(e))))return false;
     const activeStep=workdayState()?.step;
     const workdayLanding=!activeStep && !document.querySelector('[data-automation-id="progressBar"]') &&
       (/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && /\/job\//.test(location.pathname) ||
        document.querySelector('[data-automation-id="jobPostingPage"],[data-automation-id="jobPostingHeader"]'));
-    const entry = manual || Array.from(document.querySelectorAll('button,a[href],[role="button"]')).find(element => {
-      const caption=(element.getAttribute('aria-label') || element.textContent).trim();
-      return visible(element) && !element.disabled && ( /^(apply|apply for this job)$/i.test(caption) ||
-        workdayLanding && /^continue application$/i.test(caption));
+    const smartLanding=location.hostname==='jobs.smartrecruiters.com' && /^\/[^/]+\/\d+\/?$/.test(location.pathname);
+    const keysightLanding=location.hostname==='jobs.keysight.com' && /^\/external\/jobs\/\d+\/?$/.test(location.pathname);
+    const entries=manual?[manual]:Array.from(document.querySelectorAll('button,a[href],[role="button"],[role="link"]')).filter(element => {
+      const caption=clean(element.getAttribute('aria-label') || element.textContent);
+      if(!visible(element) || element.type==='submit' || element.form || element.closest('form,[role="form"]'))return false;
+      if(smartLanding && /^i['\u2019]m interested$/i.test(caption)) {
+        if(element.tagName!=='A')return false;
+        try {
+          const target=new URL(element.href,location.href);
+          return !target.username && !target.password && target.origin===location.origin &&
+            /^\/oneclick-ui\/company\/[^/]+\/publication\/[a-f\d-]+\/?$/i.test(target.pathname) &&
+            target.pathname.split('/')[3]===location.pathname.split('/')[1];
+        } catch {return false;}
+      }
+      return /^(apply|apply for this job)$/i.test(caption) ||
+        keysightLanding && /^apply now$/i.test(caption) || workdayLanding && /^continue application$/i.test(caption);
     });
-    if (!entry || entry.type === "submit" || entry.form || entry.closest("form")) return false;
+    // Repeated anchors to the same entry (sticky/footer/header) are one action.
+    const targets=new Set(entries.map(element=>element.tagName==='A'?element.href:element));
+    const entry=entries[0];
+    if (!entry || targets.size!==1 || entry.type === "submit" || entry.form || entry.closest('form,[role="form"]')) return false;
     trace('entry', 'click', null, {caption:(entry.getAttribute('aria-label') || entry.textContent).trim().slice(0,80)});
     // Exact entry labels only: never Next, Save and Continue, or Submit.
     if (entry.tagName === 'A') {
-      const url = new URL(entry.href);
-      if (!/^https?:$/.test(url.protocol)) return false;
+      let url;try {url=new URL(entry.href);} catch {return false;}
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
       location.assign(url.href);
     } else entry.click();
     return true;
@@ -1886,12 +1940,60 @@
   new MutationObserver(()=>{if(!analysisIdentity)return;clearTimeout(analysisTimer);analysisTimer=setTimeout(()=>{
     if(!repairExecuting && analysisIdentity!==snapshotIdentity()){analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});}
   },150);}).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['hidden','style','class','aria-label','aria-hidden','disabled','id']});
+  // Bounded passive discovery only. Unverified shadow widgets are diagnosed,
+  // not treated as fillable native fields or evidence that no form exists.
+  function inspectionRoots() {
+    const roots=[{root:document,host:'document'}];let visited=0;
+    for(let i=0;i<roots.length && roots.length<40;i++)for(const element of roots[i].root.querySelectorAll('*')) {
+      if(++visited>10000){roots.truncated=true;return roots;}
+      if(element.matches('#autoapply-sidebar,.autoapply-ask-ai'))continue;
+      if(element.shadowRoot)roots.push({root:element.shadowRoot,host:element.tagName.toLowerCase().slice(0,80)});
+      if(roots.length>=40){roots.truncated=true;break;}
+    }
+    return roots;
+  }
+  function actionTarget(raw) {
+    try {
+      const url=new URL(raw,location.href);
+      if(!/^https?:$/.test(url.protocol))return {protocol:url.protocol};
+      // Queries, fragments, credentials and arbitrary paths may contain secrets.
+      const publicPath=url.hostname==='jobs.smartrecruiters.com' && /^\/(?:[^/]+\/\d+|oneclick-ui\/company\/[^/]+\/publication\/[a-f\d-]+)\/?$/i.test(url.pathname) ||
+        url.hostname==='jobs.keysight.com' && /^\/external\/jobs\/\d+\/?$/.test(url.pathname);
+      return {origin:url.origin,path:publicPath?url.pathname:'[redacted]'};
+    } catch {return {invalid:true};}
+  }
+  const actionCaption=element=>{
+    const caption=clean(element.getAttribute('aria-label') || questionText(element));
+    return /^(?:apply(?: now| for this job| manually| with linkedin)?|i['\u2019]m interested|continue application|submit(?: application)?|next|sign in|log in)$/i.test(caption)?caption.slice(0,80):undefined;
+  };
+  function rootInspection(roots) {
+    const rootInfo=roots.map(({root,host},id)=>({id,host,kind:id?'open_shadow':'document',
+      exposed_controls:Array.from(root.querySelectorAll(controlSelector)).filter(e=>!diagnosticExcluded(e) && visible(e)).length}));
+    const frames=roots.flatMap(({root})=>Array.from(root.querySelectorAll('iframe')))
+      .filter(e=>!diagnosticExcluded(e)).slice(0,20).map(e=>({target:actionTarget(e.getAttribute('src') || 'about:blank'),visible:Boolean(e.getClientRects().length),
+        accessible:Boolean(e.contentDocument),ready_state:e.contentDocument?.readyState || 'unavailable'}));
+    const light=rootInfo[0].exposed_controls,shadow=rootInfo.slice(1).some(r=>r.exposed_controls);
+    const verification=frames.some(f=>/captcha-delivery\.com$/.test(f.target.origin || '')) || /403 forbidden|access denied|verify you are human/i.test(document.title);
+    const loading=document.readyState!=='complete' || Array.from(document.querySelectorAll('[aria-busy="true"],[role="progressbar"]')).some(visible);
+    const status=light?'controls_exposed':verification?'access_blocked':loading?'loading':shadow?'unsupported_shadow_controls':frames.some(f=>f.visible)?'embedded_content_unavailable':'no_exposed_controls';
+    const messages={access_blocked:'Public page access is blocked or requires verification. Open the page manually, then Analyze again.',
+      loading:'The page is still loading. Wait for the application inputs, then Analyze again.',
+      unsupported_shadow_controls:'Inputs are exposed inside open shadow roots but are not supported by this scanner. Root diagnostics were captured.',
+      embedded_content_unavailable:'No inputs are exposed in this document; embedded content may be unavailable. Open the application frame and Analyze again.',
+      no_exposed_controls:'No application inputs are exposed yet. Check the entry action and page loading, then Analyze again.'};
+    return {status,message:messages[status],ready_state:document.readyState,roots:rootInfo,closed_shadow_roots:'not_observable',frames,truncated:Boolean(roots.truncated)};
+  }
   function pageStructure() {
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
-    const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,[role],[data-automation-id],[contenteditable="true"]';
-    for (const element of document.querySelectorAll(selector)) {
+    const roots=inspectionRoots(),inspection=rootInspection(roots);
+    const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,a[href],iframe,[role],[data-automation-id],[contenteditable="true"]';
+    for (const [rootId,{root}] of roots.entries()) for (const element of root.querySelectorAll(selector)) {
       if (diagnosticExcluded(element)) continue;
-      const row={tag:element.tagName.toLowerCase(), visible:Boolean(element.getClientRects().length && getComputedStyle(element).visibility!=='hidden')};
+      const row={tag:element.tagName.toLowerCase(),root_id:rootId, visible:Boolean(element.getClientRects().length && getComputedStyle(element).visibility!=='hidden')};
+      if(element.matches('button,a[href],[role="button"],[role="link"]')) {
+        const caption=actionCaption(element);
+        if(caption){row.caption=caption;row.form_contained=Boolean(element.form || element.closest('form,[role="form"]'));if(element.hasAttribute('href'))row.target=actionTarget(element.getAttribute('href'));}
+      }
       for (const attr of ['role','type','id','name','data-automation-id','aria-label']) {
         const value=element.getAttribute(attr); if(value) row[attr]=value.slice(0,2000);
       }
@@ -1905,7 +2007,7 @@
       const bytes=encoder.encode(JSON.stringify(row)).length;
       if (nodes.length >= 10000 || size+bytes>950000) {truncated=true;break;} size+=bytes;nodes.push(row);
     }
-    return {host:location.hostname,nodes,truncated};
+    return {host:location.hostname,nodes,truncated:truncated || inspection.truncated,inspection};
   }
   const chatDocument=crypto.randomUUID(),chatIdentities=new WeakMap();
   let chatFocus,chatExplicit;

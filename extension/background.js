@@ -1,19 +1,42 @@
 import {api} from "./api.js";
 import {snapshotCollector} from "./snapshots.js";
 
-async function showSidebar(tabId, mode='open') {
+// Explicit intents invalidate restores before any asynchronous tab/storage read.
+const sidebarVersions=new Map();
+const sidebarStates=new Map();
+let sidebarQueue=Promise.resolve();
+function showSidebar(tabId, mode='open', restoreVersion) {
+  if(tabId===undefined)return chrome.tabs.query({active:true,currentWindow:true}).then(([tab])=>{if(!tab?.id)throw Error('Open an application page first.');return showSidebar(tab.id,mode,restoreVersion);});
+  const version=restoreVersion ?? (sidebarVersions.get(tabId)||0)+1;
+  if(restoreVersion===undefined){sidebarVersions.set(tabId,version);sidebarStates.delete(tabId);if(mode!=='toggle')sidebarStates.set(tabId,mode);}
+  const task=sidebarQueue.catch(()=>{}).then(()=>applySidebar(tabId,restoreVersion===undefined?mode:sidebarStates.get(tabId)||mode,version));
+  sidebarQueue=task;return task;
+}
+async function restoreSidebar(tabId, runFallback=false) {
+  const version=sidebarVersions.get(tabId)||0;
+  const {sidebarTabs={},chromeRun}=await chrome.storage.session.get(['sidebarTabs','chromeRun']);
+  const state=sidebarTabs[tabId] || (runFallback&&chromeRun?.active&&chromeRun.tabId===tabId?'open':null);
+  if(state)await showSidebar(tabId,state,version);
+}
+async function applySidebar(tabId, mode, version) {
+  const current=()=>version===(sidebarVersions.get(tabId)||0);
+  if(!current())return;
   const tab=tabId===undefined?(await chrome.tabs.query({active:true,currentWindow:true}))[0]:await chrome.tabs.get(tabId);
   if(!tab?.id||!/^https?:/.test(tab.url||''))throw Error('Open an HTTP or HTTPS application page to use AutoApply.');
+  if(!current())return;
   let [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
   if(!frame?.result){
     if(mode!=='toggle'){const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=mode;await chrome.storage.session.set({sidebarTabs});}
     await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
     for(let attempt=0;attempt<6&&!frame?.result;attempt++){
       if(attempt)await delay(150);
+      if(!current())return;
       [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
     }
   }
   if(!frame?.result)throw Error('AutoApply could not open on this page. Try an application page outside Chrome settings or the web store.');
+  if(!current())return;
+  sidebarStates.set(tabId,frame.result);
   const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=frame.result;
   await chrome.storage.session.set({sidebarTabs});
   await chrome.action.setBadgeText({tabId:tab.id,text:''});
@@ -23,10 +46,7 @@ chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'open').catch(async 
   console.error(error);await chrome.action.setTitle({tabId:tab.id,title:error.message});await chrome.action.setBadgeText({tabId:tab.id,text:'!'});
 }));
 chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading')chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});if(change.status==='complete'){
-  chrome.storage.session.get(['sidebarTabs','chromeRun']).then(({sidebarTabs={},chromeRun})=>{
-    const state=sidebarTabs[tabId] || (chromeRun?.active&&chromeRun.tabId===tabId?'open':null);
-    if(state) return showSidebar(tabId,state);
-  }).catch(console.error);
+  restoreSidebar(tabId,true).catch(console.error);
 }});
 // History API navigation need not mutate the DOM. Recheck inline prompts only.
 chrome.tabs.onUpdated.addListener((tabId,change)=>{
@@ -577,7 +597,8 @@ async function action(message) {
           if(beforeFields.length>=50 || beforeBytes>220000){truncated=true;break;}beforeFields.push(row);
         }
       }
-      const diagnostic={reason:'page_analysis',fields,truncated,repair:{filled,attempts,stopped,before:{fields:beforeFields}},busy:false,responsive:available.every(f=>f.result.diagnostic.responsive),inspection_ms:Math.min(30000,available.reduce((sum,f)=>sum+f.result.diagnostic.inspection_ms,0))};
+      const inspections=available.slice(0,20).map(f=>({frame_id:f.frameId,...f.result.inspection}));
+      const diagnostic={reason:'page_analysis',fields,truncated,inspections,repair:{filled,attempts,stopped,before:{fields:beforeFields}},busy:false,responsive:available.every(f=>f.result.diagnostic.responsive),inspection_ms:Math.min(30000,available.reduce((sum,f)=>sum+f.result.diagnostic.inspection_ms,0))};
       const budget=800000-encoder.encode(JSON.stringify(diagnostic)).length;
       for(const frame of available)for(const node of frame.result.nodes){size+=encoder.encode(JSON.stringify(node)).length+1;if(nodes.length>=10000 || size>budget){truncated=true;break;}nodes.push(node);}
       async function unchanged(){
@@ -608,7 +629,8 @@ async function action(message) {
         Object.assign(current,updated);
       }
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
-      return {...saved,tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
+      const unavailable=!fields.length && inspections.find(i=>i.message);
+      return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
     })();
     analysisTasks.set(tab.id,task);
     try{return await task;}finally{analysisTasks.delete(tab.id);}
@@ -982,10 +1004,12 @@ const confirmingTabs=new Set();
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
   const tabId=sender.tab.id;
+  if(message.type==='sidebar-ready' && sender.frameId===0)restoreSidebar(tabId).catch(console.error);
+  if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
   if(!['ask-ai','sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
   (async()=>{
-    const {autofillTabs={},tabResults={},sidebarTabs={}}=await chrome.storage.session.get(['autofillTabs','tabResults','sidebarTabs']);
+    const {autofillTabs={},tabResults={}}=await chrome.storage.session.get(['autofillTabs','tabResults']);
     if(message.type==='ask-ai') {
       const scanned=await scan(tabId), key=sender.frameId+':'+message.key;
       const field=scanned.fields.find(field=>field.key===key); if(!field)return;
@@ -1000,9 +1024,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(previous && !previous.busy && (previous.url!==sender.tab.url || previous.pageIdentities?.[0]?.documentId!==sender.documentId)) {
         previous.stalePage=true;previous.snapshotFeedback=undefined;await report(previous);
       }
-      if(sidebarTabs[tabId])await showSidebar(tabId,sidebarTabs[tabId]);return;
+      return;
     }
-    if(message.type==='sidebar-state'){sidebarTabs[tabId]=message.state;await chrome.storage.session.set({sidebarTabs});return;}
     const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];
     if(message.type==='user-answer'){
       if(!result||result.url!==sender.tab.url||running)return;

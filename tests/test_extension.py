@@ -3224,11 +3224,12 @@ def test_t057_toolbar_entrypoint_missing_script_and_restricted_pages(tmp_path):
     node=shutil.which('node')
     if not node:pytest.skip('Node unavailable')
     source=(ROOT/'extension/background.js').read_text(encoding='utf-8')
-    code=source[source.index('async function showSidebar('):source.index('globalThis.autoApplySidebar=')]
+    # Include the intent/version state used by both explicit opens and restores.
+    code=source[source.index('const sidebarVersions='):source.index('globalThis.autoApplySidebar=')]
     script=r"""
-const assert=require('node:assert/strict');let click,updated,injections=0,title='',badge='',state='closed';
+const assert=require('node:assert/strict');let click,injections=0,title='',badge='',state='closed';const updates=[];
 const session={},tab={id:1,url:'https://example.test/apply'},delay=async()=>{};
-const chrome={tabs:{get:async()=>tab,query:async()=>[tab],onUpdated:{addListener:fn=>updated=fn}},
+const chrome={tabs:{get:async()=>tab,query:async()=>[tab],onUpdated:{addListener:fn=>updates.push(fn)}},
  storage:{session:{get:async()=>session,set:async value=>Object.assign(session,value)}},
  action:{onClicked:{addListener:fn=>click=fn},setBadgeText:async value=>badge=value.text,setTitle:async value=>title=value.title},
  scripting:{executeScript:async spec=>{if(spec.files){injections++;globalThis.autoApplyContent={sidebar:mode=>state=mode};return [];}
@@ -3240,8 +3241,11 @@ const console={error:()=>{}};
  for(const previous of ['open','closed','minimized']){state=previous;await click(tab);assert.equal(state,'open');}
  assert.equal(injections,1);assert.equal(session.sidebarTabs[1],'open');
  tab.url='chrome://settings/';await click(tab);assert.equal(badge,'!');assert.match(title,/HTTP or HTTPS/);
- tab.url='https://example.test/next';session.sidebarTabs[1]='minimized';updated(1,{status:'complete'});
- for(let i=0;i<10;i++)await Promise.resolve();assert.equal(state,'minimized');
+ // Persist a minimize intent through the shipped API, then simulate a new document.
+ tab.url='https://example.test/next';await showSidebar(tab.id,'minimized');assert.equal(session.sidebarTabs[1],'minimized');state='closed';
+ for(const updated of updates)updated(1,{status:'complete'});
+ // Drain storage reads and the serialized sidebar work before checking restore.
+ await new Promise(setImmediate);assert.equal(state,'minimized');
 })().catch(error=>{process.stderr.write(String(error));process.exitCode=1;});
 """
     path=tmp_path/'toolbar.js';path.write_text(script,encoding='utf-8')
