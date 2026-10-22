@@ -102,3 +102,133 @@ def test_protected_and_implicit_claims_forbidden(config):
             with pytest.raises(RuntimeError): db.claim(app_id)
         with pytest.raises(RuntimeError): db.update_security(4571,session_preserved=0)
     finally: db.close()
+
+
+def test_t068_cold_queue_720_matches_full_history_and_uncached_policy(config, listing, monkeypatch):
+    """Reproducible offline benchmark; setup/export is outside measured GETs."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from time import perf_counter
+    from autoapply.archive import ApplicationHistory, protected_record
+    from autoapply.dashboard import Dashboard
+    from autoapply.database import Database
+    from test_candidate_policy import heterogeneous_candidates, clear_text_caches, uncached_policy
+
+    path = config.private / 'queue-benchmark.sqlite3'
+    db = Database(path, startup_maintenance=False, history_maintenance=False)
+    reference = datetime.now(timezone.utc)
+    candidates = list(heterogeneous_candidates(reference))
+    try:
+        with db.transaction():
+            for candidate in candidates:
+                db.ingest(replace(listing, company=candidate['company'], title=candidate['title'],
+                                  description=candidate['description'], location=candidate['location'],
+                                  url=candidate['canonical_url'], posted_at=candidate['posted_at']), config)
+            # Exercise the independent SQL guards as well as text eligibility.
+            for app_id, field, value in [(5, 'retry_allowed', 0), (9, 'manual_action_required', 1),
+                                         (13, 'security_state', 'CAPTCHA_DETECTED'),
+                                         (17, 'retry_at', (reference + timedelta(days=1)).isoformat()),
+                                         (21, 'submit_intent_at', reference.isoformat()),
+                                         (25, 'submission_confirmation_seen', 1)]:
+                db.execute(f'UPDATE applications SET {field}=? WHERE id=?', (value, app_id))
+            db.set_setting('duplicate_submission_guard:29', True)
+            db.set_setting('user_not_eligible:33', True)
+        writer = db.history
+        with writer.locked():
+            writer._invalidate_readers()
+            for i in range(960):
+                candidate = candidates[i % len(candidates)]
+                protected = i % 23 == 0
+                writer._write(dict(application_id=f'legacy-{i}', company=candidate['company'],
+                                   title=candidate['title'], canonical_url=candidate['canonical_url'],
+                                   description=candidate['description'],
+                                   application_state='UNKNOWN' if protected else 'DISCOVERED'))
+            writer._statistics()
+
+        original_read = Path.read_text
+        reads = []
+        def read(path, *args, **kwargs):
+            if path.name == 'application.json':
+                reads.append(path)
+            return original_read(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'read_text', read)
+        def forbidden(*args, **kwargs):
+            raise AssertionError('Queue GET attempted maintenance or live I/O')
+        monkeypatch.setattr(ApplicationHistory, 'validate', forbidden)
+        monkeypatch.setattr(ApplicationHistory, 'sync', forbidden)
+        monkeypatch.setattr('autoapply.dashboard.scan', forbidden)
+        monkeypatch.setattr('autoapply.liveness.listing_state', forbidden)
+        monkeypatch.setattr('autoapply.descriptions.fetch_description', forbidden)
+        db.history = ApplicationHistory(writer.root)
+        value = Dashboard(config, db)
+        try:
+            before = {p: p.read_bytes() for p in writer.root.rglob('application.json')}
+            clear_text_caches()
+            start = perf_counter()
+            actual = [r['application_id'] for r in value.priority()['rows']]
+            optimized_seconds = perf_counter() - start
+            assert reads == [] and actual
+            clear_text_caches()
+            with monkeypatch.context() as patch:
+                uncached_policy(patch)
+                patch.setattr(ApplicationHistory, 'list_protected_applications',
+                              lambda self: [r for r in self.list_applications() if protected_record(r)])
+                with Database.discovery_reader(path, writer.root) as baseline_db:
+                    baseline = Dashboard(config, baseline_db)
+                    try:
+                        start = perf_counter()
+                        expected = [r['application_id'] for r in baseline.priority()['rows']]
+                        baseline_seconds = perf_counter() - start
+                    finally:
+                        baseline.close()
+            assert actual == expected and len(reads) == 960
+            assert {p: p.read_bytes() for p in writer.root.rglob('application.json')} == before
+            print(f'T068 Queue cold 720/960 history: optimized={optimized_seconds:.4f}s '
+                  f'baseline={baseline_seconds:.4f}s record_reads=0/960 returned={len(actual)}')
+
+            def compare_fresh_baseline():
+                actual = [r['application_id'] for r in value.priority()['rows']]
+                with monkeypatch.context() as patch:
+                    uncached_policy(patch)
+                    patch.setattr(ApplicationHistory, 'list_protected_applications',
+                                  lambda self: [r for r in self.list_applications() if protected_record(r)])
+                    with Database.discovery_reader(path, writer.root) as baseline_db:
+                        assert actual == discover(baseline_db, config)
+                return actual
+
+            # A different connection changes DB data_version. Re-evaluate content,
+            # ordering, protected state, and independent manual/settings guards.
+            target = actual[0]
+            db.execute('UPDATE jobs SET description=?,priority=9999 WHERE id=(SELECT job_id FROM applications WHERE id=?)',
+                       ('Required qualifications\nMust be a US citizen.', target))
+            assert compare_fresh_baseline()[0] == target
+            db.set_setting('verified_fact:citizenship.us_citizen', dict(value=False, source='USER_PROVIDED'))
+            assert target not in compare_fresh_baseline()
+            db.set_setting('verified_fact:citizenship.us_citizen', dict(value=True, source='USER_PROVIDED'))
+            db.set_setting(f'user_not_eligible:{target}', True)
+            assert target not in compare_fresh_baseline()
+            db.set_setting(f'user_not_eligible:{target}', False)
+            db.execute('UPDATE applications SET submit_intent_at=? WHERE id=?', (reference.isoformat(), target))
+            assert target not in compare_fresh_baseline()
+            db.execute('UPDATE applications SET submit_intent_at=NULL WHERE id=?', (target,))
+            assert target in compare_fresh_baseline()
+            # New protected legacy identity is published through a separate reader.
+            with writer.locked():
+                writer._invalidate_readers()
+                writer._write(dict(application_id='new-protection', application_state='MANUAL_REQUIRED',
+                                   canonical_url=db.application(target)['canonical_url']))
+                writer._statistics()
+            reads.clear()
+            assert target not in [r['application_id'] for r in value.priority()['rows']]
+            assert reads == []
+            compare_fresh_baseline()
+            # Profile file and age settings invalidate Queue's existing cache.
+            profile = config.private / 'profile.yaml'
+            profile.write_text(profile.read_text(encoding='utf-8').replace('us_authorized: true', 'us_authorized: false'), encoding='utf-8')
+            compare_fresh_baseline()
+            config.data['jobs']['max_listing_age_days'] = 1
+            compare_fresh_baseline()
+        finally:
+            value.close()
+    finally:
+        db.close()

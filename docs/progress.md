@@ -1124,3 +1124,34 @@ Final validation: 476 tests passed across dashboard, settings, answers, sources
 and integrations. The direct MV3 fixture passed 74 checks separately. Python AST,
 JavaScript syntax, dashboard ASCII and git diff --check passed. No staging,
 commits, deployment, runtime metadata or budget changes were made.
+
+### T068 — cold Queue history reads (2026-10-21)
+
+ConflictIndex now reads a versioned, checksummed protected-history snapshot keyed
+by the existing invalidation token and statistics timestamp. Existing locked
+validation/export paths publish it atomically after writing records/statistics;
+Queue GET neither validates nor exports/repairs history. Missing, stale, malformed,
+incomplete or interrupted snapshots fall back to the original full reader.
+Protected states, submit-intent/confirmation evidence, legacy identities, source
+order and DB-ID exclusions retain the original conflict policy. Full protected
+records preserve the conflict return fields; snapshot cost scales with protected
+record bytes, and fallback/startup/export can still be slow. External edits must
+continue to participate in the existing token/statistics invalidation protocol.
+
+Bounded caches contain only immutable text parsing/normalization and location
+classification. Eligibility, profile/overrides, dates, DB state and guards remain
+freshly evaluated. An isolated offline 720-candidate/960-history first Queue
+computation measured 0.1611s versus 0.3237s for full history plus uncached parsing,
+with identical 211 result IDs/order and 0 versus 960 application-JSON reads.
+Separate cold 720-candidate CPU evaluation measured 0.0754s versus 0.1573s.
+These synthetic local timings do not measure the real private 506-row dashboard;
+that benchmark and any real reconciliation/restart remain supervisor work.
+
+Focused checks: 174 archive/history/conflict/candidate/fill/eligibility/guard
+tests, 112 selected dashboard tests, 121 recovery/retirement/lifecycle tests and
+8 binary-submission guard tests passed. Three local-browser tests failed before
+their assertions because Windows process inventory (`Get-CimInstance
+Win32_Process`) returned nonzero during startup; browser/runtime code was left
+unchanged. The valid-snapshot no-walk regression also passed independently.
+`git diff --check` passed. Pre-existing T067 edits were preserved; no real history,
+live services, orchestration metadata, stage/commit/push or deployment was used.

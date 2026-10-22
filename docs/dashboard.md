@@ -914,3 +914,18 @@ Cancel. Counts and detailed error status remain available to assistive technolog
 and tooltips. The auto-next track is 28x16 with a proportional knob/lock and a
 32px label target. Existing run holds, pause/cancel/skip and explicit manual
 submission behavior are unchanged.
+
+T068 Queue performance: normal guarded history validation/export now publishes
+`.protected-index.json` atomically, tied to the existing history token/statistics
+revision. A fresh Queue reader uses this protected subset without walking or
+opening unrelated application records. Corrupt, missing, incomplete or stale
+snapshots use the full guarded reader; GET does not repair/export history.
+The snapshot includes uncertain/manual/legacy and submit-intent evidence, keeping
+exact ATS and company/title conflict rules and source order. Read cost grows with
+protected record bytes; startup, export and fallback may still be slow. External
+history edits retain the existing token/statistics invalidation requirements.
+Pure text caches are bounded; profile/override, date, DB and submission guards
+remain current. Synthetic first-Queue measurement: 720 candidates, 960 history
+records, 0.1611s versus 0.3237s baseline, identical 211 IDs/order, zero application
+JSON reads versus 960. Real private-data timing/restart is reserved for supervisor
+validation after review.

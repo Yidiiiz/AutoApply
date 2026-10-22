@@ -3,6 +3,7 @@ import hashlib
 import re
 import unicodedata
 from datetime import datetime, timezone
+from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .config import fact
@@ -10,7 +11,12 @@ from .models import Eligibility
 
 
 def normalize(text):
-    return re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', str(text)).casefold()).strip()
+    return _normalize_text(str(text))
+
+
+@lru_cache(maxsize=4096)
+def _normalize_text(text):
+    return re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', text).casefold()).strip()
 
 
 def canonical_url(url):
@@ -75,14 +81,16 @@ def freshness(posted, max_days=30, today=None):
 US_STATES = set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split())
 US_NAMES = "alabama alaska arizona arkansas california colorado connecticut delaware florida georgia hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri montana nebraska nevada ohio oklahoma oregon pennsylvania tennessee texas utah vermont virginia washington wisconsin wyoming".split()
 US_CITIES = {"sf", "nyc", "new york", "san francisco", "seattle", "boston", "austin", "chicago", "atlanta", "denver", "college park", "pittsburgh", "san jose", "san diego", "los angeles", "sunnyvale", "mountain view"}
+_US_NAME = re.compile(r'\b(?:' + '|'.join(re.escape(s) for s in US_NAMES) + r')\b')
 
 
+@lru_cache(maxsize=1024)
 def us_location(location):
     text = normalize(location)
     foreign = re.search(r"\b(canada|toronto|vancouver|montreal|ontario|london|united kingdom|uk|india|bangalore|bengaluru|singapore|germany|berlin|france|paris|australia|sydney|china|beijing|japan|tokyo|ireland|dublin|mexico|switzerland|poland|netherlands|israel|brazil)\b", text)
     explicit = bool(re.search(r"\b(united states|usa|u s|us)\b", text))
     state = bool(set(re.findall(r"\b[A-Z]{2}\b", location)) & US_STATES)
-    domestic = explicit or state or any(re.search(r"\b" + re.escape(s) + r"\b", text) for s in US_NAMES) or text in US_CITIES
+    domestic = explicit or state or bool(_US_NAME.search(text)) or text in US_CITIES
     if foreign:
         return None if domestic else False
     return True if domestic else None

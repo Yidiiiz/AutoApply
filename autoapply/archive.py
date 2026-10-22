@@ -24,6 +24,18 @@ LEGACY = dict(QUEUED='DISCOVERED', RETRY='DISCOVERED', CHECKING='OPENED',
 _locks = {}
 _lock_owners = threading.local()
 _holders = {}  # in-process history-lock holders, for busy diagnostics
+PROTECTED_INDEX = '.protected-index.json'
+PROTECTED_INDEX_VERSION = 1  # Bump whenever protected-history policy/format changes.
+
+
+def protected_record(record):
+    return bool(record.get('submit_intent_at') or record.get('submission_confirmation_seen') or
+                record['application_state'] in {'SUBMITTED', 'ALREADY_APPLIED', 'SUBMITTING', 'MANUAL_REQUIRED', 'UNKNOWN'})
+
+
+def _index_digest(payload):
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     allow_nan=False).encode('utf-8')).hexdigest()
 
 
 def history_lock_held(root):
@@ -180,7 +192,7 @@ class ApplicationHistory:
         for entry in sorted(self.root.iterdir()):
             if entry.is_symlink():
                 raise ValueError('History contains a symbolic link; manual review required')
-            if entry.name in {'statistics.json', 'migration_report.json', '.layout.json', '.cache-token.json'} or entry.name.endswith('.tmp'):
+            if entry.name in {'statistics.json', 'migration_report.json', '.layout.json', '.cache-token.json', PROTECTED_INDEX} or entry.name.endswith('.tmp'):
                 continue
             if entry.is_file():
                 yield entry
@@ -301,6 +313,50 @@ class ApplicationHistory:
         # invalidate other instances, and the durable DB dirty queue retries them.
         atomic_json(self.root / '.cache-token.json', uuid.uuid4().hex)
 
+    def _write_protected_index(self, revision):
+        # Match a fresh _scan's source order, including ties between legacy
+        # identities. Do this inventory only on the existing guarded write path.
+        by_path = {path / 'application.json': self.records[ident] for ident, path in self.paths.items()}
+        paths = list(self.root.glob('*/*/application.json'))
+        if len(paths) != len(self.records) or any(path not in by_path for path in paths):
+            raise ValueError('Incomplete history inventory; run history validate')
+        payload = dict(version=PROTECTED_INDEX_VERSION, revision=list(revision),
+                       total_records=len(paths), records=[by_path[p] for p in paths if protected_record(by_path[p])])
+        atomic_json(self.root / PROTECTED_INDEX, dict(payload, sha256=_index_digest(payload)))
+
+    def list_protected_applications(self):
+        """Read the committed protected snapshot, or use the original full scan.
+
+        Never repair/export on a query. A failed/interrupted export publishes its
+        invalidation token first, so an older snapshot cannot authorize a read.
+        Full records retain legacy fields and the exact conflict return contract.
+        """
+        if self.records and self.revision == self._cache_revision():
+            return [r for r in self.list_applications() if protected_record(r)]
+        with self.locked():
+            revision = self._cache_revision()
+            path = self.root / PROTECTED_INDEX
+            if path.is_symlink():
+                raise ValueError('History contains a symbolic link; manual review required')
+            try:
+                snapshot = read_json(path)
+                digest = snapshot.pop('sha256')
+                records = snapshot['records']
+                if (snapshot['version'] == PROTECTED_INDEX_VERSION and
+                        snapshot['revision'] == list(revision) and
+                        isinstance(snapshot['total_records'], int) and
+                        isinstance(records, list) and len(records) <= snapshot['total_records'] and
+                        digest == _index_digest(snapshot) and
+                        all(isinstance(r, dict) and isinstance(r.get('application_id'), str) and
+                            r.get('application_state') in STATES and protected_record(r) for r in records) and
+                        len({r['application_id'] for r in records}) == len(records)):
+                    return records
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass
+        # Use the public full reader (and its lock/revision checks). Latency on
+        # missing/corrupt snapshots is intentional; only a normal writer repairs.
+        return [r for r in self.list_applications() if protected_record(r)]
+
     def _statistics(self):
         from .history_statistics import calculate_statistics
         result = calculate_statistics(list(self.records.values()))
@@ -320,7 +376,9 @@ class ApplicationHistory:
         except (OSError, ValueError, AttributeError, KeyError):
             pass
         atomic_json(path, result)
-        self.revision = self._cache_revision()
+        revision = self._cache_revision()
+        self._write_protected_index(revision)
+        self.revision = revision
         return result
 
     def validate(self):

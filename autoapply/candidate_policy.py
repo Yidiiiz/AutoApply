@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 import re
+from functools import lru_cache
 
 from .config import fact
 from .freshness import freshness_state
@@ -29,11 +30,18 @@ class CandidateDecision:
 
 def required_clauses(description):
     """Use the same required/preferred boundaries as the live assessment."""
+    return iter(_required_clauses(description))
+
+
+@lru_cache(maxsize=1024)
+def _required_clauses(description):
     from .requirements import extract_requirements
+    result = []
     for item in extract_requirements(description):
         if not item.preferred:
             text = normalize(item.text)
-            yield item.text, re.sub(r'^(?:candidates |applicants )?(?:must |are required to )', '', text)
+            result.append((item.text, re.sub(r'^(?:candidates |applicants )?(?:must |are required to )', '', text)))
+    return tuple(result)
 
 
 def evaluate(candidate, snapshot, *, max_days=30, include_international=False,

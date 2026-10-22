@@ -11,6 +11,7 @@ class Requirement:
     preferred: bool = False
 
 
+@lru_cache(maxsize=2048)
 def heading_kind(text):
     # Full-line grammars deliberately do not match sentences containing these words.
     heading = re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', text).casefold().replace('&', ' and ')).strip()
@@ -31,6 +32,7 @@ def heading_kind(text):
     return None
 
 
+@lru_cache(maxsize=2048)
 def administrative(text):
     # This complete two-sentence form instruction describes how to answer; it
     # does not say that applicants needing sponsorship are ineligible. Keep
@@ -58,12 +60,14 @@ def administrative(text):
         r'employees are required to apply through)\b', text, re.I))
 
 
+@lru_cache(maxsize=2048)
 def duration_requirement(text):
     return bool(re.search(r'\b(?:program|internship)\b', text, re.I) and (
         re.search(r'\b(?:availability|available)\b', text, re.I)
         or re.search(r'\b(?:program|internship) (?:takes place|runs) (?:from|between)\b', text, re.I)))
 
 
+@lru_cache(maxsize=2048)
 def explicit_gate(text):
     """Narrow gates also survive application/administrative section boundaries."""
     return bool(re.search(

@@ -47,9 +47,7 @@ class ConflictIndex:
              a.status IN ('SUBMITTED','ALREADY_APPLIED','SUBMITTING','MANUAL_REVIEW'))""")
         self.records = [('db', dict(r)) for r in rows]
         self.db_ids = {str(r['id']) for r in rows}
-        self.history = [other for other in db.history.list_applications()
-                        if other.get('submit_intent_at') or other.get('submission_confirmation_seen') or
-                        other['application_state'] in {'SUBMITTED','ALREADY_APPLIED','SUBMITTING','MANUAL_REQUIRED','UNKNOWN'}]
+        self.history = db.history.list_protected_applications()
         self.records += [('history', r) for r in self.history]
         self.index = {}
         for position, (_, record) in enumerate(self.records):
