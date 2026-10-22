@@ -1155,3 +1155,21 @@ Win32_Process`) returned nonzero during startup; browser/runtime code was left
 unchanged. The valid-snapshot no-walk regression also passed independently.
 `git diff --check` passed. Pre-existing T067 edits were preserved; no real history,
 live services, orchestration metadata, stage/commit/push or deployment was used.
+
+T068 attempt-2 verification: supervisor-supplied evidence resolves all three
+prior environment-only browser startup failures without runtime/security or mock
+changes. The supervisor reported 149 guard/retirement/audit/candidate/eligibility
+tests passed in 57.80s (including the four-unresolved local fixture), two real
+browser recovery tests in 18.24s, and 58 history/policy tests in 28.29s. The
+independent cold Queue benchmark passed in 62.05s: 720 candidates/960 history,
+0.1277s versus 0.4104s baseline, identical 211 IDs/order, and 0 versus 960 record
+reads. These 210 independent supervisor checks supplement the prior worker's
+415 synthetic passes; they were not rerun by this worker.
+
+This worker read the prior runner report and relevant diff, then ran the bounded
+synthetic archive/conflict/non-browser binary-submission checks: 19 passed,
+one browser test deliberately deselected, in 3.71s. `git diff --check` passed.
+Only this verification note was appended; source/tests and pre-existing T067
+edits were preserved. No private/live services or applicant data were accessed.
+The real private archive benchmark/restart remains expected supervisor integration
+work, not a worker blocker; synthetic timings retain the measured limits above.
