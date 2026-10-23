@@ -400,7 +400,9 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
       result.waiting = true;
       result.busy = false;
       pollForForm(result);
-      return await report(result);
+      const reported=await report(result);
+      if(!result.sign_in)snapshots.capture(result);
+      return reported;
     }
     if (result.workday_step || wasWaiting) {
       for (let tick = 0; tick < 3; tick++) { await delay(1000); Object.assign(result, await scan(result.tabId)); }

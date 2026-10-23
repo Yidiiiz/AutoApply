@@ -356,6 +356,71 @@ def _analysis_context(value, host):
     return context_url, page_url
 
 
+def _inspection_target(value):
+    """Persist T069 public destinations only, never queries, credentials or arbitrary paths."""
+    if not isinstance(value, dict):
+        raise SettingsRejected('Invalid inspection target')
+    if value.get('invalid') is True:
+        return dict(invalid=True)
+    if value.get('protocol') in {'about:', 'javascript:', 'mailto:', 'tel:', 'blob:', 'data:', 'file:'}:
+        return dict(protocol=value['protocol'])
+    try:
+        parts = urlsplit(value.get('origin', ''))
+        if (parts.scheme not in {'http', 'https'} or not parts.hostname or parts.username or parts.password or
+                parts.query or parts.fragment or parts.path not in {'', '/'}):
+            raise ValueError()
+        origin = parts.scheme + '://' + parts.hostname + (f':{parts.port}' if parts.port else '')
+        path = value.get('path', '[redacted]')
+        public = (parts.hostname == 'jobs.smartrecruiters.com' and isinstance(path, str) and
+                  re.fullmatch(r'/(?:[A-Za-z0-9_-]+/\d+|oneclick-ui/company/[A-Za-z0-9_-]+/publication/[a-fA-F0-9-]+)/?', path) or
+                  parts.hostname == 'jobs.keysight.com' and isinstance(path, str) and re.fullmatch(r'/external/jobs/\d+/?', path))
+        return dict(origin=origin[:300], path=path[:300] if public else '[redacted]')
+    except (ValueError, TypeError, AttributeError):
+        raise SettingsRejected('Invalid inspection target') from None
+
+
+def _inspections(values):
+    if not isinstance(values, list) or len(values) > 20:
+        raise SettingsRejected('Invalid inspections')
+    result = []
+    statuses = {'controls_exposed', 'access_blocked', 'loading', 'unsupported_shadow_controls',
+                'embedded_content_unavailable', 'no_exposed_controls', 'account_private'}
+    def integer(value, maximum):
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise SettingsRejected('Invalid inspection count')
+        return value
+    for value in values:
+        if not isinstance(value, dict):
+            raise SettingsRejected('Invalid inspection')
+        # T070 intentionally emits only this fixed message on private account pages.
+        if value.get('message') == 'Account fields are private.':
+            result.append(dict(frame_id=integer(value.get('frame_id', 0), 1000000), status='account_private', roots=[], frames=[]))
+            continue
+        status = value.get('status')
+        roots, frames = value.get('roots', []), value.get('frames', [])
+        if (status not in statuses or not isinstance(roots, list) or len(roots) > 40 or
+                not isinstance(frames, list) or len(frames) > 20):
+            raise SettingsRejected('Invalid inspection inventory')
+        safe_roots, safe_frames = [], []
+        for root in roots:
+            if (not isinstance(root, dict) or root.get('kind') not in {'document', 'open_shadow'} or
+                    not isinstance(root.get('host'), str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}', root['host'])):
+                raise SettingsRejected('Invalid inspection root')
+            safe_roots.append(dict(id=integer(root.get('id'), 39), host=root['host'], kind=root['kind'],
+                                   exposed_controls=integer(root.get('exposed_controls'), 10000)))
+        for frame in frames:
+            if (not isinstance(frame, dict) or type(frame.get('visible')) is not bool or
+                    type(frame.get('accessible')) is not bool or frame.get('ready_state') not in {'loading', 'interactive', 'complete', 'unavailable'}):
+                raise SettingsRejected('Invalid inspection frame')
+            safe_frames.append(dict(target=_inspection_target(frame.get('target')), visible=frame['visible'],
+                                    accessible=frame['accessible'], ready_state=frame['ready_state']))
+        result.append(dict(frame_id=integer(value.get('frame_id', 0), 1000000), status=status,
+                           ready_state=value.get('ready_state') if value.get('ready_state') in {'loading', 'interactive', 'complete'} else 'unavailable',
+                           roots=safe_roots, frames=safe_frames, truncated=value.get('truncated') is True,
+                           closed_shadow_roots='not_observable'))
+    return result
+
+
 def _page_analysis(dashboard, payload, host):
     diagnostic = payload['diagnostic']
     fields = diagnostic.get('fields')
@@ -487,7 +552,16 @@ def _page_analysis(dashboard, payload, host):
             summary = f'Filled {repair["filled"]} \u00b7 {unanswered} need attention'
         if repair['stopped'] != 'none':
             summary += ' \u00b7 Repair stopped; review and retry'
+    inspections = _inspections(diagnostic.get('inspections', []))
+    if not total and inspections:
+        messages = {'unsupported_shadow_controls': 'Open shadow controls need scanner support.',
+                    'access_blocked': 'Page access or verification requires user attention.',
+                    'loading': 'Page is loading; wait for the inputs.',
+                    'embedded_content_unavailable': 'Open the application frame and analyze again.',
+                    'account_private': 'Account fields are private.'}
+        summary = next((messages[i['status']] for i in inspections if i['status'] in messages), summary)
     result = dict(reason='page_analysis', page_url=page_url, fields=safe, findings=findings, summary=summary,
+                inspections=inspections,
                 busy=diagnostic.get('busy', False), responsive=diagnostic.get('responsive', False), inspection_ms=elapsed,
                 truncated=diagnostic.get('truncated', False), provider='not_used',
                 note='Details saved for review.')
@@ -515,13 +589,24 @@ def snapshot(dashboard, payload):
         if row.get('tag') not in text_tags and row.get('role') not in {'heading', 'option'} and row.get('data-automation-id') not in {'richText', 'formLabel'}:
             row.pop('text', None)
         row['visible'] = node.get('visible') is True
+        if 'root_id' in node:
+            if type(node['root_id']) is not int or not 0 <= node['root_id'] < 40:
+                raise SettingsRejected('Invalid snapshot root')
+            row['root_id'] = node['root_id']
+        caption = node.get('caption')
+        if isinstance(caption, str) and re.fullmatch(r"apply(?: now| for this job| manually| with linkedin)?|i['\u2019]m interested|continue application|submit(?: application)?|next|sign in|log in", caption, re.I):
+            row.update(caption=caption.lower(), form_contained=node.get('form_contained') is True)
+            if 'target' in node:
+                row['target'] = _inspection_target(node['target'])
         sanitized.append(row)
     saved = dict(host=host, nodes=sanitized, truncated=payload.get('truncated') is True)
+    if 'inspection' in payload:
+        saved['inspection'] = _inspections([payload['inspection']])[0]
     diagnostic = payload.get('diagnostic')
     analysis = isinstance(diagnostic, dict) and diagnostic.get('reason') == 'page_analysis'
     if analysis:
         saved['diagnostic'] = _page_analysis(dashboard, payload, host)
-        saved.update(id=str(uuid.uuid4()), created_at=now(), source='manual_analysis')
+        saved.update(id=str(uuid.uuid4()), created_at=now(), source='automatic_analysis' if payload.get('automatic') is True else 'manual_analysis')
     if isinstance(diagnostic, dict) and diagnostic.get('reason') == 'unresolved_fields':
         fields = diagnostic.get('fields')
         if not isinstance(fields, list) or len(fields) > 50:
@@ -543,11 +628,13 @@ def snapshot(dashboard, payload):
     directory.mkdir(parents=True, exist_ok=True)
     filename = host.lower() + '-' + str(time.time_ns()) + '.json'
     (directory / filename).write_text(data, encoding='utf-8')
+    repair = dashboard.repairs.enqueue(saved)
     if analysis:
         return dict(ok=True, analysis_id=saved['id'], summary=saved['diagnostic']['summary'],
+                    repair=repair, inspections=saved['diagnostic']['inspections'],
                     findings=saved['diagnostic']['findings'], note=saved['diagnostic']['note'],
                     truncated=saved['truncated'] or saved['diagnostic']['truncated'])
-    return dict(ok=True, filename=filename)
+    return dict(ok=True, filename=filename, repair=repair)
 
 
 def _choice_answer(dashboard, q, resolution, profile):
@@ -1163,7 +1250,9 @@ def credentials(dashboard, payload):
     return dict(configured=True, **value)
 
 
-ROUTES = {('POST', '/ext/credentials'): credentials, ('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
+ROUTES = {('GET', '/ext/repairs'): lambda d, p: d.repairs.status(),
+          ('POST', '/ext/repairs'): lambda d, p: d.repairs.configure(p),
+          ('POST', '/ext/credentials'): credentials, ('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
           ('POST', '/ext/skills/plan'): skill_plan, ('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,

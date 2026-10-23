@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Synthetic offline application</title>
+<h1>Application</h1><application-widget></application-widget>
+<script>
+const root=document.querySelector('application-widget').attachShadow({mode:'open'});
+root.innerHTML='<form><label>Full name<input name="synthetic-name"></label><button type="submit">Submit application</button></form>';
+window.submissions=0;root.querySelector('form').onsubmit=event=>{event.preventDefault();submissions++;};
+</script>

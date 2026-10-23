@@ -145,8 +145,24 @@ function completedAnswers(){
 }
 let savedTimer, snapshotTimer, snapshotFade, snapshotError, snapshotOwner, snapshotContext;
 let snapshotBusy=false, snapshotPreferenceReady=false;
-let analysisVersion=0,analysisBinding;
-function clearAnalysis(){analysisVersion++;analysisBinding=undefined;element('page-analysis').hidden=true;element('analysis-findings').replaceChildren();element('analysis-details').open=false;}
+let analysisVersion=0,analysisBinding,repairTimer,autoRepairId;
+function clearAnalysis(){analysisVersion++;clearTimeout(repairTimer);autoRepairId=undefined;analysisBinding=undefined;element('page-analysis').hidden=true;element('analysis-findings').replaceChildren();element('analysis-details').open=false;}
+function repairStatus(repair){
+  clearTimeout(repairTimer);const version=analysisVersion,note=element('analysis-note');
+  const status=document.createElement('span');status.setAttribute('role','status');status.textContent=repair?.message || 'Repair status unavailable.';
+  const toggle=document.createElement('button'),pause=document.createElement('button');toggle.type=pause.type='button';
+  note.replaceChildren(status,document.createTextNode(' '),toggle,pause);toggle.hidden=pause.hidden=true;
+  async function refresh(changes){
+    try{const value=await api('/ext/repairs',changes);if(version!==analysisVersion)return;
+      const job=value.jobs.find(j=>j.id===repair?.id);if(job)status.textContent=job.message;
+      else if(changes)status.textContent=value.enabled?'Enabled. Analyze a fresh page to queue repairs.':'Automatic repair work is disabled.';
+      toggle.hidden=false;toggle.textContent=value.enabled?'Disable automatic repairs':'Enable automatic repairs';toggle.onclick=()=>refresh({enabled:!value.enabled});
+      pause.hidden=!value.enabled;pause.textContent=value.paused?'Resume repairs':'Pause repairs';pause.onclick=()=>refresh({paused:!value.paused});
+      if(job && ['queued','running','dispatching'].includes(job.status))repairTimer=setTimeout(()=>refresh(),5000);
+    }catch{if(version===analysisVersion)status.textContent='Repair status unavailable. Check the local dashboard.';}
+  }
+  refresh();
+}
 function renderAnalysis(value){
   analysisBinding={tabId:value.tabId,url:value.url,application_id:value.application_id};
   element('analysis-summary').textContent=value.summary;
@@ -157,6 +173,7 @@ function renderAnalysis(value){
   }
   element('analysis-note').textContent=(value.truncated?'Bounded capture; some controls were omitted. ': '')+(value.note || 'Details saved for review.');
   element('page-analysis').hidden=false;
+  if(value.repair)repairStatus(value.repair);
 }
 chrome.runtime.onMessage.addListener(message=>{if(message.type==='analysis-invalidated' && message.tabId===(tabId || analysisBinding?.tabId || result?.tabId)){clearAnalysis();clearSnapshotStatus();}});
 const snapshotLedger=await chrome.storage.session.get(['snapshotFeedbackSeen','snapshotFeedbackRecovered']);
@@ -179,6 +196,7 @@ function renderSnapshotFeedback(value){
   if(snapshotContext!==context){clearSnapshotStatus();snapshotContext=context;}
   if(!snapshotPreferenceReady)return;
   const feedback=value.snapshotFeedback;
+  if(!value.stalePage && feedback?.repair?.id && autoRepairId!==feedback.repair.id && !analysisBinding){autoRepairId=feedback.repair.id;renderAnalysis({...value,summary:'Automatic structural analysis',findings:[],repair:feedback.repair});}
   const fresh=feedback && !snapshotSeen.has(feedback.id);
   if(fresh){snapshotSeen.add(feedback.id);chrome.storage.session.set({snapshotFeedbackSeen:[...snapshotSeen].slice(-100)});}
   const enabled=element('auto-send-structure').checked;

@@ -49,6 +49,7 @@ SECTIONS = [
         field('dashboard.default_batch_size', 'Default batch size', 'number', 1, 10, 1, 'Initial batch size on the next page load.', 5)]),
     ('resume', 'Resume', []),
     ('credentials', 'Account credentials', []),
+    ('repairs', 'Extension repairs', []),
     ('safety', 'Safety', [
         field('application.auto_submit', 'Automatic submission', 'boolean', default=False, reason='Always off; final submission stays manual.'),
         field('browser.headless', 'Headless browser', 'boolean', default=False, reason='Must stay false for semi-auto filling.'),

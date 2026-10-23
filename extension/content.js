@@ -1879,7 +1879,8 @@
       return record && record.element.isConnected && record.field.label===field.label &&
         (record.field.kind==='file' || interactiveVisible(record.element)) && !occupied(record);
     })) return null;
-    return pageStructure();
+    const structure=pageStructure();
+    return {...structure,diagnostic:inspectPage({passive:true}).diagnostic};
   }
   const diagnosticExcluded=element=>globalThis.autoApplyCredentials?.sensitive(element) || Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
     element.matches('input[type="hidden"],input[type="password"]') || /captcha|honeypot|honey.?pot|fax|website_confirm|password|secret|token|api.?key/i.test([element.id,element.name,element.getAttribute('autocomplete')].join(' '));
@@ -1896,7 +1897,7 @@
     return row;
   }
   // No scan, focus, clicks, keys, or menu opening: retain all live filling handles.
-  function inspectPage({repair = false} = {}) {
+  function inspectPage({repair = false, passive = false} = {}) {
     if(globalThis.autoApplyCredentials?.active())return {identity:snapshotIdentity(),fields:[],diagnostic:{fields:[],responsive:true,inspection_ms:0},inspection:{message:"Account fields are private."}};
     const started=performance.now();
     const identity=snapshotIdentity(),detected=new Set(scannerControls()),fields=[],grouped=new Set();let truncated=false;
@@ -1938,7 +1939,7 @@
       if(kind==='combobox' && !options.length)field.reasons.push('menu_not_exposed');
       if(fields.length>=50){truncated=true;break;}fields.push(field);
     }
-    analysisIdentity=identity;
+    if(!passive)analysisIdentity=identity;
     return {identity,edit_revision:repairRevision,diagnostic:{reason:'page_analysis',fields,truncated,busy:Boolean(extensionFilling || skillsState.busy),responsive:document.readyState!=='loading',inspection_ms:Math.min(30000,Math.round(performance.now()-started))}};
   }
   let analysisIdentity,analysisTimer;

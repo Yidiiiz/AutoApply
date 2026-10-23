@@ -55,7 +55,12 @@ def test_pairing_cors_settings(http_dashboard, config, db):
     assert request(server, 'GET', '/ext/ping', {'X-AutoApply-Key': key})[0] == 403
     assert request(server, 'GET', '/api/settings')[1]['extension_key'] == result['extension_key']
     page = request(server, 'GET', '/')[1]
-    assert 'Chrome extension pairing key' in page and "node('button','Copy')" in page and "node('button','Regenerate')" in page
+    assert 'Chrome extension pairing key' in page and "node('button','Regenerate')" in page
+    assert "copy.setAttribute('aria-label','Copy pairing key')" in page
+    assert "navigator.clipboard.writeText(key.value)" in page
+    assert "key.type='password';key.value=data.extension_key;key.readOnly=true" in page
+    assert "post('extension-key/regenerate')" in page and "key.value=result.extension_key" in page
+    assert "key.type='password';reveal.setAttribute('aria-label','Reveal pairing key')" in page
 
 
 def test_extension_requests_read_key_without_write_lock(http_dashboard, config, db, monkeypatch):

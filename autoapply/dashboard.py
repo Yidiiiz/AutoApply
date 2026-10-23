@@ -204,6 +204,8 @@ class Dashboard:
         self._sweep_thread = self._refresh_thread = None
         self._child = None
         self._pid = None
+        from .repair_queue import RepairQueue
+        self.repairs = RepairQueue(config.private)
         self.settings = DashboardSettings(config, self.connection, self._mutex, self._child_alive)
         self.answers = DashboardAnswers(config, self.connection, self.settings.mutex)
 
@@ -894,6 +896,7 @@ class Dashboard:
         return max(1, delay)
 
     def start(self):
+        self.repairs.start()
         if self._sweep_thread is not None:
             return
         def periodic():
@@ -979,6 +982,7 @@ class Dashboard:
 
     def close(self):
         self._stop.set()
+        self.repairs.close()
         for thread in (self._sweep_thread, self._refresh_thread):
             if thread is not None:
                 thread.join(timeout=5)
@@ -1060,6 +1064,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 batch = batch if type(batch) is int and 1 <= batch <= 10 else 5
                 page = page.replace('__BATCH_SIZE__', str(batch))
                 self._reply(200, page, html=True)
+            elif self.path == '/api/repairs':
+                tokens = self.headers.get_all('X-Dashboard-Token', [])
+                if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode('utf-8'), dashboard.token.encode('ascii')):
+                    self._reply(403, dict(error='dashboard token required'))
+                    return
+                self._reply(200, dashboard.repairs.status())
             elif self.path == '/api/settings':
                 self._reply(200, dashboard.settings.get())
             elif self.path == '/api/ext-run':
@@ -1245,7 +1255,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if self.path not in {'/api/refresh', '/api/run', '/api/pause', '/api/resume', '/api/stop',
                              '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv',
-                             '/api/credentials', '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
+                             '/api/credentials', '/api/repairs', '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
             self._reply(404, dict(error='endpoint not found'))
             return
         try:
@@ -1283,7 +1293,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._reply(200, dashboard.settings.replace_resume(body))
             elif self.path == '/api/refresh':
                 self._reply(202, dict(id=dashboard.start_refresh()))
-            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv', '/api/ext-run'} or (
+            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv', '/api/ext-run', '/api/repairs'} or (
                     self.path == '/api/resume' and self.headers.get('Content-Length', '0') != '0'):
                 try:
                     lengths = self.headers.get_all('Content-Length', [])
@@ -1300,6 +1310,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         result = dashboard.run_worker(body.get('count'))
                     elif self.path == '/api/ext-run':
                         result = extension_api.run_start(dashboard, body)
+                    elif self.path == '/api/repairs':
+                        result = dashboard.repairs.configure(body)
                     elif self.path == '/api/settings':
                         result = dashboard.settings.save(body.get('changes'))
                     elif self.path == '/api/cv':
