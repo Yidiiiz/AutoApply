@@ -27,7 +27,7 @@ async function applySidebar(tabId, mode, version) {
   let [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
   if(!frame?.result){
     if(mode!=='toggle'){const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=mode;await chrome.storage.session.set({sidebarTabs});}
-    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']});
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['credentials.js','content.js']});
     for(let attempt=0;attempt<6&&!frame?.result;attempt++){
       if(attempt)await delay(150);
       if(!current())return;
@@ -201,6 +201,7 @@ function pollForForm(result) {
     if (cancelledTabs.has(result.tabId)) return;
     try {
       const scanned = await scan(result.tabId);
+      if(scanned.sign_in){const detail=await fillAccount({...result,...scanned},true);if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
       if (!scanned.sign_in && scanned.fields.length) {
         formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
       }
@@ -331,6 +332,25 @@ export async function autofill(tabId, application, advanceCount = 0) {
   try{return await autofillCurrent(tabId,application,advanceCount);}
   finally{autofillTasks--;}
 }
+const credentialDocuments=new Map();
+chrome.tabs.onRemoved.addListener(tabId=>credentialDocuments.delete(tabId));
+async function fillAccount(result, polling=false) {
+  if(!result.matched?.application_id || !result.url?.startsWith('https://'))return 'Account autofill needs a supported, saved application. Sign in manually.';
+  try{
+    const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',func:()=>globalThis.autoApplyCredentials?.describe()});
+    const frame=frames.find(f=>f.result?.supported && new URL(f.result.url).origin===new URL(result.url).origin);
+    if(!frame)return 'This account form needs manual entry. Sign in or create the account, then continue.';
+    const document=frame.documentId+':'+frame.result.mode;
+    if(polling && credentialDocuments.get(result.tabId)===document)return null;
+    const value=await api('/ext/credentials',{url:result.url,frame_url:frame.result.url,application_id:result.matched.application_id,run_id:result.matched.run_id,mode:frame.result.mode});
+    if(!value.configured){credentialDocuments.set(result.tabId,document);return 'Set your account password in dashboard Settings, or sign in manually.';}
+    if(cancelledTabs.has(result.tabId) || (await chrome.tabs.get(result.tabId)).url!==result.url)return 'The page changed. Press Autofill to try again.';
+    const [filled]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.fill(value,expected),args:[value,frame.result]});
+    if(filled?.result?.status==='unavailable' || !filled?.result)return 'Account fields changed or are unavailable. Review the page and sign in manually.';
+    credentialDocuments.set(result.tabId,document);
+    return filled.result.status==='filled' ? 'Account fields filled. Review them and click Sign in or Create account yourself. Autofill resumes after authentication.' : 'Existing account fields were preserved. Finish signing in yourself; Autofill resumes afterward.';
+  }catch{return 'Account autofill is unavailable for this application. Sign in manually, then continue.';}
+}
 async function autofillCurrent(tabId, application, advanceCount = 0) {
   if (analysisTasks.size) return {error: "Application is busy analyzing. Wait and retry."};
   if (running) return {error: "Autofill is already running."};
@@ -362,6 +382,8 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
     const saved = autofillTabs[result.tabId] || {};
     result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]===result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] ? saved.matched : undefined;
+    if(!result.matched && saved.matched?.run_id && (result.sign_in || wasWaiting) &&
+       result.url.startsWith('https://') && saved.url?.startsWith('https://') && new URL(result.url).origin===new URL(saved.url).origin)result.matched=saved.matched;
     result.matched ||= await api("/ext/match", {url: result.url});
     if(cancelledTabs.has(result.tabId))return result;
     autofillTabs[result.tabId] = {...saved, url: result.url, matched: result.matched};
@@ -374,7 +396,7 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     }
     if (result.sign_in || !result.fields.length) {
       result.state = "needs_input";
-      result.detail = result.progress = result.sign_in ? "Sign in to Workday in this tab. Autofill will resume automatically." : 'Waiting for the application form...';
+      result.detail = result.progress = result.sign_in ? await fillAccount(result) : 'Waiting for the application form...';
       result.waiting = true;
       result.busy = false;
       pollForForm(result);

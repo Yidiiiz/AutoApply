@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 import secrets
 import sqlite3
@@ -1194,6 +1195,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _extension_request(self):
         dashboard = self.server.dashboard
+        if self.path == '/ext/credentials' and (not self._extension_cors() or not re.fullmatch(
+                r'chrome-extension://[a-p]{32}', self.headers.get('Origin', ''))):
+            self._reply(403, dict(error='extension origin required'))
+            return
         if self.headers.get_all('Origin', []) and not self._extension_cors():
             self._reply(403, dict(error='extension origin required'))
             return
@@ -1207,9 +1212,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self.command == 'POST':
                 lengths = self.headers.get_all('Content-Length', [])
                 writing = self.path in {'/ext/write', '/ext/chat', '/ext/cover-letter'}
-                maximum = 64 * 1024 if writing else 1024 * 1024
+                maximum = 4096 if self.path == '/ext/credentials' else 64 * 1024 if writing else 1024 * 1024
                 if (len(lengths) != 1 or self.headers.get('Transfer-Encoding') or not lengths[0].isdigit()
                         or not 0 < int(lengths[0]) <= maximum):
+                    if self.path == '/ext/credentials':
+                        raise SettingsRejected('A JSON body of at most 4 KB is required')
                     raise SettingsRejected('A JSON body of at most ' + ('64 KB' if writing else '1 MB') + ' is required')
                 payload = json.loads(self.rfile.read(int(lengths[0])))
                 if not isinstance(payload, dict):
@@ -1238,11 +1245,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if self.path not in {'/api/refresh', '/api/run', '/api/pause', '/api/resume', '/api/stop',
                              '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv',
-                             '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
+                             '/api/credentials', '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
             self._reply(404, dict(error='endpoint not found'))
             return
         try:
-            if self.path == '/api/extension-key/regenerate':
+            if self.path == '/api/credentials':
+                lengths = self.headers.get_all('Content-Length', [])
+                if (len(lengths) != 1 or self.headers.get('Transfer-Encoding') or not lengths[0].isdigit()
+                        or not 0 < int(lengths[0]) <= 16384):
+                    raise SettingsRejected('Invalid account credentials request')
+                try:
+                    body = json.loads(self.rfile.read(int(lengths[0])))
+                except (ValueError, UnicodeError):
+                    raise SettingsRejected('Invalid account credentials request') from None
+                self._reply(200, dashboard.settings.credentials.save(body))
+            elif self.path == '/api/extension-key/regenerate':
                 self._reply(200, dict(extension_key=dashboard.settings.extension_key(regenerate=True)))
             elif self.path == '/api/ext-run/cancel':
                 self._reply(200, extension_api.run_cancel(dashboard, {}))

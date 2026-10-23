@@ -22,6 +22,7 @@
         "<all_urls>"
       ],
       "js": [
+        "credentials.js",
         "content.js"
       ],
       "all_frames": true,

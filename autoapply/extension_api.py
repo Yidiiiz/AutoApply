@@ -1130,7 +1130,40 @@ def unapplied(dashboard, payload):
     return dashboard.mark_applied(_id(payload.get('application_id')), undo=True)
 
 
-ROUTES = {('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
+def credentials(dashboard, payload):
+    """Release only to the paired extension for a stored, same-origin ATS job."""
+    rejected = 'Account autofill requires an authorized HTTPS application sign-in form'
+    if set(payload) - {'url', 'frame_url', 'application_id', 'run_id', 'mode'} or payload.get('mode') not in {'login', 'signup'}:
+        raise SettingsRejected(rejected, status=403)
+    application_id = _id(payload.get('application_id'))
+    try:
+        page, frame = urlsplit(payload['url']), urlsplit(payload['frame_url'])
+        with dashboard.connection() as db:
+            app = db.application(application_id)
+            _unprotected(app)
+            job = urlsplit(app['canonical_url'])
+            host = job.hostname or ''
+            supported = any(host == suffix or host.endswith('.' + suffix) for suffix in (
+                'myworkdayjobs.com', 'greenhouse.io', 'lever.co', 'smartrecruiters.com',
+                'pinpointhq.com', 'applytojob.com', 'icims.com', 'taleo.net', 'successfactors.com'))
+            safe = supported and all(p.scheme == 'https' and p.hostname == host and
+                                     p.port in (None, 443) and not p.username and not p.password
+                                     for p in (job, page, frame))
+            matched = _match(db, _url(payload['url'])) if safe else None
+        with dashboard._ext_mutex:
+            active = any(i['application_id'] == application_id and i['state'] == 'opened' and
+                         i['run_id'] == payload.get('run_id') for i in dashboard._ext_run)
+        if not safe or not (matched and matched['id'] == application_id or active):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, SettingsRejected):
+        raise SettingsRejected(rejected, status=403) from None
+    value = dashboard.settings.credentials.load(profile_email=True)
+    if not value['password'] or not value['email']:
+        return dict(configured=False)
+    return dict(configured=True, **value)
+
+
+ROUTES = {('POST', '/ext/credentials'): credentials, ('POST', '/ext/trace'): trace, ('POST', '/ext/skills/choose'): skill_choose, ('GET', '/ext/skills/aliases'): skill_aliases,
           ('POST', '/ext/skills/plan'): skill_plan, ('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
@@ -1145,4 +1178,10 @@ def dispatch(dashboard, payload, *, method, path):
     handler = ROUTES.get((method, path))
     if handler is None:
         raise SettingsRejected('endpoint not found', status=404)
+    if path != '/ext/credentials':
+        cleaned = dashboard.settings.credentials.redact(payload)
+        if path == '/ext/remember' and (cleaned != payload or re.search(
+                r'password|user\s*name|sign.?in|log.?in|account.*email', str(payload.get('label', '')), re.I)):
+            raise SettingsRejected('Account credentials cannot be remembered')
+        payload = cleaned
     return handler(dashboard, payload)

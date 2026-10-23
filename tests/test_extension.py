@@ -1103,7 +1103,7 @@ def test_workday_entry_stops_at_sign_in(loaded_extension, extension_server, batc
     worker.evaluate("config => chrome.storage.local.set(config)", {"server": server, "key": KEY})
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    detail = "Sign in to Workday in this tab. Autofill will resume automatically."
+    detail = "Account autofill needs a supported, saved application. Sign in manually."
     if batch:
         worker.evaluate("""async server => {
             await fetch(server + '/ext/fixture-start', {method:'POST', headers:{'X-AutoApply-Key':'fixture-pairing-key', 'Content-Type':'application/json'}, body:JSON.stringify({workday:true})});

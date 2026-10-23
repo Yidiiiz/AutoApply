@@ -18,13 +18,13 @@
     return run;
   }
   function trace(step, action, element, details = {}) {
-    if (!traces.length) return;
+    if (!traces.length || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(element)) return;
     const field = element ? {
       label: label(element), element_id: element.id,
       automation_id: element.getAttribute('data-automation-id') ||
         element.closest('[data-automation-id^="formField"]')?.getAttribute('data-automation-id')
     } : {};
-    const entry = JSON.parse(JSON.stringify({timestamp: new Date().toISOString(), step, action, ...field, ...details},
+    const entry = JSON.parse(JSON.stringify(globalThis.autoApplyCredentials?.redact({timestamp: new Date().toISOString(), step, action, ...field, ...details}) || {timestamp: new Date().toISOString(), step, action, ...field, ...details},
       (_, value) => typeof value === 'string' ? value.slice(0, 1000) : value));
     const bytes = new TextEncoder().encode(JSON.stringify(entry)).length;
     for (const run of traces) {
@@ -134,13 +134,15 @@
   }
   const editTimers=new Map(), observedValues=new Map();
   function learn(event) {
-    if(extensionFilling || !event.isTrusted) return;
+    if(extensionFilling || !event.isTrusted || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(event.target)) return;
     const record=Array.from(records.values()).find(r=>r.members.includes(event.target)||r.element.contains(event.target));
     if(!record || ['file','password','hidden'].includes(record.field.kind)||!interactiveVisible(record.element)) return;
     const value=valueOf(record), encoded=JSON.stringify(value);
+    if(JSON.stringify(globalThis.autoApplyCredentials?.redact(value) ?? value)!==encoded)return;
     if(observedValues.get(record.field.key)===encoded) return;
     clearTimeout(editTimers.get(record.field.key));
     editTimers.set(record.field.key,setTimeout(()=>{
+      if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element))return;
       observedValues.set(record.field.key,encoded);
       chrome.runtime.sendMessage({type:'user-answer',key:record.field.key,value}).catch(()=>{});
     },400));
@@ -618,6 +620,7 @@
   }
 
   function pageInfo() {
+    if(globalThis.autoApplyCredentials?.active())return {url:location.origin+location.pathname,title:"Account sign-in",company:"",description:""};
     let posting;
     function find(value) {
       if (!value || typeof value !== "object") return;
@@ -641,7 +644,7 @@
   }
 
   function signInPage() {
-    return Boolean(document.querySelector('[data-automation-id="signInContent"],[data-automation-id="createAccountLink"]') ||
+    return Boolean(globalThis.autoApplyCredentials?.active() || document.querySelector('[data-automation-id="signInContent"],[data-automation-id="createAccountLink"]') ||
       (document.querySelector('input[type="password"]') &&
         /sign[\s-]*in|log[\s-]*in|create\s+(?:an?\s+)?account/i.test(document.body.innerText)));
   }
@@ -694,13 +697,14 @@
 
   const controlSelector='input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"]),[role="textbox"],[role="checkbox"],[role="radio"],[role="switch"]';
   function scannerControls() {
-    return Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])'))
+    return Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')).filter(element=>!globalThis.autoApplyCredentials?.sensitive(element))
       .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") && exposedFile(element) : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
         !(!element.closest("form") && (element.type === "search" || element.closest('[role="search"]') || /\bsearch\b/i.test(label(element)))));
   }
   async function scan({repair = false} = {}) {
+    if(globalThis.autoApplyCredentials?.active())return {page:pageInfo(),fields:[],page_identity:snapshotIdentity(),next_action:{kind:"none"},sign_in:true,scan_ms:0};
     const started = performance.now();
     const previousRecords = records;
     records = new Map();
@@ -1014,7 +1018,7 @@
     for (const answer of answers) {
       checkRepair();
       const record = refreshRecord(records.get(answer.key));
-      if (!record || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
+      if (!record || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
       let {element, members, field} = record;
       trace("field","found",element);
       if (isSkillsField(element)) { summary.skipped++; continue; }
@@ -1877,7 +1881,7 @@
     })) return null;
     return pageStructure();
   }
-  const diagnosticExcluded=element=>Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
+  const diagnosticExcluded=element=>globalThis.autoApplyCredentials?.sensitive(element) || Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
     element.matches('input[type="hidden"],input[type="password"]') || /captcha|honeypot|honey.?pot|fax|website_confirm|password|secret|token|api.?key/i.test([element.id,element.name,element.getAttribute('autocomplete')].join(' '));
   function structureOf(element) {
     const style=getComputedStyle(element),rect=element.getBoundingClientRect();
@@ -1893,6 +1897,7 @@
   }
   // No scan, focus, clicks, keys, or menu opening: retain all live filling handles.
   function inspectPage({repair = false} = {}) {
+    if(globalThis.autoApplyCredentials?.active())return {identity:snapshotIdentity(),fields:[],diagnostic:{fields:[],responsive:true,inspection_ms:0},inspection:{message:"Account fields are private."}};
     const started=performance.now();
     const identity=snapshotIdentity(),detected=new Set(scannerControls()),fields=[],grouped=new Set();let truncated=false;
     for(const element of document.querySelectorAll(controlSelector)) {
@@ -1984,6 +1989,7 @@
     return {status,message:messages[status],ready_state:document.readyState,roots:rootInfo,closed_shadow_roots:'not_observable',frames,truncated:Boolean(roots.truncated)};
   }
   function pageStructure() {
+    if(globalThis.autoApplyCredentials?.active())return {host:location.hostname,nodes:[],truncated:false,inspection:{message:"Account fields are private."}};
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
     const roots=inspectionRoots(),inspection=rootInspection(roots);
     const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,a[href],iframe,[role],[data-automation-id],[contenteditable="true"]';
@@ -2011,7 +2017,7 @@
   }
   const chatDocument=crypto.randomUUID(),chatIdentities=new WeakMap();
   let chatFocus,chatExplicit;
-  const writableChat=el=>el && el.isConnected && interactiveVisible(el) &&
+  const writableChat=el=>!globalThis.autoApplyCredentials?.active() && !globalThis.autoApplyCredentials?.sensitive(el) && el && el.isConnected && interactiveVisible(el) &&
     !el.readOnly && !el.matches(':disabled,[readonly],[aria-readonly="true"]') &&
     (el.matches('textarea,input[type="text"],input:not([type]),input[type="email"],input[type="tel"],input[type="url"]') || el.isContentEditable) && !el.closest('#autoapply-sidebar') && !/captcha/i.test([el.id,el.name,label(el)].join(' '));
   document.addEventListener('focusin',event=>{if(!extensionFilling && event.isTrusted && writableChat(event.target))chatFocus=event.target;},true);
@@ -2019,6 +2025,7 @@
   const chatValue=el=>String(el.isContentEditable?el.textContent:el.value);
   async function chatFingerprint(value){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');}
   async function chatContext({passive=false,request=''}={}){
+    if(globalThis.autoApplyCredentials?.active())return {url:location.origin+location.pathname,page:pageInfo(),document:chatDocument,fields:[],current_key:null};
     if(!passive && !extensionFilling)await scan();
     const fields=Array.from(records.values()).filter(r=>writableChat(r.element)).slice(0,80).map(r=>{
       if(!chatIdentities.has(r.element))chatIdentities.set(r.element,crypto.randomUUID());
@@ -2048,6 +2055,12 @@
     return {ok:true};
   }
   globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  if(globalThis.autoApplyCredentials){
+    for(const key of ['scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
+      const original=globalThis.autoApplyContent[key];
+      globalThis.autoApplyContent[key]=(...args)=>{const value=original(...args);return value?.then?value.then(globalThis.autoApplyCredentials.redact):globalThis.autoApplyCredentials.redact(value);};
+    }
+  }
   globalThis.autoApplyContent.syncWritingButtons=scheduleWritingButtons;
   globalThis[singleton]=globalThis.autoApplyContent;
   if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});

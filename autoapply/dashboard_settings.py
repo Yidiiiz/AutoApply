@@ -48,6 +48,7 @@ SECTIONS = [
     ('dashboard', 'Dashboard', [
         field('dashboard.default_batch_size', 'Default batch size', 'number', 1, 10, 1, 'Initial batch size on the next page load.', 5)]),
     ('resume', 'Resume', []),
+    ('credentials', 'Account credentials', []),
     ('safety', 'Safety', [
         field('application.auto_submit', 'Automatic submission', 'boolean', default=False, reason='Always off; final submission stays manual.'),
         field('browser.headless', 'Headless browser', 'boolean', default=False, reason='Must stay false for semi-auto filling.'),
@@ -74,6 +75,8 @@ def replace_file(source, target):
 
 class DashboardSettings:
     def __init__(self, config, connection, worker_mutex, worker_busy=lambda: False):
+        from .credentials import CredentialStore
+        self.credentials = CredentialStore(config)
         self.config, self.connection, self.worker_mutex = config, connection, worker_mutex
         self.mutex = threading.RLock()
         self.worker_busy = worker_busy
@@ -110,7 +113,7 @@ class DashboardSettings:
                         sources[kind].append(url)
             with self.connection() as db:
                 daily = db.setting('daily_full_check', {})
-            return dict(sections=sections, restart_required_note=RESTART_NOTE, extension_key=self.extension_key(),
+            return dict(sections=sections, credentials=self.credentials.status(), restart_required_note=RESTART_NOTE, extension_key=self.extension_key(),
                         daily_check={k: daily.get(k) for k in ('status', 'successful_at', 'retry_at')},
                         discovery_limits={k: data.get('discovery', {}).get(k) for k in
                                           ('max_pages_per_query', 'max_results_per_query')},
