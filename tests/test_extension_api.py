@@ -685,11 +685,13 @@ def test_t039_secondary_address(http_dashboard, label):
 
 
 @pytest.mark.parametrize('label,options,expected', [
-    ('Phone Device Type', [], 'Mobile'), ('Phone Type', ['Home','Mobile'], 'Mobile'),
+    ('Phone Device Type', [], None), ('Phone Type', ['Home','Mobile'], 'Mobile'),
     ('Phone Device Type', ['Home','Cell'], 'Cell'), ('Phone Type', ['Mobile Phone','Other'], 'Mobile Phone')])
 def test_t039_phone_type(http_dashboard, label, options, expected):
     status, result, _=ext(http_dashboard,'POST','/ext/answers',dict(url='https://fixture.test/job',fields=[dict(key='phone',label=label,kind='select',options=options)]))
     assert status == 200 and result['answers'][0]['value'] == expected
+    if expected is None:
+        assert result['answers'][0]['status'] != 'RESOLVED'
 
 
 def test_t039_snapshot_paired_sanitized(http_dashboard, config):

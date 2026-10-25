@@ -60,6 +60,11 @@ def concept(label):
         return {"linkedin":"links.linkedin", "github":"links.github", "portfolio":"links.personal_website", "personal website":"links.personal_website"}[link[1]]
     if text in LABELS:
         return LABELS[text]
+    if text in {'u s work authorization', 'us work authorization'}:
+        return 'work_authorization.us_authorized'
+    from .question_keywords import export_status_label
+    if export_status_label(label):
+        return 'export_status'
     exact = {
         'are you currently enrolled': 'education.currently_enrolled',
         'are you currently a student': 'education.currently_enrolled',
@@ -150,8 +155,11 @@ def equivalent_answer(value):
         return 'yes' if value else 'no'
     if not isinstance(value, str):
         return value
-    text = re.sub(r'[^a-z0-9]+', ' ', re.sub(r'\s*\([^)]*\)\s*$', '', value).casefold()).strip()
-    if re.fullmatch(r'(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose|share)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
+    # Only a known regional suffix is incidental. Arbitrary parenthetical
+    # qualifications can change the meaning of an apparent decline.
+    comparison = re.sub(r'\s*\((?:United States(?: of America)?|U\.?S\.?A?\.?)\)\s*$', '', value, flags=re.I)
+    text = re.sub(r'[^a-z0-9]+', ' ', comparison.casefold()).strip()
+    if re.fullmatch(r'not declared|(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose|share)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
         return 'decline'
     return text if text in {'yes', 'no'} else value
 
@@ -198,7 +206,7 @@ for key in ('sponsorship_combined', 'prior_employment', 'conflict_of_interest',
             'government_connections', 'privacy_ack', 'sms_recruiting', 'technical_interests',
             'start_date', 'government_employment', 'independent_auditor_employment',
             'military_service', 'required_demographic_processing_consent',
-            'employment_restrictions', 'languages.other_proficient'):
+            'employment_restrictions', 'languages.other_proficient', 'export_status'):
     REGISTRY[key] = Concept(key, (), None, 'policy', scopes=('application', 'employer'),
                             factual_fallback=False, special_policy=True)
 

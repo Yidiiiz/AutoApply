@@ -729,14 +729,26 @@ def test_greenhouse_comboboxes_hidden_upload_and_dates(loaded_extension, extensi
     assert page.evaluate('uploadEvents') == [['resume', 'input'], ['resume', 'change']]
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
     fields = {field['label']: field for field in result['fields']}
-    # Resolved choices go directly to the filler without scan-time menu collection.
+    # Finite choices resolve against observed options; remote searches keep their fast path.
     assert result["timings"]["scan_ms"] < 1000
-    assert result["timings"].get("options_ms", 0) == 0
+    assert 0 < result["timings"].get("options_ms", 0) < 5000
     assert fields['School']['options'] == []
     assert fields['Degree']['options'] == []
     assert fields['Discipline']['options'] == []
-    assert fields['Are you interested in a Spring Co-Op, Summer Internship, or Both?']['options'] == []
-    assert all(field['options'] == [] for field in payload['fields'] if field['kind'] == 'combobox')
+    interest = 'Are you interested in a Spring Co-Op, Summer Internship, or Both?'
+    assert fields[interest]['options'] == []  # Final rescan invalidates pre-fill observations after edits.
+    sent = {field['label']: field for field in payload['fields']}
+    assert sent['Degree']['options'] == ["Bachelor's Degree", "Master's Degree"]
+    assert sent[interest]['options'] == ['Spring Co-Op', 'Summer Internship', 'Both']
+    assert sent['School']['options'] == sent['Discipline']['options'] == []
+    assert len([1 for path, _, _ in requests if path == '/ext/answers']) == 1
+    traces = [entry for path, _, body in requests if path == '/ext/trace' for entry in body['entries']]
+    assert any(e['step'] == 'dropdown' and e['action'] == 'options seen' and e.get('element_id') == 'degree'
+               and e['texts'] == ["Bachelor's Degree", "Master's Degree"] for e in traces)
+    # Nested section/autofill traces may contain the same opening twice.
+    interest_opens = {e['timestamp'] for e in traces if e['step'] == 'dropdown' and e['action'] == 'opened'
+                      and e.get('element_id') == 'interest'}
+    assert len(interest_opens) == 2, sorted(interest_opens)
     assert all(fields[label]['section'] == 'Education' for label in ('Start date month', 'Start date year', 'End date month', 'End date year'))
     assert fields['Resume/CV']['kind'] == fields['Cover Letter']['kind'] == 'file'
     assert not any(field['label'] == 'Attach' for field in payload['fields'])
@@ -798,7 +810,12 @@ def test_async_school_searches_beyond_first_page(loaded_extension, extension_ser
     if mode == 'failure':
         assert searches[-1]['term'] == ''
     payload = next(payload for path, _, payload in requests if path == '/ext/answers')
-    assert result['fields'][0]['options'] == []  # Resolved search avoids opening the menu during scanning.
+    # Failure may expose the unrelated first page as truthful pending metadata.
+    options = result['fields'][0]['options']
+    if mode == 'failure':
+        assert options in ([], [f'Unrelated School {i}' for i in range(1, 11)])
+    else:
+        assert options == []
     assert payload['fields'][0]['options'] == []
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 

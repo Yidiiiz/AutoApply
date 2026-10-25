@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>Choice regression fixture</title>
+<style>body{font:16px sans-serif;margin:24px} .field{margin:16px 0;max-width:850px}input{width:300px;padding:8px}[role=option]{padding:8px;border:1px solid #ccc;cursor:pointer}.single-value:empty{display:none}</style>
+<h1>Fixture Intern</h1><form id="application"><div id="fields"></div><button type="submit">Submit application</button></form>
+<script>
+const exportLabel='EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls. Your responses to the questions below will be used solely to determine your eligibility under U.S. law to receive information and materials subject to U.S. export controls.';
+window.specs={
+ veteran_status:['Veteran Status',['I am not a protected veteran','I identify as one or more of the classifications of a protected veteran',"I don't wish to answer"]],
+ gender:['Gender',['Male','Female','Decline To Self Identify']],
+ question_13205853007:['U.S. WORK AUTHORIZATION',['Yes','No']],
+ question_13205852007:[exportLabel,['A United States citizen or national','A person lawfully admitted for permanent residence of the United States (i.e., “Green Card” holder)','A person admitted as a refugee to the United States under 8 U.S.C. 1157','A person admitted as an asylee to the United States under 8 U.S.C. 1158','None of the above']],
+ question_13205851007:['What is your top location preference?',['Costa Mesa, CA (HQ)','Ashville, OH']]
+};
+window.actions=[];window.submissions=0;window.opens={};window.delays={};window.onOpen=null;window.searchOnly=false;
+document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();submissions++});
+for(const [id,[label,options]] of Object.entries(specs)){
+ const field=document.createElement('div');field.className='field';
+ field.innerHTML=`<label for="${id}"></label><div class="react-select__control"><span class="single-value"></span><input id="${id}" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-autocomplete="list" aria-controls="${id}-list" required><input type="hidden" name="${id}" value=""></div><div id="${id}-list" role="listbox" hidden></div>`;
+ field.querySelector('label').textContent=label;document.querySelector('#fields').append(field);
+ const input=field.querySelector('[role=combobox]'),list=field.querySelector('[role=listbox]'),hidden=field.querySelector('[type=hidden]'),single=field.querySelector('.single-value');
+ function render(){list.replaceChildren();for(const [index,name] of specs[id][1].entries()){
+   const row=document.createElement('div');row.role='option';row.id=id+'-option-'+index;row.textContent=name;
+   row.addEventListener('click',()=>{actions.push(['click',id,name]);if(searchOnly)return;hidden.value=String(index+1);single.textContent=name;input.value='';input.setAttribute('aria-expanded','false');list.hidden=true;input.dispatchEvent(new Event('change',{bubbles:true}));});list.append(row);
+ }}
+ function open(){if(input.getAttribute('aria-expanded')==='true')return;opens[id]=(opens[id]||0)+1;input.setAttribute('aria-expanded','true');list.hidden=false;list.replaceChildren();if(onOpen)onOpen(id);setTimeout(render,delays[id]||0);}
+ input.addEventListener('keydown',e=>{if(e.key==='ArrowDown')open();if(e.key==='Escape'){input.setAttribute('aria-expanded','false');list.hidden=true;}});
+ input.addEventListener('input',()=>actions.push(['search',id,input.value]));
+}
+</script>

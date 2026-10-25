@@ -21,7 +21,13 @@ def fit_options(value, options):
     if not options:
         return str(value)
     from .concepts import equivalent_answer
+    literal = [option for option in options if option == str(value)]
+    if len(literal) == 1:
+        return literal[0]
     expected = normalize(equivalent_answer(value))
+    if expected == 'decline':
+        matches = [option for option in options if equivalent_answer(option) == 'decline']
+        return matches[0] if len(matches) == 1 else None
     exact = [option for option in options if normalize(option) == expected]
     if len(exact) == 1:
         return exact[0]
@@ -53,10 +59,6 @@ def fit_options(value, options):
         matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]
         if not matches and veteran == 'not a protected veteran':
             matches = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
-        return matches[0] if len(matches) == 1 else None
-    if expected == "decline":
-        matches = [option for option in options if equivalent_answer(option) == 'decline'
-                   or re.search(r"decline|prefer not|do not wish|don t wish", option, re.I)]
         return matches[0] if len(matches) == 1 else None
     return None
 
@@ -383,6 +385,10 @@ class AnswerResolver:
         from .question_keywords import unusable_label
         if unusable_label(q.label):
             return None
+        # A standalone consent checkbox is its own offered action; its existing
+        # explicit acknowledgement policy does not require a separate menu.
+        if q.kind in {'select', 'radio', 'multiselect'} and not q.options:
+            return None
         if re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', normalize(q.label)):
             return Answer('', 'policy:empty_address_line_2') if not q.options else None
         # Negated ability/requirement wording must not reach affirmative fallbacks.
@@ -391,6 +397,19 @@ class AnswerResolver:
         if mapped_key == 'application_preferences.schedule_commitment' and re.search(r"\b(?:not|no|unable|cannot|never)\b|\bcan t\b", normalize(q.label)):
             return None
         if policy == 'DO_NOT_ANSWER':
+            return None
+        from .question_keywords import export_status_label
+        if export_status_label(q.label):
+            # A status menu is not a blanket legal acknowledgement. Authorization,
+            # residency and nationality alone never establish U.S. citizenship.
+            choices = [o for o in q.options if question_text(o) == 'a united states citizen or national']
+            conflicting = any(fact(profile, 'citizenship.' + key) is True for key in
+                              ('permanent_resident', 'green_card_holder', 'refugee', 'asylee', 'non_us_citizen'))
+            if (policy != 'REQUIRE_USER' and fact(profile, 'citizenship.us_citizen') is True
+                    and not conflicting and len(choices) == 1
+                    and q.kind in {'select', 'radio', 'combobox'}):
+                return Answer(choices[0], 'derived:citizenship.us_citizen',
+                              evidence=['citizenship.us_citizen'], provenance={'rule': 'explicit-export-citizen-status'})
             return None
         from .question_keywords import current_immigration_status
         citizen_options = [o for o in q.options if normalize(o) in {'u s citizen', 'us citizen', 'uscitizen', 'united states citizen'}]
@@ -478,8 +497,9 @@ class AnswerResolver:
         from .dropdowns import ranked_location, ordered_locations, ORDERED_LOCATIONS_SETTING
         if mapped_key == 'locations.ordered_preferences':
             value = ranked_location(q.label, q.options, ordered_locations(
-                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)))
-            return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences']) if value else None
+                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)), profile.get('locations', {}).get('preferred_states'))
+            return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences',
+                *(['locations.preferred_states'] if profile.get('locations', {}).get('preferred_states') else [])]) if value else None
         if mapped_key == 'application_preferences.role_preferences':
             preferences = fact(profile, mapped_key)
             if not isinstance(preferences, (list, tuple)) or q.kind != 'multiselect':

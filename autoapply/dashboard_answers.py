@@ -24,7 +24,7 @@ from .question_groups import CATEGORIES, normalize, group, categorize
 
 
 def field(path, label, kind='text', **extra):
-    return dict(path=path, label=label, type=kind, help='',
+    return dict(path=path, label=label, type=kind, help=extra.pop('help', ''),
                 **({'nullable': True} | extra if kind == 'bool' else extra))
 
 
@@ -74,6 +74,10 @@ SECTIONS = [
         fields('work_authorization', [('us_authorized', 'bool'), ('sponsorship_now', 'bool'), ('sponsorship_future', 'bool')])),
     ('availability', 'Availability', fields('availability.summer_2027', [('start_date', 'date'), ('end_date', 'date'), ('source', 'text')])),
     ('preferences', 'Preferences & demographics', fields('locations', [('willing_to_relocate', 'bool')]) +
+        [field('locations.preferred_states', 'Preferred U.S. states (in order)', 'tags',
+               help='State abbreviations or full names. Other cities in these states take priority; no default states are assumed.'),
+         field('locations.ordered_preferences', 'Preferred cities (in order)', 'tags',
+               help='Use City, State. Cities keep this order within preferred states, then elsewhere.')] +
         fields('application_preferences', [('compensation_text', 'textarea'), ('office_five_days', 'bool'), ('discovery_source', 'text'),
         ('application_source_answer', 'text'), ('career_goal', 'textarea'), ('willing_to_work_any_location', 'bool'),
         ('previous_employer_work_default', 'bool'), ('academic_honor', 'bool'), ('recruiting_sms_whatsapp', 'bool'),
@@ -162,6 +166,15 @@ def validate(value, f):
     elif kind == 'tags':
         if not isinstance(value, list) or len(value) > 300 or any(not isinstance(v, str) or not v.strip() or len(v) > 500 for v in value):
             raise ValueError('Use a list of nonempty text values.')
+        if f['path'] == 'locations.preferred_states':
+            from .dropdowns import us_state
+            if len(value) > len(STATES) or any(us_state(v) is None for v in value):
+                raise ValueError('Use at most 51 U.S. state names or abbreviations (including DC).')
+            value = [us_state(v) for v in value]
+        if f['path'] == 'locations.ordered_preferences':
+            from .dropdowns import location_identity
+            if len(value) > 100 or any(location_identity(v) is None for v in value):
+                raise ValueError('Use at most 100 U.S. locations in City, State format.')
         value = list({v.strip().casefold(): v.strip() for v in reversed(value)}.values())[::-1]
     elif kind == 'list':
         if not isinstance(value, list) or len(value) > 100:

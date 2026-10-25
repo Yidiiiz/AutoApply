@@ -708,6 +708,11 @@ def resolve_answers(dashboard, payload):
         result = []
         for q, field in zip(questions, fields):
             from .question_keywords import date_part_label, unusable_label
+            if (q.kind in {'select', 'radio', 'multiselect'} or
+                    q.kind == 'combobox' and field.get('options_observed') is True and not field.get('options_partial')) and not q.options:
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP',
+                                   reason='No offered options are available.'))
+                continue
             if unusable_label(q.label):
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
                 continue
@@ -784,7 +789,9 @@ def resolve_answers(dashboard, payload):
             status = ('RESOLVED' if answer else 'NEEDS_WRITING' if not field.get('section_missing_date') and answers.is_writing_question(q)
                       else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP')
             result.append(dict(key=q.key, value=answer.value if answer else None,
-                               source=answer.source if answer else '', status=status))
+                               source=answer.source if answer else '', status=status,
+                               **({'reason': 'No offered location matches saved preferences.'} if answer is None
+                                  and re.fullmatch(r'what is your top location preference', normalize(q.label)) else {})))
     return dict(answers=result)
 
 

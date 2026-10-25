@@ -41,6 +41,15 @@ def date_part_label(label):
                           r'|\b(?:month|year)(?: of)?(?: the)? (?:start|end|from|to|graduation)(?: date)?\b', text))
 
 
+def export_status_label(label):
+    """Captured status heading; never classify arbitrary export/legal agreements."""
+    return normalize(label) == normalize(
+        'EXPORT CONTROLS - This position requires access to information and technology '
+        'that is subject to U.S. export controls. Your responses to the questions below '
+        'will be used solely to determine your eligibility under U.S. law to receive '
+        'information and materials subject to U.S. export controls.')
+
+
 def contains(text, phrase):
     return (' ' + normalize(phrase) + ' ') in (' ' + text + ' ')
 
@@ -128,6 +137,8 @@ def match(text):
     if unusable_label(text) or date_part_label(text):
         return None
     text = normalize(text)
+    if text in {'u s work authorization', 'us work authorization'}:
+        return 'work_authorization.us_authorized'
     if current_immigration_status(text):
         return 'citizenship.us_citizen'
     long = len(text.split()) > 60

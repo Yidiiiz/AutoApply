@@ -439,6 +439,16 @@
     return element.parentElement;
   }
   const openedCombos=new WeakSet();
+  const settledChoiceNodes=new WeakMap();
+  const choiceObservations=new WeakMap();
+  let choiceRevision=0;
+  for (const type of ['input','change']) document.addEventListener(type,event=>{
+    if (!event.target.closest?.('#autoapply-sidebar')) choiceRevision++;
+  },true);
+  function rememberChoices(record) {
+    choiceObservations.set(record.element,{url:location.href,identity:snapshotIdentity(),revision:choiceRevision,
+      label:record.field.label,options:[...record.field.options]});
+  }
   function comboOptions(element) {
     const ids = clean(element.getAttribute("aria-controls") || element.getAttribute("aria-owns") || element.getAttribute("list")).split(" ");
     const lists = ids.map(id => document.getElementById(id)).filter(Boolean);
@@ -460,16 +470,22 @@
       const options = comboOptions(element);
       const signature = JSON.stringify(options.map(text));
       if (!options.length || signature !== previous) stableSince = Date.now();
-      else if (Date.now() - stableSince >= 250){trace("dropdown","options seen",element,{texts:options.slice(0,30).map(text),total:options.length});return options;}
+      else if (Date.now() - stableSince >= 250){settledChoiceNodes.set(element,options);trace("dropdown","options seen",element,{texts:options.slice(0,30).map(text),total:options.length});return options;}
       previous = signature;
       await pause(50);
     } while (Date.now() < end);
-    return comboOptions(element);
+    trace('dropdown','skipped',element,{reason:'options did not settle'});
+    return [];
   }
   async function openCombo(element) {
     checkRepair();
     trace("dropdown","opened",element);
     openedCombos.add(element);
+    // Some button menus ignore Escape. Reuse the same still-visible observation
+    // rather than activating the control again and mounting duplicate portals.
+    const retained=settledChoiceNodes.get(element), current=comboOptions(element);
+    if (!remoteAutocomplete(element) && retained?.length && retained.length===current.length &&
+        retained.every((option,index)=>option===current[index])) return;
     const selectOnly = selectOnlyControl(element);
     if (selectOnly) {
       if (element.getAttribute('aria-expanded') !== 'true') pointerClick(selectOnly);
@@ -745,9 +761,10 @@
       container=questionContainer(container);
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
         options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
-          element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: Boolean(!selectOnlyControl(element) && comboInput(element) && comboInput(element).getAttribute("aria-autocomplete") !== "none")} : {}),
+          element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: remoteAutocomplete(element)} : {}),
         section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
-      records.set(key, {element, members, field: fields[fields.length - 1]});
+      records.set(key, {element, members, pageUrl:location.href, labelAtScan:label(element),
+        choiceQuestionAtScan:['radio','checkbox'].includes(kind) ? choiceQuestion(element) : null, field: fields[fields.length - 1]});
       fields[fields.length - 1].answered = occupied(records.get(key));
       if (kind === 'file' && fields[fields.length - 1].answered) fields[fields.length - 1].attached_file = valueOf(records.get(key));
       observedValues.set(key,JSON.stringify(valueOf(records.get(key))));
@@ -762,10 +779,18 @@
     // Non-searchable widgets must expose their actual menu before profile matching.
     // Their aria-autocomplete=list describes navigation, not a partial search result.
     for (const record of records.values()) {
+      const cached=choiceObservations.get(record.element);
+      if (!repair && record.field.kind==='combobox' && cached?.options.length && cached.url===location.href &&
+          cached.identity===snapshotIdentity() && cached.revision===choiceRevision && cached.label===record.field.label) {
+        record.field.options=[...cached.options];record.field.options_observed=true;
+      }
       if (repair || record.field.kind !== 'combobox' || !selectOnlyControl(record.element) || occupied(record)) continue;
+      if (record.field.options_observed) continue;
       try {
         await openCombo(record.element);
         record.field.options = (await settledComboOptions(record.element, 1000)).map(text);
+        record.field.options_observed = true;
+        rememberChoices(record);
       } finally { closeCombo(record.element); }
     }
     const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
@@ -779,10 +804,13 @@
       checkRepair();
       const record = records.get(key);
       if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
+      if (record.field.options_observed) { fields.push({...record.field}); continue; }
       try {
         await openCombo(record.element);
         const options=await settledComboOptions(record.element, 3000);
         record.field.options = options.map(text);
+        record.field.options_observed = true;
+        rememberChoices(record);
         if(repairExecuting)repairSession.menus.set(record.element,{options:record.field.options,
           roles:[...new Set(options.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),
           shapes:options.slice(0,3).map(structureOf)});
@@ -875,8 +903,27 @@
     const months = monthValues(element, value)?.map(normal);
     if (months) return options.find(option => months.includes(normal(getText(option))) ||
       element.tagName === 'SELECT' && months.includes(normal(option.value)));
-    return best(options, value, getText) || (normal(value) === 'mobile' && /^phone (?:device )?type$/i.test(label(element)) ?
+    if (value === 'highest') return best(options,value,getText);
+    const bachelor=name=>/^(bachelor'?s?( degree)?|bachelor of science|b\.?s\.?)$/.test(normal(name));
+    if (bachelor(value)) {
+      const choices=options.filter(option=>bachelor(getText(option)));
+      const preferred=choices.filter(option=>normal(getText(option))==="bachelor's degree");
+      if (preferred.length===1 || choices.length===1) return preferred[0] || choices[0];
+    }
+    const exact = options.filter(option => clean(getText(option)) === clean(value));
+    const folded = options.filter(option => normal(getText(option)) === normal(value));
+    const strict = exact.length === 1 ? exact[0] : !exact.length && folded.length === 1 ? folded[0] : undefined;
+    if (exact.length || folded.length) return strict;
+    const related=remoteAutocomplete(element) && clean(value) ? options.filter(option=>normal(getText(option)).includes(normal(value))) : [];
+    return (related.length===1 ? related[0] : undefined) || (normal(value) === 'mobile' && /^phone (?:device )?type$/i.test(label(element)) ?
       options.find(option => /^(cell|mobile phone)$/i.test(clean(getText(option)))) : undefined);
+  }
+  function remoteAutocomplete(element) {
+    // Search only real vocabulary lookups. Searchable finite demographic/status
+    // menus still need their offered options before resolving profile facts.
+    return !selectOnlyControl(element) && Boolean(comboInput(element)) &&
+      comboInput(element).getAttribute('aria-autocomplete') !== 'none' &&
+      (isSkillsField(element) || /^(?:school(?: or university)?|university|college(?: university)?|skills?|company|employer|job title|major|discipline|field of study|city|location city)$/i.test(clean(label(element))));
   }
   function mark(record, color) {
     checkRepair();
@@ -887,21 +934,36 @@
     }
   }
 
-  async function fillCombo(element, value) {
+  async function fillCombo(element, value, force = false) {
     if (isPrompt(element) && isSkillsField(element)) return (await fillSkills(element, [value])).skipped === 0;
+    if (!force && occupied({element,members:[element],field:{kind:'combobox'}})) return false;
     const initial=element;
+    const initialUrl=location.href, initialLabel=label(element), initialValue=comboInput(element)?.value || '';
+    // Only explicit caller force may replace this unchanged initial selection.
+    const initialSelection=comboSelection(element), initialDisplayed=displayedChoice(element);
+    const observedField=records.get(element.dataset.autoapplyKey)?.field;
+    const expectedOptions=observedField?.options_observed ? observedField.options : null;
+    const remote=remoteAutocomplete(element);
+    const unchanged=()=>location.href===initialUrl && currentControl(initial)===initial &&
+      initial.isConnected && interactiveVisible(initial) && label(initial)===initialLabel &&
+      (comboInput(initial)?.value || '')===initialValue && comboSelection(initial)===initialSelection && displayedChoice(initial)===initialDisplayed;
     const reacquire=()=>element=currentControl(initial);
     let committed = false;
     try {
       reacquire();
       await openCombo(element);
-      if(isPrompt(element)) {searchCombo(element,value);promptEnter(comboInput(element));}
+      if(isPrompt(element) && remote) {searchCombo(element,value);promptEnter(comboInput(element));}
       const words = clean(value).split(" ");
       const prefix = words.slice(0, words.length > 3 ? 3 : 2).join(" ");
       const searches = [...new Set(monthValues(element, value) || [clean(value), prefix])];
-      const options = await settledComboOptions(element, isPrompt(element) ? 1000 : 350);
-      let option = isPrompt(element) ? await promptOption(element,value) : fieldChoice(element, options, value);
-      for (const search of option ? [] : searches) {
+      const options = await settledComboOptions(element, remote ? 350 : 1500);
+      if (remote && observedField) observedField.options_observed=true;
+      if (!remote && (!unchanged() || expectedOptions && JSON.stringify(options.map(text))!==JSON.stringify(expectedOptions))) {
+        choiceObservations.delete(initial);
+        trace('dropdown','skipped',element,{reason:'field or offered options changed'});return false;
+      }
+      let option = isPrompt(element) && remote ? await promptOption(element,value) : fieldChoice(element, options, value);
+      for (const search of option || !remote ? [] : searches) {
         if (!searchCombo(element, search)) break;
         // Keep waiting for a match even when an unrelated first page stays rendered.
         option = await waitFor(() => isPrompt(element) ? comboOptions(element).find(o=>skillNormal(optionName(o))===skillNormal(value)) : fieldChoice(element, comboOptions(element), value), 2500);
@@ -927,7 +989,11 @@
           }
           const target=isPrompt(element) ? option.querySelector('[data-automation-id="radioBtn"],input[type="radio"],[data-automation-id="checkboxPanel"],input[type="checkbox"],[role="checkbox"],[data-automation-id="checkbox"]') || option : option;
           if (target.disabled || target.matches(':disabled') || target.getAttribute('aria-disabled')==='true') break;
-          const clicked=pointerClick(target,()=>!isPrompt(element) || comboOptions(element).find(row=>skillNormal(optionName(row))===skillNormal(value))===option);
+          const clicked=pointerClick(target,()=>location.href===initialUrl && !target.disabled && !target.matches(':disabled') &&
+            target.getAttribute('aria-disabled')!=='true' && comboOptions(element).includes(option) && text(option)===selected &&
+            (remote ? !isPrompt(element) || comboOptions(element).find(row=>skillNormal(optionName(row))===skillNormal(value))===option :
+              unchanged() && fieldChoice(element,comboOptions(element),value)===option &&
+              JSON.stringify(comboOptions(element).map(text))===JSON.stringify(options.map(text))));
           trace('dropdown',clicked?'clicked':'activation interrupted',element,{target:selected,element_id:option.id});
           if (clicked) break; // A pending commit must never be activated twice.
           await settledComboOptions(element,1000);
@@ -936,7 +1002,7 @@
         committed = Boolean(await waitFor(() => {
           reacquire();
           const selection = normal(comboSelection(element));
-          const matchesSelected = Boolean(selection && normal(selected).includes(selection));
+          const matchesSelected = Boolean(selection && selection === normal(selected));
           if(isPrompt(element)) {
             if (!selectedSkills(element).some(pill=>skillNormal(pill)===skillNormal(value))) {stableSince=0;return false;}
             if (!stableSince) stableSince=Date.now();
@@ -955,15 +1021,17 @@
             if (!stableSince) stableSince=Date.now();
             return Date.now()-stableSince>=300;
           }
-          return matchesSelected || option.getAttribute("aria-selected") === "true" ||
-            closed && Boolean(singleValue) && !container.querySelector('[class*="placeholder"]') ||
-            closed && normal(element.value) === normal(selected);
+          const hidden=container.querySelector('input[type="hidden"]');
+          const retained=(matchesSelected || closed && normal(singleValue)===normal(selected)) && (!hidden || clean(hidden.value));
+          if (!retained) {stableSince=0;return false;}
+          if (!stableSince) stableSince=Date.now();
+          return Date.now()-stableSince>=300;
         }));
       }
       trace("dropdown","verified",element,{verified:committed,value:selected,observed:committed?selected:"uncommitted"});
       return committed;
     } finally {
-      if (!committed) {
+      if (!committed && remote) {
         searchCombo(element, "");
       }
       closeCombo(element);
@@ -1009,6 +1077,15 @@
     }
     return stable>=2;
   }
+  async function retainedNative(record, matches) {
+    let stableSince=0;
+    return Boolean(await waitFor(()=>{
+      refreshRecord(record);
+      if (!record.element.isConnected || !matches(record)) {stableSince=0;return false;}
+      if (!stableSince) stableSince=Date.now();
+      return Date.now()-stableSince>=300;
+    },1000));
+  }
   async function fill(answers, files = {}) {return traced("fill",()=>fillFields(answers,files));}
   async function fillFields(answers, files = {}) {
     const started = performance.now();
@@ -1018,7 +1095,10 @@
     for (const answer of answers) {
       checkRepair();
       const record = refreshRecord(records.get(answer.key));
-      if (!record || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
+      if (!record || record.pageUrl && record.pageUrl!==location.href ||
+          ['combobox','select','radio','checkbox'].includes(record.field.kind) &&
+            (record.labelAtScan!==label(record.element) || record.choiceQuestionAtScan!==null && record.choiceQuestionAtScan!==choiceQuestion(record.element)) ||
+          globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
       let {element, members, field} = record;
       trace("field","found",element);
       if (isSkillsField(element)) { summary.skipped++; continue; }
@@ -1032,7 +1112,7 @@
       const unresolved = writing => {
         trace("field","verified",element,{verified:false,reason:"not committed or unresolved"});
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
-        summary[writing ? "writing" : "pending"].push({...field});
+        summary[writing ? "writing" : "pending"].push({...field,...(answer.reason ? {reason:answer.reason} : {})});
         if (field.required) mark(record, "#999999");
       };
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
@@ -1088,7 +1168,7 @@
         } else if (field.kind === "combobox") {
           let ok = true;
           for (const value of Array.isArray(answer.value) ? answer.value : [answer.value]) {
-            if (!await fillCombo(element, value)) { ok = false; break; }
+            if (!await fillCombo(element, value, answer.force === true)) { ok = false; break; }
           }
           if (!ok) { unresolved(false); continue; }
         } else if (field.kind === "select") {
@@ -1096,9 +1176,11 @@
           if (!option) { unresolved(false); continue; }
           nativeSet(element, "value", option.value);
           events(element);
+          if (!await retainedNative(record,current=>current.element.value===option.value &&
+              Array.from(current.element.selectedOptions).some(selected=>!selected.disabled && text(selected)===text(option)))) {unresolved(false);continue;}
         } else if (["radio", "checkbox"].includes(field.kind)) {
           const values = Array.isArray(answer.value) ? answer.value : [answer.value];
-          const matches = values.map(value => best(members, value, label));
+          const matches = values.map(value => fieldChoice(element, members.filter(interactiveVisible), value, label));
           if (field.kind === "checkbox" && members.length === 1 && typeof answer.value === "boolean") {
             if (!await setCheckbox(element,answer.value)) {unresolved(false);continue;}
           } else {
@@ -1113,6 +1195,9 @@
             refreshRecord(record);
             if(!verified || field.kind==='checkbox' && record.members.some(member=>Boolean(member.checked)!==values.includes(label(member)))) {unresolved(false);continue;}
           }
+          const wanted=field.kind==='checkbox' && members.length===1 && typeof answer.value==='boolean' ?
+            member=>Boolean(member.checked)===answer.value : member=>Boolean(member.checked)===values.includes(label(member));
+          if (!await retainedNative(record,current=>current.members.every(wanted))) {unresolved(false);continue;}
         } else {
           const value = String(await phoneValue(element, answer.value ?? "", field));
           checkRepair();

@@ -259,27 +259,35 @@ async function matchAndFill(result, prepare = false) {
       return frame.result.fields.map(field=>({...field,key:prefix+field.key}));
     });
     }
+    // Finite choices are evidence for resolution, even when the stored canonical
+    // answer already resolves. Reuse scan/collection observations in this pass.
+    async function collect(fields) {
+      const collected=[];
+      for (const frameId of new Set(fields.map(field => Number(field.key.split(':')[0])))) {
+        const prefix=frameId+':', keys=fields.filter(field=>field.key.startsWith(prefix)).map(field=>field.key.slice(prefix.length));
+        const [frame]=await chrome.scripting.executeScript({target:{tabId:result.tabId,frameIds:[frameId]},
+          func:keys=>globalThis.autoApplyContent.collectOptions(keys),args:[keys]});
+        result.timings.options_ms=(result.timings.options_ms || 0)+frame.result.options_ms;
+        for (const field of frame.result.fields) {
+          const updated={...field,key:prefix+field.key};
+          Object.assign(result.fields.find(item=>item.key===updated.key),updated);collected.push(updated);
+        }
+      }
+      return collected;
+    }
+    await collect(result.fields.filter(field=>!field.section_managed && field.kind==='combobox' &&
+      !field.options_partial && !field.answered && !field.options_observed));
+    if (cancelledTabs.has(result.tabId)) return;
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
     const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
     let {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
     if (cancelledTabs.has(result.tabId)) return;
     answers.push(...sectionAnswers);
-    // Resolve searchable profile answers first; open menus only for unresolved prompts.
+    // Remote vocabulary searches retain their profile-first fast path.
     const unresolved = result.fields.filter(field => field.kind === "combobox" && !field.answered &&
-      !answers.some(answer => answer.key === field.key && answer.status === "RESOLVED"));
-    const collected = [];
-    for (const frameId of new Set(unresolved.map(field => Number(field.key.split(":")[0])))) {
-      const prefix = frameId + ":", keys = unresolved.filter(field => field.key.startsWith(prefix)).map(field => field.key.slice(prefix.length));
-      const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId, frameIds: [frameId]},
-        func: keys => globalThis.autoApplyContent.collectOptions(keys), args: [keys]});
-      result.timings.options_ms = (result.timings.options_ms || 0) + frame.result.options_ms;
-      for (const field of frame.result.fields) {
-        const updated = {...field, key: prefix + field.key};
-        Object.assign(result.fields.find(item => item.key === updated.key), updated);
-        collected.push(updated);
-      }
-    }
+      !field.options_observed && !answers.some(answer => answer.key === field.key && answer.status === "RESOLVED"));
+    const collected = await collect(unresolved);
     if (collected.length) {
       const resolved = await api("/ext/answers", {...context(result), url: result.url, fields: collected});
       answers = answers.map(answer => resolved.answers.find(item => item.key === answer.key) || answer);
@@ -289,7 +297,7 @@ async function matchAndFill(result, prepare = false) {
     await fill(result, answers, files);
 
   // A failed resolved choice still needs its lazy options in the panel.
-  for (const field of result.pending.filter(field => field.kind === 'combobox' && !field.options.length && !unresolved.some(item=>item.key===field.key))) {
+  for (const field of result.pending.filter(field => field.kind === 'combobox' && !field.options.length && !field.options_observed && !unresolved.some(item=>item.key===field.key))) {
     await loadOptions(result, field.key);
   }
 }
