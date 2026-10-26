@@ -189,6 +189,9 @@ class Dashboard:
         self._ext_mutex = threading.Lock()
         self._ext_run = []
         self._priority_mutex = threading.Lock()
+        self._revision_mutex = threading.Lock()
+        self._revision_db = None
+        self._revision_epoch = secrets.token_hex(12)
         self._priority_db = None
         self._priority_key = None
         self._priority_rows = []
@@ -216,6 +219,14 @@ class Dashboard:
             yield db
         finally:
             db.close()
+
+    def queue_revision(self):
+        """Cheap cross-connection change check; never rank, discover or read profiles."""
+        with self._revision_mutex:
+            if self._revision_db is None:
+                self._revision_db = _Connection(self.path, self.history, check_same_thread=False)
+            version = self._revision_db.one('PRAGMA data_version')['data_version']
+            return dict(revision=f'{self._revision_epoch}:{version}')
 
     def priority(self):
         # data_version is comparable only on the same connection. Serialize its
@@ -990,6 +1001,10 @@ class Dashboard:
             if self._priority_db is not None:
                 self._priority_db.close()
                 self._priority_db = None
+        with self._revision_mutex:
+            if self._revision_db is not None:
+                self._revision_db.close()
+                self._revision_db = None
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -1055,9 +1070,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         dashboard = self.server.dashboard
         try:
-            if self.path == '/':
+            if self.path in {'/', '/?section=repairs'}:
                 initial = json.dumps(dict(rows=[], sweep={}))
-                page = PAGE.replace('__TOKEN__', dashboard.token).replace('__INITIAL__', initial)
+                page = (PAGE.replace('__TOKEN__', dashboard.token).replace('__INITIAL__', initial)
+                        .replace('__QUEUE_REVISION__', dashboard.queue_revision()['revision']))
                 fields = dashboard.settings.get()['sections']
                 batch = next(f['value'] for s in fields for f in s['fields']
                              if f['path'] == 'dashboard.default_batch_size')
@@ -1114,6 +1130,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == '/api/queue-revision':
+                self._reply(200, dashboard.queue_revision())
             elif self.path == '/api/priority':
                 self._reply(200, dashboard.priority())
             elif self.path == '/api/manual':

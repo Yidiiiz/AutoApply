@@ -1261,12 +1261,12 @@ def test_javascript_timeout_and_quiet_background_retry(tmp_path):
     if not executable:
         pytest.skip('Node is unavailable for offline JavaScript verification')
     request_code = PAGE[PAGE.index('async function request('):PAGE.index('function post(')]
-    list_code = PAGE[PAGE.index('const loads={},listRecovery={};'):PAGE.index('let toastTimer')]
+    list_code = PAGE[PAGE.index('const loads={},loadVersions={},listRecovery={};'):PAGE.index('let toastTimer')]
     script = r'''
 const assert=require('node:assert/strict');
 let timer,timeout,revision=0,messages=[];
 const setTimeout=(fn,ms)=>{timer=fn;timeout=ms;},clearTimeout=()=>{};
-const notice={dataset:{},hidden:true};const document={getElementById:()=>notice};
+const notice={dataset:{},hidden:true};const document={getElementById:()=>notice,addEventListener:()=>{}};
 const notify=(message,error,owner='action')=>{messages.push(message);notice.dataset.owner=owner;notice.hidden=false;};
 let fetch=(path,{signal})=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason)));
 ''' + request_code + list_code + r'''
@@ -2725,7 +2725,7 @@ def test_t057_queue_continues_after_repeated_timeouts_and_resource_ownership(tmp
     executable=shutil.which('node')
     if not executable: pytest.skip('Node unavailable')
     code=PAGE[PAGE.index('async function request('):PAGE.index('function post(')]
-    code+=PAGE[PAGE.index('const loads={},listRecovery={};'):PAGE.index('async function loadManual')]
+    code+=PAGE[PAGE.index('const loads={},loadVersions={},listRecovery={};'):PAGE.index('async function loadManual')]
     script=r"""
 const assert=require('node:assert/strict');
 let revision=0,now=0,calls=0,resolveHeld;
@@ -2733,7 +2733,7 @@ Date.now=()=>now;
 const timers=new Map();let nextTimer=0;
 const setTimeout=(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay,due:now+delay});return id;},clearTimeout=id=>timers.delete(id);
 const notice={dataset:{},hidden:true},message={textContent:''};
-const document={getElementById:()=>notice};
+const document={getElementById:()=>notice,addEventListener:()=>{}};
 const notify=(text,error,owner='action')=>{message.textContent=text;notice.dataset.owner=owner;notice.hidden=false;};
 let fetch=(path,{signal})=>{calls++;return new Promise((resolve,reject)=>{resolveHeld=data=>resolve({ok:true,json:async()=>data});signal.addEventListener('abort',()=>reject(signal.reason));});};
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};

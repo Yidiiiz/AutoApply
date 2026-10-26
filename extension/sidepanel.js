@@ -150,20 +150,30 @@ function clearAnalysis(){analysisVersion++;clearTimeout(repairTimer);autoRepairI
 function repairStatus(repair){
   clearTimeout(repairTimer);const version=analysisVersion,note=element('analysis-note');
   const status=document.createElement('span');status.setAttribute('role','status');status.textContent=repair?.message || 'Repair status unavailable.';
-  const toggle=document.createElement('button'),pause=document.createElement('button');toggle.type=pause.type='button';
-  note.replaceChildren(status,document.createTextNode(' '),toggle,pause);toggle.hidden=pause.hidden=true;
+  const toggle=button('',()=>{}),pause=button('',()=>{}),review=button('Repair settings / review',async()=>{
+    try{const {server='http://127.0.0.1:8765'}=await chrome.storage.local.get('server');const url=new URL(server);if(!['http:','https:'].includes(url.protocol)||!['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw Error('Open your local dashboard Settings.');url.pathname='/';url.search='?section=repairs';url.hash='settings';window.open(url.href,'_blank','noopener');}catch{status.textContent='Open Extension repairs in your local dashboard Settings.';}
+  }),analyze=button('Analyze again',()=>element('send-structure').click());
+  const actions=node('span','');actions.className='repair-actions';actions.append(toggle,pause,review,analyze);
+  note.replaceChildren(status,actions);toggle.hidden=pause.hidden=analyze.hidden=true;
+  let refreshing=false;
   async function refresh(changes){
+    clearTimeout(repairTimer);if(version!==analysisVersion)return;
+    if(document.hidden&&!changes){repairTimer=setTimeout(()=>refresh(),5000);return;}
+    if(refreshing)return;refreshing=true;
     try{const value=await api('/ext/repairs',changes);if(version!==analysisVersion)return;
-      const job=value.jobs.find(j=>j.id===repair?.id);if(job)status.textContent=job.message;
-      else if(changes)status.textContent=value.enabled?'Enabled. Analyze a fresh page to queue repairs.':'Automatic repair work is disabled.';
+      const job=value.jobs.find(j=>j.id===repair?.id);
+      status.textContent=(!value.enabled?'Automatic repairs disabled. ':value.paused?'Repair dispatch paused. Use Resume repairs. ':'Automatic dispatch enabled. ')+(job?.message || (repair?.id?'Repair no longer in the queue. Open repair settings for review status.':repair?.message || 'Analyze a fresh page to queue eligible repairs.'));
+      analyze.hidden=job?.action!=='analyze';
       toggle.hidden=false;toggle.textContent=value.enabled?'Disable automatic repairs':'Enable automatic repairs';toggle.onclick=()=>refresh({enabled:!value.enabled});
       pause.hidden=!value.enabled;pause.textContent=value.paused?'Resume repairs':'Pause repairs';pause.onclick=()=>refresh({paused:!value.paused});
-      if(job && ['queued','running','dispatching'].includes(job.status))repairTimer=setTimeout(()=>refresh(),5000);
-    }catch{if(version===analysisVersion)status.textContent='Repair status unavailable. Check the local dashboard.';}
+    }catch{if(version===analysisVersion)status.textContent='Repair status unavailable. Open repair settings; status will retry while visible.';}
+    finally{refreshing=false;if(version===analysisVersion)repairTimer=setTimeout(()=>refresh(),5000);}
   }
   refresh();
 }
+
 function renderAnalysis(value){
+  analysisVersion++;clearTimeout(repairTimer);
   analysisBinding={tabId:value.tabId,url:value.url,application_id:value.application_id};
   element('analysis-summary').textContent=value.summary;
   const list=element('analysis-findings');list.replaceChildren();

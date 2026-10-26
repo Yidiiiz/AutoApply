@@ -115,3 +115,20 @@ pending report remains ineligible until an explicit terminal runner review.
 Rooted native-control evidence is described in [shadow-fields.md](shadow-fields.md).
 Open-shadow native support is offline-verified using the reported public shapes;
 a fresh user trace is still required before claiming live employer completion.
+
+
+T074: Visible dashboards check a cheap queue revision every second and coalesce
+changed revisions into authoritative list reads. SQLite data-version checks use a
+retained connection and expose a separate opaque epoch, never an authentication
+key. Unchanged revisions do not rank or read application lists; existing long
+polls remain a fallback. Older in-flight list results cannot overwrite a newer
+mutation revision. Filters, page selection and browser scroll anchoring survive.
+
+Repair status controls poll every five seconds while visible, including blocked
+and awaiting-review jobs. Resume changes only the pause setting; enabled eligible
+jobs dispatch without per-job prompts when all existing guards allow. Repair
+settings / review opens Settings at Extension repairs. Follow-up is generic:
+runner needs_followup does not prove missing evidence, and report prose is never
+used to infer a cause. Analyze again captures the current page; it does not retry
+the terminal job or reset a budget. Dismiss remains available only under the T073
+reviewed-terminal retirement rules. No approval or integration action is implied.

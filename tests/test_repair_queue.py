@@ -607,3 +607,52 @@ def test_root_scoped_aliases_are_consistent_across_controls():
     assert rows[0]['ancestors'][0]['id']==rows[1]['ancestors'][0]['id']
     assert all(row['control']['aria-labelledby']==[row['control']['id']] for row in rows)
     assert all(row['control']['id']!=row['ancestors'][0]['id'] for row in rows)
+
+
+@pytest.mark.parametrize('task_state,process_state,decision,reason,action', [
+    ('awaiting_review', 'exited', None, 'awaiting_review', 'settings'),
+    ('needs_followup', 'exited', None, 'followup', 'analyze'),
+    ('needs_followup', 'exited', 'needs_followup', 'reviewed_followup', 'analyze'),
+    ('blocked', 'exited', 'blocked', 'reviewed_blocked', 'settings'),
+    ('blocked', 'exited', None, 'blocked', 'settings'),
+    ('blocked', 'auth_or_quota', None, 'quota', 'settings'),
+])
+def test_t074_status_uses_structured_runner_facts_not_report_prose(fake_queue, task_state, process_state, decision, reason, action):
+    queue, work, _ = fake_queue
+    queue.configure(dict(enabled=True, paused=True))
+    job = queue.enqueue(capture())
+    state = runner.State(work)
+    run_id = 'c' * 32
+    state.claim(task_template(job['id'], {}), runner.config(work), run_id)
+    state.db.execute('UPDATE runs SET task_state=?,process_state=?,pid=NULL,birth=NULL WHERE id=?',
+                     (task_state, process_state, run_id))
+    if decision:
+        state.db.execute('INSERT INTO decisions VALUES(?,?,?,?)',
+                         (run_id, decision, 'SECRET prose claims missing evidence; never display or infer from it', 'fixture'))
+    state.db.close()
+    with queue._db() as db:
+        db.execute("UPDATE jobs SET status='blocked',reason='blocked',run_id=?", (run_id,))
+    value = queue.status()
+    view = value['jobs'][0]
+    assert value['enabled'] and value['paused']
+    assert view['reason'] == reason and view['action'] == action
+    assert 'SECRET' not in json.dumps(value)
+    assert 'fresh structural evidence is needed' not in view['message']
+    assert 'needs fresh structural evidence' not in view['message']
+    assert queue.status()['jobs'][0]['status'] == 'blocked'  # presentation never retries/accepts
+
+
+@pytest.mark.parametrize('reason', ['queued', 'dirty', 'busy', 'quota', 'workspace'])
+def test_t074_queued_guards_and_resume_remain_actionable(fake_queue, reason):
+    queue, _, _ = fake_queue
+    queue.configure(dict(enabled=True))
+    queue.enqueue(capture())
+    with queue._db() as db:
+        db.execute('UPDATE jobs SET reason=?', (reason,))
+    assert queue.status()['jobs'][0]['reason'] == reason
+    paused = queue.configure(dict(paused=True))
+    assert paused['jobs'][0]['reason'] == 'paused'
+    resumed = queue.configure(dict(paused=False))
+    assert resumed['enabled'] and not resumed['paused']
+    assert resumed['jobs'][0]['reason'] == reason
+    assert resumed['jobs'][0]['status'] == 'queued'

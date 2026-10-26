@@ -21,12 +21,15 @@ MESSAGES = {
     'queued': 'Repair queued; waiting for a safe workspace.',
     'running': 'Repair worker running in the review worktree.',
     'dispatching': 'Repair dispatch reserved; checking runner readiness.',
-    'awaiting_review': 'Worker finished; user review is required. No fix has been deployed.',
-    'completed': 'Repair reviewed. Production changes require a separate user action.',
-    'blocked': 'Repair stopped; user review is required before any retry.',
-    'busy': 'Queued; another runner or unreviewed run needs attention.',
+    'awaiting_review': 'Repair finished; awaiting supervisor code review and integration. Open repair settings for review status.',
+    'completed': 'Repair accepted by supervisor review; integration is managed separately.',
+    'blocked': 'Repair failed or its outcome is unknown. Supervisor review is required; this job will not retry automatically.',
+    'followup': 'Repair needs follow-up; the cause may be code, checks or evidence. Open repair settings for supervisor review, or Analyze again to capture the current page. This job will not retry automatically.',
+    'reviewed_followup': 'Supervisor review requested follow-up; the cause may be code, checks or evidence. Open repair settings, or Analyze again to capture the current page. This job will not retry automatically.',
+    'reviewed_blocked': 'Supervisor review marked this repair blocked. Open repair settings; this job will not retry.',
+    'busy': 'Queued automatically; waiting for another runner or supervisor review of an earlier run.',
     'dirty': 'Queued; worktree must be clean and match the production branch and HEAD.',
-    'quota': 'Queued; runner quota or launch budget requires user attention.',
+    'quota': 'Runner quota or launch budget prevents dispatch. Open repair settings for supervisor attention; no budget is reset here.',
     'workspace': 'Queued; the verified repair worktree is unavailable.',
     'capacity': 'Repair queue is full; review existing jobs.',
     'user': 'This page needs user input or access; no engineering worker was queued.',
@@ -382,7 +385,10 @@ class RepairQueue:
     def _view(row):
         if row is None:
             return None
-        return dict(id=row['task_id'], status=row['status'], message=MESSAGES.get(row['reason'], MESSAGES[row['status']]))
+        reason = row['reason'] or row['status']
+        return dict(id=row['task_id'], status=row['status'], reason=reason,
+                    action='analyze' if reason in {'followup', 'reviewed_followup'} else 'settings',
+                    message=MESSAGES.get(reason, MESSAGES[row['status']]))
 
     def _retirable(self, job, rows, decisions, guard):
         runs = [r for r in rows if r['task_id'] == job['task_id'] and r['attempt'] == 1]
@@ -406,8 +412,28 @@ class RepairQueue:
                     rows, decisions, guard = self.inspect(self.source.parent / 'AutoApply-codex')
                 except (OSError, ValueError, sqlite3.Error):
                     pass
-            return dict(enabled=bool(options['enabled']), paused=bool(options['paused']),
-                        jobs=[dict(self._view(j), retireable=self._retirable(j, rows, decisions, guard)) for j in jobs])
+            views = []
+            for job in jobs:
+                view = self._view(job)
+                # Presentation only: never accept/retry a job or consume report prose.
+                run = next((r for r in rows if r['task_id'] == job['task_id'] and r['attempt'] == 1
+                            and (not job['run_id'] or job['run_id'] == r['id'])), None)
+                if job['status'] in {'blocked', 'awaiting_review'} and run:
+                    decision = decisions.get(run['id'])
+                    reason = ('completed' if decision == 'accepted' else
+                              'reviewed_followup' if decision == 'needs_followup' else
+                              'reviewed_blocked' if decision == 'blocked' else
+                              'quota' if run['process_state'] == 'auth_or_quota' else
+                              'followup' if run['task_state'] == 'needs_followup' else
+                              'blocked' if run['task_state'] == 'blocked' else 'awaiting_review')
+                    view.update(reason=reason, message=MESSAGES[reason],
+                                action='analyze' if reason in {'followup', 'reviewed_followup'} else 'settings')
+                elif job['status'] == 'queued':
+                    reason = 'disabled' if not options['enabled'] else 'paused' if options['paused'] else job['reason']
+                    view.update(reason=reason, message=MESSAGES[reason])
+                view['retireable'] = self._retirable(job, rows, decisions, guard)
+                views.append(view)
+            return dict(enabled=bool(options['enabled']), paused=bool(options['paused']), jobs=views)
 
     def configure(self, payload):
         from .dashboard_settings import SettingsRejected

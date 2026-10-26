@@ -310,25 +310,33 @@ async function request(path,options){const abort=new AbortController(),timeout=p
 function requestMessage(e){return e.name==='TimeoutError'||e.name==='AbortError'?'request timed out':e.message;}
 async function readList(path,background){try{return await request(path);}catch(e){if(!background)throw e;return request(path);}}
 function post(action,body={}){return request('/api/'+action,{method:'POST',headers:{'X-Dashboard-Token':token,'Content-Type':'application/json'},body:JSON.stringify(body)});}
-const loads={},listRecovery={};
+const loads={},loadVersions={},listRecovery={};
+let queueRevision='__QUEUE_REVISION__',revisionLoading=false;
+async function checkQueueRevision(){
+ if(document.hidden||revisionLoading)return;
+ revisionLoading=true;
+ try{const value=await request('/api/queue-revision');if(value.revision!==queueRevision){queueRevision=value.revision;revision++;reload();}}
+ catch{}finally{revisionLoading=false;}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkQueueRevision();});
 function recovered(id){const notice=document.getElementById('notice');if(notice.dataset.owner===id)notice.hidden=true;}
 
 const listNames={priority:'Queue','needs-you':'Needs you',failed:'Failed',applied:'Applied',run:'Status'};
 async function loadList(id,path,renderFn,background=true){
- if(loads[id])return loads[id];
+ if(loads[id]&&loadVersions[id]===revision)return loads[id];
  const recovery=listRecovery[id] ||= {delay:5000,next:0,timer:null};
  if(background && Date.now()<recovery.next)return false;
  clearTimeout(recovery.timer);recovery.timer=null;
  const version=revision;
- loads[id]=(async()=>{try{const data=await readList(path,background);if(version===revision){renderFn(data);recovered(id);recovery.delay=5000;recovery.next=0;}return version===revision;}
- catch(e){if(version===revision)notify(listNames[id]+': '+requestMessage(e),true,id);recovery.next=Date.now()+recovery.delay;recovery.delay=Math.min(recovery.delay*2,30000);return false;}
- finally{delete loads[id];if(recovery.next || version!==revision){const delay=Math.max(1000,recovery.next-Date.now());recovery.timer=setTimeout(()=>loadList(id,path,renderFn),delay);}}})();return loads[id];}
+ const job=(async()=>{try{const data=await readList(path,background);if(version===revision){renderFn(data);recovered(id);recovery.delay=5000;recovery.next=0;}return version===revision;}
+ catch(e){if(version===revision){notify(listNames[id]+': '+requestMessage(e),true,id);recovery.next=Date.now()+recovery.delay;recovery.delay=Math.min(recovery.delay*2,30000);}return false;}
+ finally{if(loads[id]===job){delete loads[id];if(recovery.next || version!==revision){const delay=Math.max(1000,recovery.next-Date.now());recovery.timer=setTimeout(()=>loadList(id,path,renderFn),delay);}}}})();loads[id]=job;loadVersions[id]=version;return job;}
 async function loadManual(background=true){return loadList('needs-you','/api/manual',renderManual,background);}
 async function loadFailed(background=true){return loadList('failed','/api/failed',renderFailed,background);}
 async function loadApplied(background=true){return loadList('applied','/api/applied',renderApplied,background);}
 async function load(background=true){return loadList('priority','/api/priority',render,background);}
 async function reload(){
- const fresh=async(id,fn)=>{if(loads[id])await loads[id];return fn(false);};
+ const fresh=async(id,fn)=>{if(loads[id]&&loadVersions[id]===revision)await loads[id];return fn(false);};
  return Promise.all([fresh('priority',load),fresh('needs-you',loadManual),fresh('failed',loadFailed),fresh('applied',loadApplied),(async()=>{if(statusLoading)await statusLoading;return loadStatus(true);})()]);
 }
 let toastTimer,toastId=null,toastAction='unapplied',toastItem=null;
@@ -400,7 +408,7 @@ function finishSearch(job){searchBusy=false;searchFailed=['failed','interrupted'
 async function poll(id){try{const job=await request('/api/refresh/'+id);if(job.status==='queued'||job.status==='running'){const began=Date.parse(job.started_at||job.created_at);if(Number.isFinite(began))searchStarted=began;updateSearchTime();setTimeout(()=>poll(id),1000);return;}
  finishSearch(job);if(job.error)notify(job.error,true);await reloadData();}catch(e){discoveryState.textContent='Search status unavailable - retrying...';setTimeout(()=>poll(id),3000);}}
 discovery.addEventListener('click',async()=>{if(searchBusy)return;searchBusy=true;searchStarted=Date.now();discovery.disabled=true;discovery.setAttribute('aria-busy','true');updateSearchTime();try{const job=await post('refresh');poll(job.id);}catch(e){notify(e.message,true);searchBusy=false;discovery.disabled=false;discovery.setAttribute('aria-busy','false');updateSearchTime();}});
-let settingsData=null,settingsSection='general',settingsSaving=false,resumeUploading=false,selectedResume=null;
+let settingsData=null,settingsSection=new URLSearchParams(location.search).get('section')==='repairs'?'repairs':'general',settingsSaving=false,resumeUploading=false,selectedResume=null;
 const settingsInputs=new Map(),settingsErrors=new Map(),settingsChanges={};
 function settingsDirty(){return Object.keys(settingsChanges).length>0;}
 let settingsSavedTimer;
@@ -430,12 +438,12 @@ function credentialCard(data){
 let repairSettingsTimer;
 function repairCard(){
  const card=node('div',undefined,'resume-card'),toggle=node('button'),pause=node('button'),status=node('p'),list=node('ul');
- status.setAttribute('role','status');card.append(node('p','Queue scanner and fill defects for one local repair worker. Workers edit the review worktree; finished work requires user review.'),toggle,pause,status,list);
- async function refresh(changes){clearTimeout(repairSettingsTimer);try{const value=changes?await post('repairs',changes):await request('/api/repairs',{headers:{'X-Dashboard-Token':token}});if(!card.isConnected)return;
+ status.setAttribute('role','status');card.append(node('p','Enabled repairs dispatch automatically when runner guards allow. Finished work awaits supervisor code review and integration.'),toggle,pause,status,list);
+ async function refresh(changes){clearTimeout(repairSettingsTimer);if(document.hidden&&!changes){if(card.isConnected)repairSettingsTimer=setTimeout(()=>refresh(),5000);return;}try{const value=changes?await post('repairs',changes):await request('/api/repairs',{headers:{'X-Dashboard-Token':token}});if(!card.isConnected)return;
   toggle.textContent=value.enabled?'Disable automatic repairs':'Enable automatic repairs';toggle.onclick=()=>refresh({enabled:!value.enabled});pause.hidden=!value.enabled;pause.textContent=value.paused?'Resume repairs':'Pause repairs';pause.onclick=()=>refresh({paused:!value.paused});
-  status.textContent=!value.enabled?'Disabled. Only fresh captures after enabling can queue work.':value.paused?'Paused; queued jobs are retained.':'Enabled; waiting for fresh Analyze or automatic captures.';
-  list.replaceChildren(...value.jobs.map(job=>{const row=node('li',job.status+' \u00b7 '+job.message);if(job.retireable){const dismiss=node('button','\u00d7');dismiss.title='Dismiss reviewed terminal repair';dismiss.setAttribute('aria-label',dismiss.title);dismiss.onclick=async()=>{try{await post('repairs/retire',{id:job.id});await refresh();}catch{status.textContent='Dismissal requires a terminal runner review and no active runner guards.';}};row.append(dismiss);}return row;}));repairSettingsTimer=setTimeout(()=>refresh(),5000);
- }catch{status.textContent='Repair status unavailable.';}}
+  status.textContent=!value.enabled?'Disabled. Only fresh captures after enabling can queue work.':value.paused?'Paused; queued jobs are retained. Use Resume repairs to allow dispatch.':'Enabled; eligible queued repairs dispatch automatically. Review and integration remain supervisor-owned.';
+  list.replaceChildren(...value.jobs.map(job=>{const row=node('li',job.status+' \u00b7 '+job.message);if(job.action==='analyze')row.append(node('span',' Use Analyze page again in the extension on the affected page.'));if(job.retireable){const dismiss=node('button','\u00d7');dismiss.title='Dismiss reviewed terminal repair';dismiss.setAttribute('aria-label',dismiss.title);dismiss.onclick=async()=>{try{await post('repairs/retire',{id:job.id});await refresh();}catch{status.textContent='Dismissal requires a terminal runner review and no active runner guards.';}};row.append(dismiss);}return row;}));
+ }catch{status.textContent='Repair status unavailable. Retrying while visible.';}finally{if(card.isConnected)repairSettingsTimer=setTimeout(()=>refresh(),5000);}}
  setTimeout(()=>refresh(),0);return card;
 }
 function renderSettings(data){clearTimeout(repairSettingsTimer);settingsData=data;settingsInputs.clear();settingsErrors.clear();document.getElementById('settings-nav').replaceChildren();document.getElementById('settings-forms').replaceChildren();document.getElementById('settings-note').textContent=data.restart_required_note;
@@ -576,5 +584,5 @@ if(!document.getElementById('panel-settings').hidden)loadSettings();
 restoreSearch();setInterval(()=>{if(searchBusy||lastSearch)updateSearchTime();if(statusOffline){offlineStatus();if(Date.now()>=nextStatusAt)loadStatus();}},1000);
 setInterval(loadStatus,5000);
 loadChromeRun();setInterval(()=>{if(chromeRunActive)loadChromeRun();},3000);
-render(__INITIAL__);setInterval(load,60000);setInterval(loadManual,30000);setInterval(loadFailed,30000);setInterval(loadApplied,30000);reloadData();
+render(__INITIAL__);setInterval(checkQueueRevision,1000);setInterval(load,60000);setInterval(loadManual,30000);setInterval(loadFailed,30000);setInterval(loadApplied,30000);reloadData();
 </script></body></html>'''
