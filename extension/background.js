@@ -91,9 +91,12 @@ async function fillMatchedSkills(result) {
 let reporting = Promise.resolve();
 
 function report(result, valid) {
+  const stopped=()=>result.tabId && (closedTabs.has(result.tabId)||cancelledTabs.has(result.tabId));
   reporting = reporting.catch(() => {}).then(async () => {
+  if(stopped())return result;
   const {tabResults = {}, applicationAnswers={}} = await chrome.storage.session.get(["tabResults","applicationAnswers"]);
-  if(result.tabId && closedTabs.has(result.tabId))return result;
+  if(stopped())return result;
+  if(stopped())return result;
   if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   if(result.url){
     const key=String(result.matched?.application_id || result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]);
@@ -101,9 +104,11 @@ function report(result, valid) {
     for(const answer of result.completed || [])if(answer.source==="AI"){const old=saved.findIndex(item=>item.label===answer.label);if(old>=0)saved.splice(old,1);saved.push({...answer,url:result.url});}
     result.aiAnswers=saved;applicationAnswers[key]=saved;await chrome.storage.session.set({applicationAnswers});
   }
+  if(stopped())return result;
   if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   if (result.tabId) tabResults[result.tabId] = result;
   await chrome.storage.session.set({lastResult: result, tabResults});
+  if(stopped())return result;
   if(valid && !await valid())throw Error('Application changed. Analyze page again.');
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
   return result;
@@ -783,6 +788,16 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
+  if(message.type==='sidebar-layout'){
+    const bound=Number(new URL(sender.url).searchParams.get('tabId'));
+    if(bound && bound!==message.tabId)return;
+    (async()=>{
+      const id=bound || message.tabId || sender.tab?.id;
+      if(!id)return {preferred:(await chrome.storage.local.get('sidebarLayout')).sidebarLayout||'overlay',effective:'overlay'};
+      const [frame]=await chrome.scripting.executeScript({target:{tabId:id},func:mode=>globalThis.autoApplyContent?.sidebarLayout(mode),args:[message.mode||null]});
+      return frame.result;
+    })().then(respond,error=>respond({error:error.message}));return true;
+  }
   if (message.type === "run-status-refresh") {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
@@ -812,16 +827,55 @@ chrome.commands.onCommand.addListener(command => {
 });
 
 // Alarms wake a suspended MV3 worker; the short timer advances an active run promptly.
-let batchBusy = false, runEpoch = 0;
+let batchBusy = false, runEpoch = 0, ownedRun;
+let runSaving=Promise.resolve(), cancelSending;
+// Load ownership before starting a tick; onRemoved can synchronously invalidate
+// a known owner, including while a document or backend request is loading.
+const runReady=chrome.storage.session.get('chromeRun').then(({chromeRun})=>{ownedRun ||= chromeRun;});
 const staleRun = epoch => epoch !== runEpoch;
-async function saveRun(run, changePause = false, epoch) {
-  if(epoch!==undefined && staleRun(epoch))return;
-  if (changePause) await chrome.storage.session.set({chromeRunPaused: Boolean(run.paused)});
-  const {chromeRunPaused = false} = await chrome.storage.session.get("chromeRunPaused");
-  if(epoch!==undefined && staleRun(epoch))return;
-  run.paused = chromeRunPaused;
-  await chrome.storage.session.set({chromeRun: run});
-  await chrome.runtime.sendMessage({type: "run-status", run}).catch(() => {});
+function saveRun(run, changePause = false, epoch) {
+  if(epoch!==undefined && staleRun(epoch))return Promise.resolve();
+  ownedRun=structuredClone(run);
+  const snapshot=structuredClone(run);
+  runSaving=runSaving.catch(()=>{}).then(async()=>{
+    if(epoch!==undefined && staleRun(epoch))return;
+    if(changePause)await chrome.storage.session.set({chromeRunPaused:Boolean(snapshot.paused)});
+    const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
+    if(epoch!==undefined && staleRun(epoch))return;
+    snapshot.paused=chromeRunPaused;
+    await chrome.storage.session.set({chromeRun:snapshot});
+    if(epoch!==undefined && staleRun(epoch))return;
+    await chrome.runtime.sendMessage({type:'run-status',run:snapshot}).catch(()=>{});
+  });
+  return runSaving;
+}
+async function flushRunCancel() {
+  if(cancelSending)return cancelSending;
+  cancelSending=(async()=>{
+    const {pendingRunCancel}=await chrome.storage.session.get('pendingRunCancel');
+    if(!pendingRunCancel)return;
+    try {await api('/ext/run/cancel',pendingRunCancel);}
+    catch(error){
+      // A newer backend run must never be cancelled by an old retry.
+      const status=await api('/ext/run/status');
+      if(status.items?.some(item=>item.run_id===pendingRunCancel.run_id && ['pending','opened'].includes(item.state)))throw error;
+    }
+    const {pendingRunCancel:latest}=await chrome.storage.session.get('pendingRunCancel');
+    if(latest?.run_id===pendingRunCancel.run_id)await chrome.storage.session.remove('pendingRunCancel');
+  })().finally(()=>{cancelSending=undefined;});
+  return cancelSending;
+}
+function cancelOwnedRun(run) {
+  const epoch=++runEpoch; // before ANY await, including storage and tab cleanup
+  cancelWait(run.tabId);activeResults.delete(run.tabId);
+  const stopping=stopRunWork(run.tabId);
+  const stopped={...run,active:false,paused:false,error:''};
+  for(const key of ['current','tabId','result','started','progressSent','phase'])delete stopped[key];
+  ownedRun=stopped;
+  // One durable tombstone survives worker restarts and failed HTTP responses.
+  const persisted=chrome.storage.session.set({chromeRun:stopped,chromeRunPaused:false,pendingRunCancel:{run_id:run.current.run_id}});
+  const saved=saveRun(stopped,true,epoch);
+  return persisted.then(()=>Promise.all([saved,flushRunCancel(),stopping]));
 }
 async function refreshRunStatus() {
   const epoch=runEpoch;
@@ -892,8 +946,11 @@ export async function runTick() {
   if (batchBusy || running || skillsRunning || autofillTasks || analysisTasks.size || analysisBlockers || writingTasks.size || manualActionTabs.size) return;
   batchBusy = true;
   let epoch=runEpoch;
+  await runReady;
   let {chromeRun: run = {paused: false, index: 0, total: 0}} = await chrome.storage.session.get('chromeRun');
   try {
+    await flushRunCancel();
+    if(staleRun(epoch))return;
     const {chromeRunPaused = false} = await chrome.storage.session.get('chromeRunPaused');
     if (chromeRunPaused) return;
     const status=await runStatus(run,epoch);
@@ -914,15 +971,14 @@ export async function runTick() {
         const tab=tabs.find(t=>autofillTabs[t.id]?.matched?.application_id===item.application_id && autofillTabs[t.id]?.matched?.run_id===item.run_id)
           || tabs.find(t=>(t.pendingUrl||t.url)===item.url);
         if(tab){run.tabId=tab.id;run.started=true;}
-        else {run.result={application_id:item.application_id,run_id:item.run_id,state:'skipped',detail:'Application tab no longer available'};}
+        else {await cancelOwnedRun(run);return;}
       }
       await saveRun(run,false,epoch);
     }
     if(staleRun(epoch))return;
     if(run.tabId) {
       try{await chrome.tabs.get(run.tabId);}catch{
-        await stopRunWork(run.tabId);
-        run.result={application_id:run.current.application_id,run_id:run.current.run_id,state:'skipped',detail:'Application tab closed'};
+        await cancelOwnedRun(run);return;
       }
     }
     if(run.result) {
@@ -936,7 +992,9 @@ export async function runTick() {
     if (!run.tabId) {
       const tab=await chrome.tabs.create({url:run.current.url,active:true});
       if(staleRun(epoch)){await stopRunWork(tab.id);await chrome.tabs.remove(tab.id).catch(()=>{});return;}
-      run.tabId=tab.id;run.phase='loading';await saveRun(run,false,epoch);
+      run.tabId=tab.id;run.phase='loading';ownedRun=run;
+      if(closedTabs.has(tab.id)){await cancelOwnedRun(run);return;}
+      await saveRun(run,false,epoch);
     }
     if(!run.started) {
       await waitForTab(run.tabId,epoch);
@@ -958,7 +1016,7 @@ export async function runTick() {
     // Restart only the read-only form poll, never an already completed fill.
     if(result?.waiting && !formWaits.has(run.tabId) && !cancelledTabs.has(run.tabId))pollForForm(result);
     run.phase=(result?.error || result?.trackingError || result?.summary?.errors?.length || result?.state==='failed')?'failed':result?.waiting?'needs_input':result?.busy?'filling':(result?.state==='needs_input' || result?.pending?.length || result?.writing?.length || result?.coverQuestions?.length)?'needs_input':'filled';
-    const detail=(result?.error || result?.trackingError || result?.summary?.errors?.join('; ') || result?.detail || result?.progress || 'Review this application. Close the tab or Skip to continue.').slice(0,2000);
+    const detail=(result?.error || result?.trackingError || result?.summary?.errors?.join('; ') || result?.detail || result?.progress || 'Review this application. Skip to continue; closing the tab ends the run.').slice(0,2000);
     const progress={application_id:run.current.application_id,run_id:run.current.run_id,state:['filling','loading'].includes(run.phase)?'needs_input':run.phase,detail};
     const signature=JSON.stringify(progress);
     if(signature!==run.progressSent){await api('/ext/run/result',progress);if(staleRun(epoch))return;run.progressSent=signature;}
@@ -984,14 +1042,13 @@ chrome.tabs.onActivated.addListener(async ({tabId}) => {
   if (tabResults[tabId]) await chrome.storage.session.set({lastResult: tabResults[tabId]});
 });
 chrome.tabs.onRemoved.addListener(async tabId => {
-  const observedEpoch=runEpoch;
   closedTabs.add(tabId);cancelWait(tabId);activeResults.delete(tabId);
-  const {chromeRun:owned}=await chrome.storage.session.get('chromeRun');
-  if(!staleRun(observedEpoch) && owned?.tabId===tabId && owned.current) {
-    const epoch=++runEpoch;
-    await stopRunWork(tabId);
-    owned.result={application_id:owned.current.application_id,run_id:owned.current.run_id,state:'skipped',detail:'Application tab closed'};
-    await saveRun(owned,false,epoch);
+  // Ownership is kept in memory before saving/loading the application. On a
+  // restarted worker runReady restores it before any tick can claim work.
+  if(ownedRun?.tabId===tabId && ownedRun.current)await cancelOwnedRun(ownedRun).catch(console.error);
+  else {
+    await runReady;
+    if(ownedRun?.tabId===tabId && ownedRun.current)await cancelOwnedRun(ownedRun).catch(console.error);
   }
   const {tabResults = {}} = await chrome.storage.session.get("tabResults");
   const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
@@ -1010,7 +1067,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if(message.type!=='run-pause') {
       // Advance the epoch before any await; in-flight fills cannot publish or open another tab.
       const current=run.current;
-      if(message.type==='run-cancel'){run.paused=true;await saveRun(run,true,commandEpoch);}
+      if(message.type==='run-cancel' && run.current){await cancelOwnedRun(run);return ownedRun;}
       await stopRunWork(run.tabId);
       if(staleRun(commandEpoch))return run;
       await api(message.type==='run-cancel'?'/ext/run/cancel':'/ext/run/skip', message.type==='run-cancel'?{run_id:current?.run_id}:{application_id:current?.application_id,run_id:current?.run_id});
@@ -1036,6 +1093,7 @@ const confirmingTabs=new Set();
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
   const tabId=sender.tab.id;
+  if(message.type==='sidebar-layout-state' && sender.frameId===0){chrome.runtime.sendMessage({...message,tabId}).catch(()=>{});return;}
   if(message.type==='sidebar-ready' && sender.frameId===0)restoreSidebar(tabId).catch(console.error);
   if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}

@@ -22,6 +22,13 @@ let messages = [], aiBusy = false, chatBusy = false, downloadURL;
 let chatApplication, lastDraft, chatURL;
 let chatHistories = (await chrome.storage.session.get('chatHistories')).chatHistories || {};
 const send = message => chrome.runtime.sendMessage({...message,...(tabId?{tabId}:{})});
+function renderLayout(state={}){
+  for(const mode of ['overlay','docked'])element('layout-'+mode).setAttribute('aria-pressed',String((state.effective||'overlay')===mode));
+  element('layout-docked').title=state.preferred==='docked' && state.effective!=='docked'?'Docked selected; overlay used while minimized or below 900px':'Dock beside application page';
+}
+for(const mode of ['overlay','docked'])element('layout-'+mode).onclick=()=>send({type:'sidebar-layout',mode}).then(renderLayout).catch(showError);
+send({type:'sidebar-layout'}).then(renderLayout).catch(()=>{});
+chrome.runtime.onMessage.addListener((message,sender)=>{if(message.type==='sidebar-layout-state' && (message.tabId||sender.tab?.id)===tabId)renderLayout(message);});
 const question = () => element("question").value.trim();
 const applicationKey = () => String(result?.matched?.application_id || result?.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] || tabId || "page");
 function loadChat(url=result?.url || chatURL){

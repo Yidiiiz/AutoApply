@@ -47,7 +47,38 @@
     catch (error) { trace(kind, 'error', null, {error: error.message, stack: error.stack}); throw error; }
     finally { await endTrace(run); }
   }
-  let sidebarHost;
+  let sidebarHost, dockStyle, dockRoot, layoutPreference='overlay';
+  const dockAttribute='data-autoapply-dock-t076';
+  function syncSidebarLayout() {
+    const root=document.documentElement;
+    const docked=layoutPreference==='docked' && innerWidth>=900 && sidebarHost?.isConnected && sidebarHost.dataset.state==='open';
+    if(dockRoot && (dockRoot!==root || !docked))dockRoot.removeAttribute(dockAttribute);
+    if(!docked){dockStyle?.remove();dockRoot=undefined;}
+    else {
+      dockStyle ||= document.createElement('style');
+      // Cascade only: employer inline values AND priorities are never written.
+      // Viewport units avoid the panel reserving space against its own width.
+      dockStyle.textContent=`html[${dockAttribute}]{width:calc(100vw - 400px)!important;max-width:calc(100vw - 400px)!important;}`;
+      root.setAttribute(dockAttribute,'');dockRoot=root;
+      if(!dockStyle.isConnected)root.append(dockStyle);
+    }
+    const state={preferred:layoutPreference,effective:docked?'docked':'overlay'};
+    if(sidebarHost)sidebarHost.dataset.layout=state.effective;
+    chrome.runtime.sendMessage({type:'sidebar-layout-state',...state}).catch(()=>{});
+    return state;
+  }
+  async function sidebarLayout(mode) {
+    if(['overlay','docked'].includes(mode)){
+      layoutPreference=mode;
+      await chrome.storage.local.set({sidebarLayout:mode});
+    }else layoutPreference=(await chrome.storage.local.get('sidebarLayout')).sidebarLayout || 'overlay';
+    return syncSidebarLayout();
+  }
+  if(window===window.top){
+    chrome.storage.local.get('sidebarLayout').then(saved=>{layoutPreference=saved.sidebarLayout||'overlay';syncSidebarLayout();});
+    chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local' && changes.sidebarLayout){layoutPreference=changes.sidebarLayout.newValue||'overlay';syncSidebarLayout();}});
+    window.addEventListener('resize',syncSidebarLayout);
+  }
   let sidebarObserver, sidebarRoot, sidebarRepairTimer, sidebarRepairWindow=0, sidebarRepairs=0;
   const sidebarVisible=()=>sidebarHost && ['open','minimized'].includes(sidebarHost.dataset.state);
   function observeSidebarRoot() {
@@ -65,6 +96,7 @@
     sidebarObserver ||= new MutationObserver(()=>{
       if(!sidebarVisible())return;
       if(sidebarRoot!==document.documentElement)observeSidebarRoot();
+      syncSidebarLayout();
       if(sidebarHost.isConnected || sidebarRepairTimer!==undefined)return;
       // Yield/coalesce hydration changes; read the latest state when repairing.
       sidebarRepairTimer=setTimeout(()=>{
@@ -74,8 +106,8 @@
         if(now-sidebarRepairWindow>1000){sidebarRepairWindow=now;sidebarRepairs=0;}
         // A page actively removing our host must not create an endless fight.
         // A later explicit sidebar intent rearms recovery.
-        if(++sidebarRepairs>5){sidebarObserver.disconnect();return;}
-        document.documentElement.append(sidebarHost);
+        if(++sidebarRepairs>5){sidebarObserver.disconnect();syncSidebarLayout();return;}
+        document.documentElement.append(sidebarHost);syncSidebarLayout();
       },0);
     });
     sidebarRepairTimer=undefined;
@@ -123,7 +155,7 @@
     sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(400px,100vw)','important');
     sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
     sidebarHost.shadowRoot.querySelector('.collapsed').hidden=state!=='minimized';
-    watchSidebar();
+    syncSidebarLayout();watchSidebar();
     return state;
   }
   function valueOf({element,members,field,savedDate}) {
@@ -2199,7 +2231,7 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
   if(globalThis.autoApplyCredentials){
     for(const key of ['scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
       const original=globalThis.autoApplyContent[key];

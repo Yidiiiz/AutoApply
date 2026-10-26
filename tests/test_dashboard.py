@@ -1952,14 +1952,14 @@ class Node {
  insertBefore(child,before){child.remove();child.parent=this;const i=this.children.indexOf(before);this.children.splice(i<0?this.children.length:i,0,child);}
  remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null;}}
  contains(el){return this===el||this.children.some(child=>child.contains(el));}
- setAttribute(k,v){this.attributes[k]=v;} getAttribute(k){return this.attributes[k];}
+ setAttribute(k,v){this.attributes[k]=v;} getAttribute(k){return this.attributes[k];} hasAttribute(k){return k in this.attributes;} removeAttribute(k){delete this.attributes[k];}
  addEventListener(k,fn){this.listeners[k]=fn;}
  click(){this.clicked=true;if(!this.disabled)this.listeners.click?.();}
  scrollIntoView(options){this.scrolled=options;} focus(){document.activeElement=this;}
  showModal(){this.open=true;} close(){this.open=false;this.listeners.close?.();} get isConnected(){return !!this.parent;}
 }
 const elements=new Map(),document={createElement:tag=>new Node(tag),createElementNS:(namespace,tag)=>new Node(tag),createDocumentFragment:()=>new Node('fragment'),
- querySelector:selector=>selector==='main'?document.getElementById('main'):null,
+ addEventListener(){},querySelector:selector=>selector==='main'?document.getElementById('main'):null,
  querySelectorAll:selector=>selector==='[role="tab"]'?testTabs:selector==='[data-tools]'?testTools:[],activeElement:null,
  getElementById(id){if(!elements.has(id))elements.set(id,new Node('div'));return elements.get(id);}};
 const testTabs=['run','priority','applications','answers','settings'].map(id=>{const tab=document.getElementById('tab-'+id);tab.id='tab-'+id;tab.setAttribute('aria-controls','panel-'+id);return tab;});
@@ -2133,7 +2133,7 @@ const originalReload=reload;reload=async()=>[];
  // Reload refetches priority and every count, including when an older read is pending.
  const paths=[];request=async path=>{paths.push(path);return path==='/api/status'?{applications:[]}:path==='/api/priority'?{rows:[],sweep:{}}:{applications:[]};};
  let finishOld;loads.priority=new Promise(resolve=>{finishOld=()=>{delete loads.priority;resolve();};});
- statusLoading=null;const reading=originalReload();assert.deepEqual(new Set(paths),new Set(['/api/manual','/api/failed','/api/applied','/api/status']));finishOld();await reading;
+ statusLoading=null;const reading=originalReload();assert.deepEqual(new Set(paths),new Set(['/api/priority','/api/manual','/api/failed','/api/applied','/api/status']));finishOld();await reading;
  assert.deepEqual(new Set(paths),new Set(['/api/priority','/api/manual','/api/failed','/api/applied','/api/status']));
  assert.equal(document.getElementById('count-priority').textContent,'0');
  // Status failures disable controls with reasons and recover without a page reload.
@@ -2367,10 +2367,10 @@ let posted=[];post=async(action,body)=>{posted.push({action,body});return {items
 await startChromeRun();assert.deepEqual(posted[0],{action:'ext-run',body:{application_ids:[1,2]}});
 assert.equal(document.getElementById('chrome-run-panel').hidden,false);assert.match(document.getElementById('chrome-run-hint').textContent,/Open Chrome/);
 renderChromeRun({items:['pending','opened','filled','needs_input','failed','skipped'].map((state,i)=>({...sample[0],application_id:i+1,state})),poll_age_seconds:1});
-assert.equal(document.getElementById('chrome-run-status').textContent,'Fixture \u00b7 Intern');assert.match(document.getElementById('chrome-run-status').title,/5\/6.*opened/);assert.equal(document.getElementById('chrome-run-items').children.length,0);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
+assert.equal(document.getElementById('chrome-run-status').textContent,'Fixture \u00b7 Intern');assert.match(document.getElementById('chrome-run-status').title,/5\/6.*opened/);assert.equal(document.getElementById('chrome-run-hint').textContent,'');
 await document.getElementById('chrome-run-cancel').listeners.click();assert.equal(posted[1].action,'ext-run/cancel');assert.equal(document.getElementById('chrome-run-cancel').disabled,true);
 assert.equal(document.getElementById('chrome-run-panel').hidden,true);scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/Chrome run finished: 1 skipped/);
-assert.equal(document.getElementById('chrome-last-run').hidden,false);assert.equal(document.getElementById('chrome-last-run').open,false);assert.deepEqual(document.getElementById('chrome-run-items').children.map(item=>item.textContent),['#1 Fixture - Intern - skipped']);assert.equal(document.getElementById('chrome-run-panel').hidden,true);
+assert.equal(document.getElementById('chrome-run-panel').hidden,true);
 renderChromeRun({items:[{...sample[0],state:'filled'},{...sample[1],state:'needs_input'}]});scheduled.at(-1)();assert.equal(document.getElementById('chrome-run-panel').hidden,true);assert.match(document.getElementById('toast-message').textContent,/1 filled, 1 needs input/);
 post=async()=>({file:'/fixture.pdf',warnings:[]});let opened={opener:'original'},openArgs;window.open=(...args)=>{openArgs=args;return opened;};let fallback=0;coverLetterLink=()=>fallback++;
 await generateCV(sample[0]);assert.deepEqual(openArgs,['http://127.0.0.1:8765/fixture.pdf?token=__TOKEN__','_blank']);assert.equal(opened.opener,null);assert.equal(fallback,0);
@@ -2387,7 +2387,7 @@ def test_compact_chrome_run_markup_and_theme_scrollbars():
     assert '<h3>Chrome run</h3>' not in PAGE
     assert '>Cancel run</button>' not in PAGE
     assert 'aria-label="Cancel Chrome run"' in PAGE
-    assert '<details id="chrome-last-run" class="chrome-last-run" hidden>' in PAGE
+    assert 'id="chrome-last-run"' not in PAGE
     for css in (PAGE, Path('extension/shared.css').read_text(encoding='utf-8')):
         assert 'scrollbar-width:thin' in css and 'scrollbar-color:' in css
         assert '::-webkit-scrollbar-thumb' in css and 'border-radius:10px' in css

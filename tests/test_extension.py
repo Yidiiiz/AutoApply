@@ -1080,7 +1080,7 @@ def test_preselected_country_and_replaced_upload(loaded_extension, extension_ser
     assert page.evaluate('[submitClicks, submissions]') == [0, 0]
 
 
-def test_chrome_run_holds_review_until_close_or_skip(loaded_extension, extension_server):
+def test_chrome_run_holds_review_skip_advances_close_cancels(loaded_extension, extension_server):
     context, worker, extension_id = loaded_extension
     server, requests = extension_server
     worker.evaluate("() => chrome.storage.session.set({chromeRunPaused: true, chromeRun: {paused: true}})")
@@ -1099,17 +1099,20 @@ def test_chrome_run_holds_review_until_close_or_skip(loaded_extension, extension
     assert not any(page.url == server + '/batch-two.html' for page in context.pages)
     expect(first.locator('#name')).to_have_value('User edit')
     assert first.evaluate('[submitClicks,submissions]') == [0,0]
-    first.close()
-    worker.evaluate('()=>autoApplyRunTick()')
-    worker.evaluate('()=>autoApplyRunTick()')
-    second = next(page for page in context.pages if page.url == server + '/batch-two.html')
-    expect(second.locator('#name')).to_have_value('Fixture Student')
     panel = context.new_page()
     panel.goto(f"chrome-extension://{extension_id}/sidepanel.html")
-    panel.locator('#run-skip').click()
+    with context.expect_page() as opened:
+        panel.locator('#run-skip').click()
+    second = opened.value
+    second.wait_for_url(server + '/batch-two.html')
+    expect(second.locator('#name')).to_have_value('Fixture Student')
+    second.close()
+    expect(panel.locator('#run-controls')).to_be_hidden(timeout=5000)
     worker.evaluate('()=>autoApplyRunTick()')
     assert not any(path == '/ext/applied' for path, _, _ in requests)
-    assert [payload['application_id'] for path, _, payload in requests if path == '/ext/run/result' and payload['state']=='skipped'] == [1]
+    assert [payload['application_id'] for path, _, payload in requests if path == '/ext/run/skip'] == [1]
+    assert any(path == '/ext/run/cancel' for path, _, _ in requests)
+
 
 
 @pytest.mark.parametrize("batch", [False, True])
@@ -2529,8 +2532,10 @@ def test_t049_run_controls_during_inflight_fill(loaded_extension,extension_serve
     expect(panel.locator('#run-skip')).to_be_disabled()
     fixture_delay(worker,release=['write'])
     if action=='skip':
-        expect(panel.locator('#chrome-run-status')).to_contain_text('2/2',timeout=30000)
-    expect(panel.locator('#run-controls')).to_be_hidden(timeout=30000)
+        expect(panel.locator('#chrome-run-status')).to_have_text('2/2 \u00b7 Review application',timeout=30000)
+        expect(panel.locator('#run-controls')).to_be_visible()
+    else:
+        expect(panel.locator('#run-controls')).to_be_hidden(timeout=30000)
     results=[data for p,_,data in requests if p=='/ext/run/result']
     assert [data['application_id'] for data in results]==([2] if action=='skip' else [])
     pages=[p for p in context.pages if p.url in {server+'/batch-one.html',server+'/batch-two.html'}]
@@ -2538,6 +2543,11 @@ def test_t049_run_controls_during_inflight_fill(loaded_extension,extension_serve
     assert all(p.evaluate('[submitClicks,submissions]')==[0,0] for p in pages)
     assert old_page.evaluate('nextClicks')==0
     expect(old_page.locator('#writing')).to_have_value('')
+    if action=='skip':
+        next(page for page in pages if page.url==server+'/batch-two.html').close()
+        expect(panel.locator('#run-controls')).to_be_hidden(timeout=5000)
+        worker.evaluate('()=>autoApplyRunTick()')
+        assert not any(page.url==server+'/batch-two.html' for page in context.pages)
 
 
 def test_t049_skill_overrides_survive_main_autofill(loaded_extension,extension_server):
