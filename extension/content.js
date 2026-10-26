@@ -329,13 +329,19 @@
 
   // A hidden boolean alone cannot distinguish unanswered from an offered No.
   // Require both scoped visible offers and an explicit accessible selection state.
+  function noSubmitProxyChoice(choice){
+    // Omitted/invalid button types default to submit. The runtime form property
+    // also detects form= associations outside the button's ancestors.
+    return !choice.matches('button') || choice.type==='button' ||
+      choice.type==='submit' && !(choice.form instanceof HTMLFormElement);
+  }
   function yesNoProxy(element){
     if(!element?.matches('input[type="checkbox"]') || element.disabled || element.readOnly)return null;
     const wrapper=element.closest('.ashby-application-form-input-yesno');
     if(!wrapper || !visible(wrapper) || wrapper.querySelectorAll('input').length!==1)return null;
-    const choices=Array.from(wrapper.querySelectorAll('button[type="button"],[role="radio"],[role="button"]')).filter(el=>visible(el) && !el.matches('a[href],input,button:not([type="button"])'));
+    const choices=Array.from(wrapper.querySelectorAll('button,[role="radio"],[role="button"]')).filter(el=>visible(el) && !el.matches('a[href],input'));
     if(choices.length!==2 || !choices.every(el=>/^(yes|no)$/i.test(text(el))) || new Set(choices.map(el=>normal(text(el)))).size!==2 ||
-       choices.some(el=>el.matches(':disabled,[aria-disabled="true"]') || !['aria-checked','aria-pressed'].some(a=>/^(true|false)$/.test(el.getAttribute(a)||''))))return null;
+       choices.some(el=>!noSubmitProxyChoice(el) || el.matches(':disabled,[aria-disabled="true"]') || !['aria-checked','aria-pressed'].some(a=>/^(true|false)$/.test(el.getAttribute(a)||''))))return null;
     const selected=el=>el.getAttribute('aria-checked')==='true'||el.getAttribute('aria-pressed')==='true';
     const chosen=choices.filter(selected);
     return {wrapper,choices,selected,value:chosen.length===1 && element.checked===(normal(text(chosen[0]))==='yes')?text(chosen[0]):null};
@@ -797,7 +803,7 @@
     const repeated = new Set();
     const keys = new Set();
     for (const element of controls) {
-      if (["checkbox","radio"].includes(element.type) && !native.closest(element,'form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]')) continue;
+      if (["checkbox","radio"].includes(element.type) && !native.closest(element,'form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]') && !yesNoProxy(element)) continue;
       if (grouped.has(element) || /captcha|honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
       let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') || element.getAttribute("data-automation-id") === "multiSelectInput" || isPrompt(element) ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : element.type || "text";
@@ -1251,7 +1257,7 @@
               Array.from(current.element.selectedOptions).some(selected=>!selected.disabled && text(selected)===text(option)))) {unresolved(false);continue;}
         } else if (yesNoProxy(element)) {
           const proxy=yesNoProxy(element),choice=proxy.choices.find(el=>normal(text(el))===normal(answer.value));
-          if(!choice){unresolved(false);continue;}
+          if(!choice || !noSubmitProxyChoice(choice)){unresolved(false);continue;}
           checkRepair();choice.click();
           if(!await waitFor(()=>normal(yesNoProxy(currentControl(element))?.value)===normal(answer.value),500)) {unresolved(false);continue;}
           await new Promise(resolve=>setTimeout(resolve,150));

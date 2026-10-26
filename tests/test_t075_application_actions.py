@@ -119,6 +119,9 @@ def test_mv3_decorations_links_and_real_proxy_model(application):
     assert {'First name','Website','Prior Government Employment?'} <= {f['label'] for f in private['scan']['fields']}
     field=next(f for f in private['scan']['fields'] if f['label']=='Prior Government Employment?')
     assert field['kind']=='radio' and field['options']==['Yes','No'] and not field['answered']
+    assert sum(f['label']=='Prior Government Employment?' for f in private['scan']['fields'])==1
+    assert page.locator('.ashby-application-form-input-yesno button').evaluate_all(
+        "buttons=>buttons.every(b=>!b.hasAttribute('type') && !b.hasAttribute('role') && b.type==='submit' && b.form===null)")
     # Exercise real background -> HTTP handler -> resolver -> content fill.
     page.locator('#first').fill('Manual name')
     result=worker.evaluate('id=>autoApplyAutofill(id)',tab)
@@ -128,7 +131,82 @@ def test_mv3_decorations_links_and_real_proxy_model(application):
         assert page.evaluate('key=>model[key]',key)==value or key=='first'
     assert page.evaluate('[model.government,model.governmentSubmitted]')==['No',False]
     expect(page.get_by_role('button',name='No',exact=True)).to_have_attribute('aria-pressed','true')
+    expect(page.get_by_role('button',name='Yes',exact=True)).to_have_attribute('aria-pressed','false')
+    assert not page.locator('#question_28381884003').is_checked()
     assert any(f['label']=='Prior Government Employment?' and f['value']=='No' for f in result['completed'])
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('association,button_type', [
+    ('ancestor',None), ('external',None), ('ancestor','submit'),
+    ('external','submit'), ('ancestor','invalid'), ('external','image'),
+])
+def test_mv3_proxy_no_submit_guard(application,association,button_type):
+    page,worker,tab,*_=application
+    # Save a valid inventory, then change the runtime form association before fill.
+    scan=isolated(worker,tab,'scan')
+    field=next(f for f in scan['fields'] if f['label']=='Prior Government Employment?')
+    page.evaluate("""({association,button_type})=>{
+      const wrapper=document.querySelector('.ashby-application-form-input-yesno');
+      window.proxyClicks=0;wrapper.addEventListener('click',()=>proxyClicks++);
+      const form=document.createElement('form');form.id='actual-form';application.append(form);
+      if(association==='ancestor')form.append(wrapper);
+      for(const button of wrapper.querySelectorAll('button')){
+        if(association==='external')button.setAttribute('form',form.id);
+        if(button_type!==null)button.setAttribute('type',button_type);
+      }
+    }""",dict(association=association,button_type=button_type))
+    assert page.locator('.ashby-application-form-input-yesno button').evaluate_all(
+        "buttons=>buttons.every(b=>b.form instanceof HTMLFormElement && b.type==='submit')")
+    result=isolated(worker,tab,'fill',[dict(key=field['key'],status='RESOLVED',value='No')])
+    assert not result['completed'] and result['filled']==0
+    assert page.evaluate('[proxyClicks,submissions,model.government??null]')==[0,0,None]
+    assert not page.locator('#question_28381884003').is_checked()
+    # Fresh inventory must also abstain from offering this as a supported proxy.
+    assert not any(f['label']=='Prior Government Employment?' for f in isolated(worker,tab,'scan')['fields'])
+
+
+@pytest.mark.browser
+def test_mv3_proxy_explicit_button_inside_form(application):
+    page,worker,tab,*_=application
+    page.evaluate("""()=>{
+      const wrapper=document.querySelector('.ashby-application-form-input-yesno');
+      const form=document.createElement('form');application.append(form);form.append(wrapper);
+      for(const button of wrapper.querySelectorAll('button'))button.type='button';
+    }""")
+    field=next(f for f in isolated(worker,tab,'scan')['fields'] if f['label']=='Prior Government Employment?')
+    result=isolated(worker,tab,'fill',[dict(key=field['key'],status='RESOLVED',value='No')])
+    assert result['filled']==1 and result['completed'][0]['value']=='No'
+    assert page.evaluate('[model.government,model.governmentSubmitted,submissions]')==['No',False,0]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('behavior', ['inert','native-mismatch','native-only','reverted','late-form','class-only'])
+def test_mv3_proxy_requires_settled_positive_no_evidence(application,behavior):
+    page,worker,tab,*_=application
+    field=next(f for f in isolated(worker,tab,'scan')['fields'] if f['label']=='Prior Government Employment?')
+    page.evaluate("""behavior=>{
+      const wrapper=document.querySelector('.ashby-application-form-input-yesno');
+      const buttons=wrapper.querySelectorAll('button');
+      for(const button of buttons){
+        const update=button.onclick;
+        if(behavior==='class-only')button.removeAttribute('aria-pressed');
+        button.onclick=()=>{
+          if(behavior==='native-mismatch'){button.setAttribute('aria-pressed','true');wrapper.querySelector('input').checked=true;}
+          if(behavior==='native-only')wrapper.querySelector('input').checked=false;
+          if(behavior==='reverted' || behavior==='late-form'){
+            update();setTimeout(()=>{
+              if(behavior==='reverted')button.setAttribute('aria-pressed','false');
+              else{const form=document.createElement('form');form.id='late-form';application.append(form);button.setAttribute('form',form.id);}
+            },40);
+          }
+        };
+      }
+    }""",behavior)
+    result=isolated(worker,tab,'fill',[dict(key=field['key'],status='RESOLVED',value='No')])
+    assert result['filled']==0 and not result['completed']
+    assert page.locator('#question_28381884003').is_checked()==(behavior=='native-mismatch')
+    assert page.evaluate('submissions')==0
 
 
 @pytest.mark.browser

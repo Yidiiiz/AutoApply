@@ -1,17 +1,18 @@
 <!doctype html><html><head><title>Synthetic application</title></head><body>
-<div id="icons"></div><main><form id="application" onsubmit="event.preventDefault();submissions++">
+<div id="icons"></div><main><div id="application" class="ashby-application-form-container">
 <label>First name<input id="first"></label><label>Email<input type="email" id="contact"></label>
 <label>Website<input id="question_28381882003"></label><label>GitHub<input id="github"></label><label>LinkedIn<input id="linkedin"></label>
-<div class="ashby-application-form-field-entry"><label for="question_28381884003">Prior Government Employment?</label>
+<div class="ashby-application-form-section-container"><div class="ashby-application-form-field-entry"><label for="question_28381884003">Prior Government Employment?</label>
 <div class="_container_1svni_28 _yesno_1e3gg_148 ashby-application-form-input-yesno">
 <input type="checkbox" name="question_28381884003" id="question_28381884003" class="_input_1svni_78" style="display:none">
-<button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button>
-</div></div>
+<button class="_container_pjyt6_1 _option_1svni_32 ashby-application-form-input-yesno-option" aria-pressed="false">Yes</button><button class="_container_pjyt6_1 _option_1svni_32 ashby-application-form-input-yesno-option" aria-pressed="false">No</button>
+</div></div></div>
 <label>Cover letter<textarea id="letter"></textarea></label>
 <label>Cover Letter attachment<input id="cover" type="file" accept=".pdf,application/pdf"></label>
 <label>Resume<input id="resume" type="file" accept=".pdf"></label><button type="submit">Submit</button>
-</form></main><script>
+</div></main><script>
 window.submissions=0;window.model={};window.employerWrites=0;
+document.addEventListener('submit',event=>{event.preventDefault();submissions++;});
 for(let i=0;i<160;i++){const host=document.createElement('presentation-icon');icons.append(host);host.attachShadow({mode:'open'}).innerHTML='<svg xmlns="http://www.w3.org/2000/svg" role="presentation"><g><path d="M0 0"/></g></svg>';}
 for(const type of ['input','change'])document.addEventListener(type,event=>{const el=event.composedPath()[0];model[el.id]=el.type==='file'?Array.from(el.files,f=>f.name):el.type==='checkbox'?el.checked:el.value;});
 for(const button of document.querySelectorAll('.ashby-application-form-input-yesno button'))button.onclick=()=>{
