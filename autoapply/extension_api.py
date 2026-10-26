@@ -301,7 +301,7 @@ def _analysis_structure(value):
         raise SettingsRejected('Invalid analysis control')
     strings = {'tag', 'role', 'type', 'id', 'name', 'class', 'data-automation-id', 'aria-label',
                'aria-labelledby', 'aria-controls', 'aria-owns', 'aria-haspopup', 'aria-expanded',
-               'aria-disabled', 'aria-readonly', 'aria-hidden', 'inputmode', 'aria-autocomplete', 'display', 'visibility'}
+               'aria-disabled', 'aria-readonly', 'aria-hidden', 'aria-checked', 'aria-pressed', 'inputmode', 'aria-autocomplete', 'display', 'visibility'}
     row = {}
     if 'root_id' in value:
         if type(value['root_id']) is not int or not 0 <= value['root_id'] < 128:
@@ -610,7 +610,7 @@ def snapshot(dashboard, payload):
         raise SettingsRejected('Invalid snapshot host')
     if not isinstance(nodes, list) or len(nodes) > 10000:
         raise SettingsRejected('Snapshot nodes must be a list of at most 10000 items')
-    attributes = {'tag', 'role', 'type', 'id', 'name', 'data-automation-id', 'aria-label', 'labelledby', 'label', 'text'}
+    attributes = {'tag', 'role', 'type', 'id', 'name', 'class', 'data-automation-id', 'aria-label', 'aria-checked', 'aria-pressed', 'labelledby', 'label', 'text'}
     sanitized = []
     text_tags = {'label', 'legend', 'option', 'button', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
     for node in nodes:
@@ -1025,10 +1025,10 @@ def skill_plan(dashboard, payload):
 
 
 def chat_replacement_intent(text):
-    return (isinstance(text, str) and bool(re.match(
-        r'^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b', text.strip(), re.I))
+    return (isinstance(text, str)
+        and not re.search(r"\b(?:don.t|do not|never|cannot|can.t|draft\s+only|only\s+(?:a\s+)?draft|without\s+(?:changing|updating|replacing|filling|applying))\b", text, re.I)
         and bool(re.search(r'\b(?:field|textarea|text box|cover letter|answer)\b', text, re.I))
-        and not re.search(r"\b(?:don.t|do not|never|cannot|can.t)\b", text, re.I))
+        and bool(re.match(r'^(?:(?:please|can you|could you|would you)\s+)*(?:(?:replace|overwrite|fill|put|insert|paste|change|update|generate|write|revise|rewrite|include|add|mention|make)\b|for\s+(?:the |my )?cover letter[,:]?\s+(?:include|add|mention|write|revise)\b|(?:the|my)\s+(?:answer|cover letter)\s+(?:should|needs to)\s+(?:be|say|include|mention)\b)', text.strip(), re.I)))
 
 
 def chat_field_context(value):
@@ -1040,11 +1040,13 @@ def chat_field_context(value):
         raise SettingsRejected('Invalid current field key')
     fields = []
     for item in value['fields']:
-        if (not isinstance(item, dict) or not isinstance(item.get('kind'), str) or item.get('kind') not in {'text', 'textarea', 'email', 'tel', 'url'}
+        if (not isinstance(item, dict) or not isinstance(item.get('kind'), str) or item.get('kind') not in {'text', 'textarea', 'email', 'tel', 'url', 'file'}
                 or any(not isinstance(item.get(k), str) or len(item[k]) > limit for k, limit in
                        [('key', 100), ('label', 500), ('identity', 100)])
                 or item.get('max_length') is not None and (type(item['max_length']) is not int or item['max_length'] < 0)):
             raise SettingsRejected('Invalid writable field')
+        if item['kind'] == 'file' and (item.get('purpose') != 'cover_letter' or not re.search(r'cover.*letter', item['label'], re.I) or re.search(r'resume|\bcv\b', item['label'], re.I)):
+            raise SettingsRejected('Only explicit cover letter attachments are writable')
         fields.append({k: item.get(k) for k in ('key', 'label', 'kind', 'identity', 'max_length')})
     if len({f['key'] for f in fields}) != len(fields):
         raise SettingsRejected('Ambiguous field keys')
@@ -1067,7 +1069,7 @@ def chat_replacement_source(request):
         return 'literal', literal[2]
     if re.search(r'\b(?:with|using)\s+(?:that|it|(?:the |this |that )?(?:draft|answer|text)(?: above)?|the above)\s*[.!]?$', request, re.I):
         return 'reference', None
-    if re.search(r'\b(?:shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\bto (?:be|include|mention|remove|add)\b', request, re.I):
+    if re.search(r'\b(?:say|shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\b(?:include|mention|add|generate|write|revise|make)\b|\bto (?:be|include|mention|remove|add)\b', request, re.I):
         return 'rewrite', None
     return None, None
 
@@ -1077,10 +1079,12 @@ def chat_replacement(messages, context, *, last_draft=None, writer=None):
     if not chat_replacement_intent(request):
         return None
     fields = context['fields']
-    if re.search(r'\b(?:current|focused|this)\s+(?:field|textarea|text box)\b', request, re.I):
+    if re.search(r'\b(?:current|focused|this)\s+(?:field|textarea|text box|answer)\b', request, re.I):
         candidates = [f for f in fields if f['key'] == context['current_key']]
     else:
         candidates = [f for f in fields if f['label'].strip() and f['label'].strip().casefold() in request.casefold()]
+        if not candidates and re.search(r'\b(?:my|the) answer\b', request, re.I):
+            candidates = [f for f in fields if f['key'] == context['current_key']]
         if not candidates and re.search(r'cover letter', request, re.I):
             candidates = [f for f in fields if 'cover' in f['label'].casefold() and 'letter' in f['label'].casefold()]
     if len(candidates) != 1:
@@ -1094,9 +1098,10 @@ def chat_replacement(messages, context, *, last_draft=None, writer=None):
                     if m['role'] == 'assistant' and m.get('kind') == 'draft'), '')
     elif mode == 'rewrite':
         answer = context.get('current_answer')
-        if not answer or answer['key'] != field['key'] or not answer['text'].strip() or writer is None:
+        cover = bool(re.search(r'cover.*letter', field['label'], re.I) and re.search(r'\b(?:include|mention|add|generate|write|revise)\b', request, re.I))
+        if writer is None or (not cover and (not answer or answer['key'] != field['key'] or not answer['text'].strip())):
             return dict(reply='Select the field containing the answer to rewrite, then retry. The field is unchanged.', kind='receipt')
-        draft = writer(field, answer['text'], request)
+        draft = writer(field, answer['text'] if answer and answer['key'] == field['key'] else '', request)
     elif mode is None:
         return dict(reply='What text should replace the field? Quote it, refer to the draft, or specify how to rewrite the current answer.', kind='receipt')
     if not draft.strip() or len(draft) > 12000:
@@ -1104,7 +1109,7 @@ def chat_replacement(messages, context, *, last_draft=None, writer=None):
     if field['max_length'] is not None and len(draft) > field['max_length']:
         return dict(reply='The draft exceeds this field limit. Shorten it before replacing the field.', kind='receipt')
     return dict(reply='Replacement is ready for verification.', kind='receipt', replacement_mode=mode, draft=draft,
-                actions=[dict(type='replace_text', key=field['key'], text=draft)])
+                actions=[dict(type='replace_cover_letter' if field['kind'] == 'file' else 'replace_text', key=field['key'], text=draft)])
 
 
 def chat(dashboard, payload):
@@ -1124,7 +1129,7 @@ def chat(dashboard, payload):
     def rewrite(field, previous, instruction):
         maximum = min(field['max_length'] if field['max_length'] is not None else 12000, 12000)
         response = write(dashboard, dict(payload, question=field['label'], previous=previous,
-                         instruction=instruction + f'\nUse at most {maximum} characters.'))
+                         instruction=('Write the complete cover letter using only supported profile/job facts and the user supplied writing context. Do not invent dates, roles, metrics or contributions.\n' if re.search(r'cover.*letter', field['label'], re.I) else '') + instruction + f'\nUse at most {maximum} characters.'))
         answer = response['answer']
         if len(answer) > maximum or 'warning' in response or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]|```', answer):
             raise SettingsRejected('The rewritten draft is invalid or exceeds the field limit. The field is unchanged; review and retry.')
@@ -1132,6 +1137,12 @@ def chat(dashboard, payload):
 
     replacement = chat_replacement(messages[-12:], context, last_draft=last_draft, writer=rewrite)
     if replacement is not None:
+        for action in replacement.get('actions', []):
+            if action['type'] == 'replace_cover_letter':
+                try:
+                    action['file'] = cv.cover_letter_draft_artifact(action['text'])
+                except Exception:
+                    return dict(reply=replacement['draft'], kind='draft', warning='Cover letter PDF rendering failed. The draft is preserved; the attachment is unchanged.')
         return replacement
     dashboard._writing_settings()
     if payload.get("use_job_description", True):

@@ -466,6 +466,12 @@ class AnswerResolver:
                                   provenance={'rule': 'explicit-all-employer-restriction'})
             if isinstance(supplied, bool):
                 return None
+        # An explicit canonical personal site wins stale generic Website memory
+        # and the legacy portfolio alias. GitHub/LinkedIn remain separate facts.
+        if policy != 'REQUIRE_USER' and mapped_key in {'links.personal_website', 'links.portfolio'} and q.kind in {'text', 'url', 'textarea'}:
+            website = fact(self.snapshot.original_facts or profile, 'links.personal_website')
+            if website:
+                return Answer(website, 'profile:links.personal_website', evidence=['links.personal_website'])
         row = self._memory.get((normalize(q.label), q.scope))
         from .concepts import REGISTRY
         from .concepts import ALIASES, DEMOGRAPHIC_PATHS, demographic_value

@@ -334,19 +334,19 @@ function renderMessages() {
   if (chatBusy) { const typing = node("div", "•••"); typing.className = 'bubble assistant typing'; typing.setAttribute('aria-label', 'AI is typing'); container.append(typing); }
   requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
 }
-function chatReplacementIntent(value){return typeof value==='string' && /^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && !/\b(?:don.t|do not|never|cannot|can.t)\b/i.test(value);}
+function chatReplacementIntent(value){return typeof value==='string' && !/\b(?:don.t|do not|never|cannot|can.t|draft\s+only|only\s+(?:a\s+)?draft|without\s+(?:changing|updating|replacing|filling|applying))\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && /^(?:(?:please|can you|could you|would you)\s+)*(?:(?:replace|overwrite|fill|put|insert|paste|change|update|generate|write|revise|rewrite|include|add|mention|make)\b|for\s+(?:the |my )?cover letter[,:]?\s+(?:include|add|mention|write|revise)\b|(?:the|my)\s+(?:answer|cover letter)\s+(?:should|needs to)\s+(?:be|say|include|mention)\b)/i.test(value.trim());}
 function authorizedChatField(request,context){
   if(!chatReplacementIntent(request))return null;
   let fields=context?.fields || [];
-  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
-  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
+  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box|answer)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
+  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/\b(?:my|the) answer\b/i.test(request)?fields.filter(f=>f.key===context.current_key):/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
   return fields.length===1?fields[0]:null;
 }
 function chatReplacementSource(request){
   const literal=request.match(/\b(?:with|to)\s+(["'])(.+)\1\s*$/is);
   if(literal)return {mode:'literal',text:literal[2]};
   if(/\b(?:with|using)\s+(?:that|it|(?:the |this |that )?(?:draft|answer|text)(?: above)?|the above)\s*[.!]?$/i.test(request))return {mode:'reference',text:lastDraft};
-  if(/\b(?:shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\bto (?:be|include|mention|remove|add)\b/i.test(request))return {mode:'rewrite'};
+  if(/\b(?:say|shorter|longer|concise|concisely|rewrite|rephrase|summarize|simplify|shorten|expand|formal|professional|friendly)\b|\b(?:include|mention|add|generate|write|revise|make)\b|\bto (?:be|include|mention|remove|add)\b/i.test(request))return {mode:'rewrite'};
   return {};
 }
 async function chat() {
@@ -373,9 +373,9 @@ async function chat() {
       const requested=chatReplacementSource(text),mode=reply.replacement_mode;
       const authorizedText=mode==='rewrite'?reply.draft:requested.text;
       if(!intent || !['literal','reference','rewrite'].includes(mode) || requested.mode!==mode || reply.draft!==action.text ||
-         mode==='rewrite' && (fieldContext.current_answer?.key!==action?.key || !fieldContext.current_answer?.text?.trim()) ||
-         target?.key!==action?.key || action.text!==authorizedText || reply.actions.length!==1 || !field || !['text','textarea','email','tel','url'].includes(field.kind) ||
-         Object.keys(action).sort().join(',')!=='key,text,type' || action.type!=='replace_text' || typeof action.text!=='string' ||
+         mode==='rewrite' && !/cover.*letter/i.test(field?.label||'') && (fieldContext.current_answer?.key!==action?.key || !fieldContext.current_answer?.text?.trim()) ||
+         target?.key!==action?.key || action.text!==authorizedText || reply.actions.length!==1 || !field || !['text','textarea','email','tel','url','file'].includes(field.kind) ||
+         (field.kind==='file' ? Object.keys(action).sort().join(',')!=='file,key,text,type' || action.type!=='replace_cover_letter' || !/cover.*letter/i.test(field.label) || /resume|\bcv\b/i.test(field.label) : Object.keys(action).sort().join(',')!=='key,text,type' || action.type!=='replace_text') || typeof action.text!=='string' ||
          !action.text.trim() || action.text.length>12000 || field.max_length!=null && action.text.length>field.max_length)
         throw Error('Unsafe or ambiguous replacement refused. Your draft is preserved.');
       lastDraft=action.text;await saveChat();
@@ -385,7 +385,7 @@ async function chat() {
       kind='receipt';
     }
     if(kind==='draft')lastDraft=reply.reply.length<=12000?reply.reply:undefined;
-    messages.push({role: "assistant", text: reply.reply, kind, time:Date.now()});await saveChat();element("chat-status").textContent = "";
+    messages.push({role: "assistant", text: reply.reply, kind, time:Date.now()});await saveChat();element("chat-status").textContent = reply.warning || "";
   } catch (error) { element("chat-input").value = text; renderMessages(); element("chat-status").textContent = error.message; }
   finally { chatBusy = false; renderMessages(); element("send").disabled = element("clear-chat").disabled = false; }
 }

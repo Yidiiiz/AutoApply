@@ -118,6 +118,7 @@
     }
     const state = mode === 'toggle' ? sidebarHost.dataset.state === 'open' ? 'closed' : 'open' : mode;
     sidebarHost.dataset.state=state;
+    if(state==='closed')chatEpoch++;
     sidebarHost.style.setProperty('display',state==='closed'?'none':'block','important');
     sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(400px,100vw)','important');
     sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
@@ -127,6 +128,7 @@
   }
   function valueOf({element,members,field,savedDate}) {
     if (savedDate) return savedDate;
+    const proxy=yesNoProxy(element);if(proxy)return proxy.value || '';
     if (field.kind==='file') return Array.from(element.files || [],file=>file.name).join(', ') || attachedFile(element);
     if (['radio','checkbox'].includes(field.kind)) return field.kind==='checkbox'&&members.length===1 ? element.checked : members.filter(el=>el.checked).map(label)[field.kind==='radio'?'shift':'slice']();
     if (field.kind==='select') return element.multiple ? Array.from(element.selectedOptions,o=>clean(o.text)) : clean(element.selectedOptions[0]?.text);
@@ -293,7 +295,21 @@
     return true;
   }
 
+  // A hidden boolean alone cannot distinguish unanswered from an offered No.
+  // Require both scoped visible offers and an explicit accessible selection state.
+  function yesNoProxy(element){
+    if(!element?.matches('input[type="checkbox"]') || element.disabled || element.readOnly)return null;
+    const wrapper=element.closest('.ashby-application-form-input-yesno');
+    if(!wrapper || !visible(wrapper) || wrapper.querySelectorAll('input').length!==1)return null;
+    const choices=Array.from(wrapper.querySelectorAll('button[type="button"],[role="radio"],[role="button"]')).filter(el=>visible(el) && !el.matches('a[href],input,button:not([type="button"])'));
+    if(choices.length!==2 || !choices.every(el=>/^(yes|no)$/i.test(text(el))) || new Set(choices.map(el=>normal(text(el)))).size!==2 ||
+       choices.some(el=>el.matches(':disabled,[aria-disabled="true"]') || !['aria-checked','aria-pressed'].some(a=>/^(true|false)$/.test(el.getAttribute(a)||''))))return null;
+    const selected=el=>el.getAttribute('aria-checked')==='true'||el.getAttribute('aria-pressed')==='true';
+    const chosen=choices.filter(selected);
+    return {wrapper,choices,selected,value:chosen.length===1 && element.checked===(normal(text(chosen[0]))==='yes')?text(chosen[0]):null};
+  }
   function interactiveVisible(element) {
+    if(yesNoProxy(element))return true;
     if (selectOnlyControl(element)) return true;
     if (visible(element)) return true;
     if (!element.matches('input[type="checkbox"],input[type="radio"]') ||
@@ -648,7 +664,7 @@
   }
 
   function pageInfo() {
-    if(globalThis.autoApplyCredentials?.active())return {url:location.origin+location.pathname,title:"Account sign-in",company:"",description:""};
+    if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())return {url:location.origin+location.pathname,title:globalThis.autoApplyCredentials.active()?"Account sign-in":"Application scan incomplete",company:"",description:""};
     let posting;
     function find(value) {
       if (!value || typeof value !== "object") return;
@@ -672,9 +688,7 @@
   }
 
   function signInPage() {
-    return Boolean(globalThis.autoApplyCredentials?.active() || document.querySelector('[data-automation-id="signInContent"],[data-automation-id="createAccountLink"]') ||
-      (document.querySelector('input[type="password"]') &&
-        /sign[\s-]*in|log[\s-]*in|create\s+(?:an?\s+)?account/i.test(document.body.innerText)));
+    return Boolean(globalThis.autoApplyCredentials?.active());
   }
 
   function manualEntry() {
@@ -741,6 +755,7 @@
   async function scan({repair = false} = {}) {
     observeNativeEdits();
     if(globalThis.autoApplyCredentials?.active())return {page:pageInfo(),fields:[],page_identity:snapshotIdentity(),next_action:{kind:"none"},sign_in:true,scan_ms:0};
+    if(globalThis.autoApplyCredentials?.incomplete())return {page:pageInfo(),fields:[],page_identity:snapshotIdentity(),next_action:{kind:"none"},sign_in:false,scan_incomplete:true,scan_ms:0};
     const started = performance.now();
     const previousRecords = records;
     records = new Map();
@@ -763,6 +778,7 @@
         const heading = dateHeading(element);
         fieldLabel = heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date') + ' ' + (datePart.includes('Month') ? 'month' : 'year');
       }
+      const proxy=yesNoProxy(element);
       let container;
       if (["radio", "checkbox"].includes(kind)) {
         container = choiceContainer(element);
@@ -778,6 +794,7 @@
       keys.add(key);
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
+      if(proxy){kind='radio';options=proxy.choices.map(text);}
       container=questionContainer(container);
       fields.push({key, label: fieldLabel, kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
         options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
@@ -869,6 +886,7 @@
     return Boolean(shown && !/^(select|choose|search)\b/i.test(shown));
   }
   function occupied({element, members, field}) {
+    const proxy=yesNoProxy(element);if(proxy)return Boolean(proxy.value);
     if (["checkbox", "radio"].includes(field.kind)) return members.some(member => member.checked);
     if (field.kind === "file") return Boolean(element.files.length || attachedFile(element));
     if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || !isPrompt(element) && clean(comboInput(element)?.value) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(comboInput(element)?.value)) || !comboInput(element) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(text(element)) && text(element));
@@ -1127,7 +1145,7 @@
         else summary.skipped++;
         continue;
       }
-      if (field.kind === "file" && occupied(record)) {summary.skipped++;continue;}
+      if (field.kind === "file" && occupied(record) && !(answer.replace_cover_letter && coverFile(element))) {summary.skipped++;continue;}
       if (["combobox","select","radio"].includes(field.kind) && !field.options.length && occupied(record) && !answer.force) { summary.skipped++; continue; }
       const unresolved = writing => {
         trace("field","verified",element,{verified:false,reason:"not committed or unresolved"});
@@ -1199,6 +1217,13 @@
           events(element);
           if (!await retainedNative(record,current=>current.element.value===option.value &&
               Array.from(current.element.selectedOptions).some(selected=>!selected.disabled && text(selected)===text(option)))) {unresolved(false);continue;}
+        } else if (yesNoProxy(element)) {
+          const proxy=yesNoProxy(element),choice=proxy.choices.find(el=>normal(text(el))===normal(answer.value));
+          if(!choice){unresolved(false);continue;}
+          checkRepair();choice.click();
+          if(!await waitFor(()=>normal(yesNoProxy(currentControl(element))?.value)===normal(answer.value),500)) {unresolved(false);continue;}
+          await new Promise(resolve=>setTimeout(resolve,150));
+          if(normal(yesNoProxy(currentControl(element))?.value)!==normal(answer.value)){unresolved(false);continue;}
         } else if (["radio", "checkbox"].includes(field.kind)) {
           const values = Array.isArray(answer.value) ? answer.value : [answer.value];
           const matches = values.map(value => fieldChoice(element, members.filter(interactiveVisible), value, label));
@@ -1997,14 +2022,14 @@
       display:style.display,visibility:style.visibility,opacity:Number(style.opacity),
       rect:[rect.x,rect.y,rect.width,rect.height].map(n=>Math.round(Math.max(-100000,Math.min(100000,n))*100)/100),
       transformed:Boolean(style.transform && style.transform!=='none'),transform:(style.transform || 'none').slice(0,200)};
-    for(const attr of ['role','type','id','name','class','data-automation-id','aria-label','aria-labelledby','aria-controls','aria-owns','aria-haspopup','aria-expanded','aria-disabled','aria-readonly','aria-hidden','inputmode','aria-autocomplete']) {
+    for(const attr of ['role','type','id','name','class','data-automation-id','aria-label','aria-labelledby','aria-controls','aria-owns','aria-haspopup','aria-expanded','aria-disabled','aria-readonly','aria-hidden','aria-checked','aria-pressed','inputmode','aria-autocomplete']) {
       const value=element.getAttribute(attr);if(value)row[attr]=value.slice(0,300);
     }
     return row;
   }
   // No scan, focus, clicks, keys, or menu opening: retain all live filling handles.
   function inspectPage({repair = false, passive = false} = {}) {
-    if(globalThis.autoApplyCredentials?.active())return {identity:snapshotIdentity(),fields:[],diagnostic:{fields:[],responsive:true,inspection_ms:0},inspection:{message:"Account fields are private."}};
+    if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())return {identity:snapshotIdentity(),fields:[],diagnostic:{fields:[],responsive:true,inspection_ms:0},inspection:{truncated:Boolean(globalThis.autoApplyCredentials?.incomplete()),message:globalThis.autoApplyCredentials?.active()?"Account fields are private.":"Application scan incomplete; fields withheld for privacy."}};
     const started=performance.now();
     const roots=inspectionRoots(),rootIds=new Map(roots.map((r,i)=>[r.root,i]));
     const identity=snapshotIdentity(),detected=new Set(scannerControls()),fields=[],grouped=new Set();let truncated=Boolean(roots.truncated);
@@ -2087,7 +2112,7 @@
     return {status,message:messages[status],ready_state:document.readyState,roots:rootInfo,closed_shadow_roots:'not_observable',frames,truncated:Boolean(roots.truncated)};
   }
   function pageStructure() {
-    if(globalThis.autoApplyCredentials?.active())return {host:location.hostname,nodes:[],truncated:false,inspection:{message:"Account fields are private."}};
+    if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())return {host:location.hostname,nodes:[],truncated:Boolean(globalThis.autoApplyCredentials?.incomplete()),inspection:{truncated:Boolean(globalThis.autoApplyCredentials?.incomplete()),message:globalThis.autoApplyCredentials?.active()?"Account fields are private.":"Application scan incomplete; fields withheld for privacy."}};
     const nodes=[], encoder=new TextEncoder(); let size=0, truncated=false;
     const roots=inspectionRoots(),inspection=rootInspection(roots);
     const selector='form,fieldset,label,legend,h1,h2,h3,h4,h5,h6,input,textarea,select,option,button,a[href],iframe,[role],[data-automation-id],[contenteditable="true"]';
@@ -2098,7 +2123,7 @@
         const caption=actionCaption(element);
         if(caption){row.caption=caption;row.form_contained=Boolean(element.form || element.closest('form,[role="form"]'));if(element.hasAttribute('href'))row.target=actionTarget(element.getAttribute('href'));}
       }
-      for (const attr of ['role','type','id','name','data-automation-id','aria-label']) {
+      for (const attr of ['role','type','id','name','class','data-automation-id','aria-label','aria-checked','aria-pressed']) {
         const value=element.getAttribute(attr); if(value) row[attr]=value.slice(0,2000);
       }
       const labelledby=referencedLabel(element,'aria-labelledby'); if(labelledby)row.labelledby=labelledby.slice(0,2000);
@@ -2108,48 +2133,70 @@
         copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"],[class*="single-value"],[class*="singleValue"]').forEach(node=>node.remove());
         if (!element.isContentEditable) row.text=text(copy).slice(0,2000);
       }
+      if(element.matches('button') && element.closest('.ashby-application-form-input-yesno') && /^(yes|no)$/i.test(text(element)))row.text=text(element);
       const bytes=encoder.encode(JSON.stringify(row)).length;
       if (nodes.length >= 10000 || size+bytes>950000) {truncated=true;break;} size+=bytes;nodes.push(row);
     }
     return {host:location.hostname,nodes,truncated:truncated || inspection.truncated,inspection};
   }
   const chatDocument=crypto.randomUUID(),chatIdentities=new WeakMap();
+  let chatEpoch=0;
   let chatFocus,chatExplicit;
   const writableChat=el=>!globalThis.autoApplyCredentials?.active() && !globalThis.autoApplyCredentials?.sensitive(el) && el && el.isConnected && interactiveVisible(el) &&
     !el.readOnly && !el.matches(':disabled,[readonly],[aria-readonly="true"]') &&
     (el.matches('textarea,input[type="text"],input:not([type]),input[type="email"],input[type="tel"],input[type="url"]') || el.isContentEditable) && !el.closest('#autoapply-sidebar') && !/captcha/i.test([el.id,el.name,label(el)].join(' '));
   document.addEventListener('focusin',event=>{if(!extensionFilling && event.isTrusted && writableChat(event.target))chatFocus=event.target;},true);
   document.addEventListener('pointerdown',event=>{if(event.isTrusted && writableChat(event.target)){chatExplicit=null;chatFocus=event.target;}},true);
-  const chatValue=el=>String(el.isContentEditable?el.textContent:el.value);
-  async function chatFingerprint(value){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');}
+  const coverFile=el=>el?.matches('input[type="file"]') && el.isConnected && !el.disabled && !el.multiple &&
+    !globalThis.autoApplyCredentials?.sensitive(el) && exposedFile(el) && /cover.*letter/i.test(fileLabel(el)) &&
+    !/resume|\bcv\b/i.test(fileLabel(el)) && (!el.accept || el.accept.split(',').some(v=>/^(?:\.pdf|application\/(?:pdf|\*))$/i.test(v.trim()))) &&
+    Array.from(el.files||[]).every(f=>f.size<=6000000);
+  const chatValue=el=>el.type==='file'?JSON.stringify({accept:el.accept,attached:attachedFile(el),files:Array.from(el.files||[],f=>[f.name,f.type,f.size,f.lastModified])}):String(el.isContentEditable?el.textContent:el.value);
+  async function chatState(el){
+    let value=chatValue(el);
+    if(el.type==='file')for(const file of el.files||[])value+=':'+await chatFingerprint(new Uint8Array(await file.arrayBuffer()));
+    return value;
+  }
+  async function chatFingerprint(value){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',value instanceof Uint8Array?value:new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');}
   async function chatContext({passive=false,request=''}={}){
-    if(globalThis.autoApplyCredentials?.active())return {url:location.origin+location.pathname,page:pageInfo(),document:chatDocument,fields:[],current_key:null};
+    if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())return {url:location.origin+location.pathname,page:pageInfo(),document:chatDocument,fields:[],current_key:null};
     if(!passive && !extensionFilling)await scan();
-    const fields=Array.from(records.values()).filter(r=>writableChat(r.element)).slice(0,80).map(r=>{
+    const fields=Array.from(records.values()).filter(r=>writableChat(r.element)||coverFile(r.element)).slice(0,80).map(r=>{
       if(!chatIdentities.has(r.element))chatIdentities.set(r.element,crypto.randomUUID());
-      return {key:r.field.key,label:r.field.label.slice(0,500),kind:r.field.kind,identity:chatIdentities.get(r.element),max_length:r.field.max_length};
+      return {key:r.field.key,label:r.field.label.slice(0,500),kind:r.field.kind,identity:chatIdentities.get(r.element),max_length:r.field.max_length,...(r.field.kind==='file'?{purpose:'cover_letter',accept:r.element.accept}:{})};
     });
     let named=fields.filter(f=>f.label.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));
     if(!named.length && /cover letter/i.test(request))named=fields.filter(f=>/cover/i.test(f.label) && /letter/i.test(f.label));
     const selected=named.length===1?named[0]:fields.find(f=>records.get(f.key)?.element===(writableChat(chatExplicit)?chatExplicit:chatFocus));
-    const current_answer=selected?{key:selected.key,text:chatValue(records.get(selected.key).element).slice(0,12000),fingerprint:await chatFingerprint(chatValue(records.get(selected.key).element))}:undefined;
-    return {url:location.href,page:pageInfo(),document:chatDocument,fields,current_key:selected?.key || null,current_answer};
+    const current_answer=selected?{key:selected.key,text:records.get(selected.key).field.kind==='file'?'':chatValue(records.get(selected.key).element).slice(0,12000),fingerprint:await chatFingerprint(await chatState(records.get(selected.key).element))}:undefined;
+    return {url:location.href,page:pageInfo(),document:chatDocument,epoch:chatEpoch,page_identity:snapshotIdentity(),fields,current_key:selected?.key || null,current_answer};
   }
   async function chatReplace(context,action){
     const field=context.fields?.find(f=>f.key===action.key),record=records.get(action.key);
     if(extensionFilling || skillsState.busy)throw Error('Application is busy. Wait for autofill or writing to finish, then retry.');
-    if(context.url!==location.href || context.document!==chatDocument || !field || !record ||
-       !writableChat(record.element) || chatIdentities.get(record.element)!==field.identity ||
-       label(record.element)!==field.label || !['text','textarea','email','tel','url'].includes(record.field.kind) ||
-       action.type!=='replace_text' || typeof action.text!=='string' || !action.text.trim() || action.text.length>12000 ||
+    if(context.url!==location.href || context.document!==chatDocument || context.epoch!==chatEpoch || context.page_identity!==snapshotIdentity() || !field || !record ||
+       !(writableChat(record.element)||coverFile(record.element)) || chatIdentities.get(record.element)!==field.identity ||
+       (record.field.kind==='file'?fileLabel(record.element):label(record.element))!==field.label || !['text','textarea','email','tel','url','file'].includes(record.field.kind) ||
+       (record.field.kind==='file'?action.type!=='replace_cover_letter' || field.purpose!=='cover_letter' || field.accept!==record.element.accept:action.type!=='replace_text') || typeof action.text!=='string' || !action.text.trim() || action.text.length>12000 ||
        field.max_length!==null && action.text.length>field.max_length)throw Error('Field changed or is unavailable. Select the field and ask again.');
-    const before=chatValue(record.element);
+    const before=await chatState(record.element);
     if(context.current_answer?.key!==action.key || context.current_answer.fingerprint!==await chatFingerprint(before) ||
-       chatValue(record.element)!==before || extensionFilling || !writableChat(record.element) || context.url!==location.href ||
-       context.document!==chatDocument || records.get(action.key)!==record || label(record.element)!==field.label ||
+       await chatState(record.element)!==before || extensionFilling || !(writableChat(record.element)||coverFile(record.element)) || context.url!==location.href ||
+       context.document!==chatDocument || context.epoch!==chatEpoch || context.page_identity!==snapshotIdentity() || records.get(action.key)!==record || (record.field.kind==='file'?fileLabel(record.element):label(record.element))!==field.label ||
        chatIdentities.get(record.element)!==field.identity)throw Error('Field changed while waiting. Select the field and retry; your edit is preserved.');
-    const summary=await fill([{key:action.key,status:'RESOLVED',value:action.text,force:true,verify_settled:true,source:'AI'}]);
-    if(!summary.completed.some(f=>f.key===action.key && String(f.value)===action.text))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
+    const artifact=record.field.kind==='file';
+    if(artifact && (!action.file || Object.keys(action.file).sort().join(',')!=='base64,filename,mime' ||
+      action.file.filename!=='Cover Letter.pdf' || action.file.mime!=='application/pdf' || typeof action.file.base64!=='string' ||
+      action.file.base64.length>8000000 || !/^JVBERi0[A-Za-z0-9+/=]+$/.test(action.file.base64)))throw Error('Invalid cover letter artifact');
+    const summary=await fill([{key:action.key,status:artifact?'FILE':'RESOLVED',value:artifact?'cover_letter':action.text,
+      force:true,replace_cover_letter:artifact,verify_settled:true,source:'AI'}],artifact?{cover_letter:action.file}:{});
+    if(artifact){
+      await new Promise(resolve=>setTimeout(resolve,250));
+      const current=record.element.files?.[0];
+      if(!record.element.isConnected || !current || current.name!==action.file.filename || current.type!=='application/pdf' ||
+        await chatFingerprint(new Uint8Array(await current.arrayBuffer()))!==await chatFingerprint(Uint8Array.from(atob(action.file.base64),c=>c.charCodeAt(0))))throw Error('Cover letter attachment did not remain selected. Your draft is preserved.');
+    }
+    if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
   globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};

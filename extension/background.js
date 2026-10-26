@@ -480,19 +480,19 @@ async function advanceAfterWriting(result) {
     pendingSteps.delete(result.tabId); await autofill(result.tabId,result.matched);
   }
 }
-function chatReplacementIntent(value){return typeof value==='string' && /^(?:(?:please|can you|could you|would you)\s+)*(?:replace|overwrite|fill|put|insert|paste|change|update)\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && !/\b(?:don.t|do not|never|cannot|can.t)\b/i.test(value);}
+function chatReplacementIntent(value){return typeof value==='string' && !/\b(?:don.t|do not|never|cannot|can.t|draft\s+only|only\s+(?:a\s+)?draft|without\s+(?:changing|updating|replacing|filling|applying))\b/i.test(value) && /\b(?:field|textarea|text box|cover letter|answer)\b/i.test(value) && /^(?:(?:please|can you|could you|would you)\s+)*(?:(?:replace|overwrite|fill|put|insert|paste|change|update|generate|write|revise|rewrite|include|add|mention|make)\b|for\s+(?:the |my )?cover letter[,:]?\s+(?:include|add|mention|write|revise)\b|(?:the|my)\s+(?:answer|cover letter)\s+(?:should|needs to)\s+(?:be|say|include|mention)\b)/i.test(value.trim());}
 function authorizedChatField(request,context){
   if(!chatReplacementIntent(request))return null;
   let fields=context?.fields || [];
-  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
-  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
+  if(/\b(?:current|focused|this)\s+(?:field|textarea|text box|answer)\b/i.test(request))fields=fields.filter(f=>f.key===context.current_key);
+  else {const named=fields.filter(f=>f.label?.trim() && request.toLowerCase().includes(f.label.trim().toLowerCase()));fields=named.length?named:/\b(?:my|the) answer\b/i.test(request)?fields.filter(f=>f.key===context.current_key):/cover letter/i.test(request)?fields.filter(f=>/cover/i.test(f.label)&&/letter/i.test(f.label)):[];}
   return fields.length===1?fields[0]:null;
 }
+function validCoverArtifact(file){return file && Object.keys(file).sort().join(',')==='base64,filename,mime' && file.mime==='application/pdf' && typeof file.filename==='string' && /^Cover Letter\.pdf$/.test(file.filename) && typeof file.base64==='string' && file.base64.length<=8000000 && /^JVBERi0[A-Za-z0-9+/=]+$/.test(file.base64);}
 function validChatAction(action,context){
   if(!Array.isArray(context?.fields))return false;
   const field=context.fields.find(f=>f.key===action?.key);
-  return action && Object.keys(action).sort().join(',')==='key,text,type' && action.type==='replace_text' &&
-    field && ['text','textarea','email','tel','url'].includes(field.kind) && typeof action.text==='string' && action.text.trim() &&
+  return action && field && (field.kind==='file' ? Object.keys(action).sort().join(',')==='file,key,text,type' && action.type==='replace_cover_letter' && field.purpose==='cover_letter' && /cover.*letter/i.test(field.label) && !/resume|\bcv\b/i.test(field.label) && validCoverArtifact(action.file) : Object.keys(action).sort().join(',')==='key,text,type' && action.type==='replace_text' && ['text','textarea','email','tel','url'].includes(field.kind)) && typeof action.text==='string' && action.text.trim() &&
     action.text.length<=12000 && (field.max_length==null || action.text.length<=field.max_length);
 }
 let skillsRunning=false;
@@ -544,14 +544,14 @@ async function action(message) {
       const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:options=>globalThis.autoApplyContent.chatContext(options),args:[{passive:Boolean(busy()),request:typeof message.request==='string'?message.request.slice(0,12000):''}]});
       return {...frame.result,tabId:tab.id,documentId:frame.documentId};
     }
-    if(busy())throw Error('Application is busy. Wait for autofill, skills or writing to finish, then retry.');
+    if(busy() || cancelledTabs.has(tab.id))throw Error('Application is busy or stopped. Wait or reopen the application, then retry.');
     const ctx=message.context,action=message.action;
     if(ctx?.tabId!==tab.id || ctx?.url!==tab.url)throw Error('Application changed. Select the field and ask again.');
     if(!chatReplacementIntent(message.request) || authorizedChatField(message.request,ctx)?.key!==action?.key || !validChatAction(action,ctx))
       throw Error('Replacement was not authorized for this field. Select the field and ask again.');
     const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent?.chatContext({passive:true})});
     if(frame.documentId!==ctx.documentId || frame.result?.document!==ctx.document)throw Error('Application changed. Select the field and ask again.');
-    if(busy())throw Error('Application is busy. Wait for autofill, skills or writing to finish, then retry.');
+    if(busy() || cancelledTabs.has(tab.id))throw Error('Application is busy or stopped. Wait or reopen the application, then retry.');
     const [filled]=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:[ctx.documentId]},func:async(ctx,action)=>{
       try{return await globalThis.autoApplyContent.chatReplace(ctx,action);}catch(error){return {error:error.message};}
     },args:[ctx,action]});

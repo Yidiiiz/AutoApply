@@ -18,6 +18,18 @@
         if (++visited>10000) {roots.truncated=true;return roots;}
         roots[i].elements.push(node);
         if (node.shadowRoot) {
+          // Only proven, small SVG-only trees may bypass the root budget.
+          const iconWalker=document.createTreeWalker(node.shadowRoot,NodeFilter.SHOW_ELEMENT);
+          let icon=iconWalker.nextNode(),iconCount=0,iconOnly=Boolean(icon);
+          for(;icon && iconOnly;icon=iconWalker.nextNode()){
+            if(++visited>10000){roots.truncated=true;return roots;}
+            iconOnly=++iconCount<=64 && icon.namespaceURI==='http://www.w3.org/2000/svg' &&
+              /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc)$/.test(icon.localName) &&
+              !icon.shadowRoot && !icon.hasAttribute('tabindex') &&
+              !Array.from(icon.attributes).some(a=>/^on|href$|focusable/i.test(a.name)) &&
+              (!icon.hasAttribute('role') || /^(img|presentation|none)$/.test(icon.getAttribute('role')));
+          }
+          if(iconOnly)continue;
           if (roots.length>=128 || roots[i].depth>=32) {roots.truncated=true;continue;}
           roots.push({root:node.shadowRoot,host:node.localName.slice(0,80),parent_id:i,depth:roots[i].depth+1,elements:[]});
         }

@@ -22,6 +22,8 @@ LABELS = {
     "expected graduation date": "education.graduation_date", "graduation date": "education.graduation_date",
     "linkedin": "links.linkedin", "linkedin profile": "links.linkedin", "linkedin url": "links.linkedin",
     "github": "links.github", "github url": "links.github",
+    "git hub": "links.github", "git hub url": "links.github",
+    "linked in": "links.linkedin", "linked in profile": "links.linkedin", "linked in url": "links.linkedin",
     "website": "links.personal_website", "personal website": "links.personal_website", "portfolio": "links.personal_website",
 }
 
@@ -55,6 +57,7 @@ def concept(label):
         return 'languages.other_proficient'
     if re.fullmatch(r'what is the country of residence for the university you anticipate graduating from|(?:what is )?(?:the )?country (?:of|for) (?:your |my )?(?:current )?(?:university|school)(?: of residence)?', text):
         return 'education.country'
+    text = re.sub(r'\bgit hub\b', 'github', re.sub(r'\blinked in\b', 'linkedin', text))
     link = re.fullmatch(r"(?:please )?(?:(?:include|provide|enter|share) (?:your )?|(?:what is )?your )?(linkedin|github|portfolio|personal website)(?: profile)?(?: url| link)?", text)
     if link:
         return {"linkedin":"links.linkedin", "github":"links.github", "portfolio":"links.personal_website", "personal website":"links.personal_website"}[link[1]]
@@ -78,6 +81,7 @@ def concept(label):
         'do you require sponsorship now': 'work_authorization.sponsorship_now',
         'will you require sponsorship in the future': 'work_authorization.sponsorship_future',
         'location city': 'contact.city',
+        'prior government employment': 'government_employment',
     }
     if text in exact:
         return exact[text]

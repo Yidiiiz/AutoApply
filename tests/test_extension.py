@@ -3313,7 +3313,7 @@ def test_t057_chat_busy_mutation_guards(tmp_path):
     code=source[source.index('function chatReplacementIntent('):source.index('  if (message.type === "page-context")')]
     # Execute the shipped action branch with synthetic Chrome APIs and busy maps.
     code += 'throw Error("unexpected branch");}'
-    script="const assert=require('node:assert/strict');let running=false,edits=0,reads=0;const analysisTasks=new Map(),writingTasks=new Map(),activeResults=new Map(),tab={id:1,url:'https://example.test/apply'};const showSidebar=async()=>{};const chrome={tabs:{get:async()=>tab},scripting:{executeScript:async spec=>{reads++;return [{result:{fields:[],document:'doc'},documentId:'doc'}];}}};\n"+code+"""
+    script="const assert=require('node:assert/strict');let running=false,edits=0,reads=0;const cancelledTabs=new Set(),analysisTasks=new Map(),writingTasks=new Map(),activeResults=new Map(),tab={id:1,url:'https://example.test/apply'};const showSidebar=async()=>{};const chrome={tabs:{get:async()=>tab},scripting:{executeScript:async spec=>{reads++;return [{result:{fields:[],document:'doc'},documentId:'doc'}];}}};\n"+code+"""
 (async()=>{
 const ctx={tabId:1,url:tab.url,document:'doc',documentId:'doc',fields:[{key:'k',label:'Cover letter',kind:'textarea',max_length:null}],current_key:'k'};
 const message={type:'chat-replace',tabId:1,context:ctx,request:'replace current field with that',action:{type:'replace_text',key:'k',text:'draft'}};
@@ -3323,6 +3323,7 @@ for(const mode of ['autofill','skills','writing']){
  const context=await action({type:'chat-context',tabId:1});assert.equal(context.tabId,1);assert.equal(reads,1);reads=0;
  running=false;skillsRunning=false;writingTasks.clear();
 }
+cancelledTabs.add(1);await assert.rejects(()=>action(message),/stopped/);assert.equal(reads,0);cancelledTabs.clear();
 // A failed task removed by the existing finally cleanup does not keep the lock.
 await assert.rejects(()=>action({...message,request:'ordinary chat'}),/not authorized/);assert.equal(reads,0);
 })().catch(error=>{process.stderr.write(String(error));process.exitCode=1;});

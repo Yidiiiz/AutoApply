@@ -171,3 +171,21 @@ def render_pdf(html, path):
                      scale=min(1, max(0.1, 860 / max(height, 1))), print_background=True)
         finally:
             browser.close()
+
+
+def cover_letter_draft_artifact(draft):
+    """Render exactly the reviewed chat draft through the local PDF boundary."""
+    import base64
+    import tempfile
+    if not isinstance(draft, str) or not draft.strip() or len(draft) > 12000:
+        raise ValueError('Invalid cover letter draft')
+    html = ('<!doctype html><html><head><meta charset="utf-8"><style>'
+            '@page{size:Letter;margin:1in}body{font:12pt/1.15 "Times New Roman";white-space:pre-wrap;overflow-wrap:anywhere}'
+            '</style></head><body>' + escape(draft) + '</body></html>')
+    with tempfile.TemporaryDirectory(prefix='cover-letter-') as temporary:
+        path = Path(temporary) / 'cover-letter.pdf'
+        render_pdf(html, path)
+        content = path.read_bytes()
+    if not content.startswith(b'%PDF-') or len(content) > 6000000:
+        raise ValueError('Invalid cover letter PDF')
+    return dict(filename='Cover Letter.pdf', mime='application/pdf', base64=base64.b64encode(content).decode('ascii'))

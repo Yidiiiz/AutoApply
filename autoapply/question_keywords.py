@@ -23,6 +23,8 @@ def normalize(text):
 def unusable_label(label):
     """Control boilerplate and machine identifiers are never applicant questions."""
     raw = str(label or '').strip()
+    if raw in {'GitHub', 'LinkedIn'}:
+        return False  # Public profile-link brands, not camelCase identifiers.
     text = normalize(raw)
     boilerplate = set('select one required optional please choose a an option search type here value enter selection answer item'.split())
     if not text or set(text.split()) <= boilerplate:
