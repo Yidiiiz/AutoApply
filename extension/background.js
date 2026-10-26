@@ -27,7 +27,7 @@ async function applySidebar(tabId, mode, version) {
   let [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:(mode,id)=>globalThis.autoApplyContent?.sidebar(mode,id),args:[mode,tab.id]});
   if(!frame?.result){
     if(mode!=='toggle'){const {sidebarTabs={}}=await chrome.storage.session.get('sidebarTabs');sidebarTabs[tab.id]=mode;await chrome.storage.session.set({sidebarTabs});}
-    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['credentials.js','content.js']});
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:['native-roots.js','credentials.js','content.js']});
     for(let attempt=0;attempt<6&&!frame?.result;attempt++){
       if(attempt)await delay(150);
       if(!current())return;

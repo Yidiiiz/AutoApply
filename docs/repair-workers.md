@@ -99,3 +99,19 @@ independent checks. No tests launch an AI CLI or call employers/providers.
 Focused evidence checks additionally exercise the real extension collector on
 the existing offline Workday fixture, retain its checkbox/menu-item ancestor
 shapes, and verify value redaction, ID normalization and structural deduplication.
+
+T073: Settings offers Dismiss only when the authoritative runner decision marks
+an attempt-1 terminal job needs_followup/blocked and no runner guard is active.
+The same-origin dashboard-token POST `/api/repairs/retire` accepts only `{id}`;
+extension credentials cannot authorize it. The action rechecks runner review,
+process identity, active/unreviewed work and quota guards under the dispatcher
+lock. It changes only the queue job to retired. Reports, decisions, evidence,
+launch budgets and the seen-fingerprint tombstone survive. Reconciliation never
+revives retired jobs, and pruning retains the tombstone. An unrelated fresh job
+can dispatch only after every existing runner/workspace/pause guard allows it.
+Dismissal neither accepts a report nor retries a task. A canceled job with a
+pending report remains ineligible until an explicit terminal runner review.
+
+Rooted native-control evidence is described in [shadow-fields.md](shadow-fields.md).
+Open-shadow native support is offline-verified using the reported public shapes;
+a fresh user trace is still required before claiming live employer completion.

@@ -1320,11 +1320,18 @@ def test_t060_analysis_inspects_without_profile_and_option_mismatch(http_dashboa
     payload['diagnostic']['fields'][0].update(kind='select', options=['Unrelated choice'])
     result = ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]
     assert result['findings'][0]['status'] == 'no_offered_match'
+    for options in (['Unrelated choice'], []):
+        actual = ext(http_dashboard, 'POST', '/ext/answers', dict(
+            url=payload['context_url'], fields=[dict(payload['diagnostic']['fields'][0], options=options)]))[1]
+        assert actual['answers'][0]['status'] == 'NEEDS_INPUT'
+        assert actual['answers'][0]['value'] is None
     # This is a temporary synthetic test profile, never the repository private data.
     (config.private/'profile.yaml').unlink()
-    result = ext(http_dashboard, 'POST', '/ext/snapshot', analysis_payload())[1]
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', payload)[1]
     assert result['ok'] and result['findings']
-    assert result['findings'][0]['status'] != 'ready_for_saved_answer'
+    assert result['findings'][0]['status'] == 'needs_user_fact'
+    result = ext(http_dashboard, 'POST', '/ext/snapshot', analysis_payload())[1]
+    assert result['ok'] and result['findings'][0]['status'] == 'needs_user_fact'
     for path in (config.private/'snapshots').glob('*.json'):
         assert path.stat().st_size < 1000000
 

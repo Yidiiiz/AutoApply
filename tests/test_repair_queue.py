@@ -464,7 +464,7 @@ def test_api_normal_missing_fact_and_auth_never_queue(http_dashboard):
 
 
 @pytest.mark.browser
-def test_real_extension_manual_and_passive_zero_fields_reach_backend_queue(loaded_extension, dashboard, fake_queue):
+def test_real_extension_native_shadow_fills_without_repair_worker(loaded_extension, dashboard, fake_queue):
     """Actual Chrome extension -> authenticated HTTP -> persistence -> real fake-runner process."""
     from autoapply.dashboard import DashboardServer
     from playwright.sync_api import expect
@@ -488,25 +488,122 @@ def test_real_extension_manual_and_passive_zero_fields_reach_backend_queue(loade
         panel = page.frame_locator('#autoapply-sidebar iframe')
         panel.locator('#send-structure').click()
         expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
-        expect(panel.locator('#analysis-note')).to_contain_text('user review is required', timeout=15000)
-        assert queue.status()['jobs'][0]['status'] == 'awaiting_review'
-        assert len(runner_rows(work)[0]) == 1
+        expect(page.locator('input')).to_have_value('Test Student')
+        assert queue.status()['jobs'] == []
+        assert runner_rows(work)[0] == []
         saved = [json.loads(p.read_text(encoding='utf-8')) for p in (dashboard.config.private / 'snapshots').glob('*.json')]
-        assert any(i['status'] == 'unsupported_shadow_controls' for s in saved for i in s['diagnostic']['inspections'])
+        assert any(i['status'] == 'controls_exposed' for s in saved for i in s['diagnostic']['inspections'])
         assert any(n.get('root_id') == 1 for s in saved for n in s['nodes'])
-        # Real collector with zero scanner fields, and the actual passive content
-        # method: no frontend response mock and no fill/application mutation.
         response = worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
-        assert response['fields'] == [] and response['waiting']
-        until(lambda: any(json.loads(p.read_text(encoding='utf-8')).get('source') == 'automatic_analysis'
-                          for p in (dashboard.config.private / 'snapshots').glob('*.json')))
-        assert len(runner_rows(work)[0]) == 1
+        assert len(response['fields']) == 1 and not response.get('waiting')
+        assert runner_rows(work)[0] == []
         assert page.evaluate('submissions') == 0
-        assert page.locator('input').input_value() == ''
-        assert any(json.loads(p.read_text(encoding='utf-8'))['source'] == 'automatic_analysis'
-                   for p in (dashboard.config.private / 'snapshots').glob('*.json'))
+        assert page.locator('input').input_value() == 'Test Student'
     finally:
         page.close()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_manual_retire_reviewed_terminal_tombstone_and_new_dispatch(fake_queue):
+    """Existing fake-runner seam only; no actual worker or provider."""
+    from autoapply.dashboard_settings import SettingsRejected
+    queue,work,_=fake_queue
+    queue.configure(dict(enabled=True))
+    first=queue.enqueue(capture())
+    queue.start()
+    until(lambda:queue.status()['jobs'][0]['status']=='awaiting_review')
+    assert not queue.status()['jobs'][0]['retireable']
+    with pytest.raises(SettingsRejected):
+        queue.retire({'id':first['id']})
+    rows,_,_=runner_rows(work);run=rows[0]
+    state=runner.State(work)
+    runner.review(state,run['id'],'needs_followup','Synthetic insufficient structural evidence reviewed')
+    budget_before=state.db.execute('SELECT used FROM budget WHERE id=1').fetchone()[0]
+    state.db.close()
+    until(lambda:queue.child is None)
+    assert queue.status()['jobs'][0]['retireable']
+    result=queue.retire({'id':first['id']})
+    assert result['jobs'][0]['status']=='retired'
+    assert queue.enqueue(capture())['status']=='retired'
+    queue.tick()
+    assert queue.status()['jobs'][0]['status']=='retired'
+    rows,decisions,_=runner_rows(work)
+    assert len(rows)==1 and decisions[run['id']]=='needs_followup'
+    state=runner.State(work)
+    assert state.db.execute('SELECT used FROM budget WHERE id=1').fetchone()[0]==budget_before
+    assert json.loads(Path(run['report']).read_text())['runner_outcome']=='checks_passed'
+    state.db.close()
+    fresh=capture();fresh['host']='unrelated.test'
+    queue.enqueue(fresh)
+    until(lambda:len(runner_rows(work)[0])==2)
+    assert queue.enqueue(capture())['status']=='retired'
+
+
+@pytest.mark.parametrize('change', ['no_decision','running','unreviewed_other','quota','accepted','wrong_id','pending'])
+def test_retire_requires_authoritative_terminal_review(fake_queue, change):
+    from autoapply.dashboard_settings import SettingsRejected
+    queue,work,_=fake_queue
+    queue.configure(dict(enabled=True,paused=True))
+    first=queue.enqueue(capture())
+    # Authoritative synthetic runner rows, no child process and no live state.
+    state=runner.State(work)
+    run_id='a'*32
+    state.claim(task_template(first['id'],{}),runner.config(work),run_id)
+    state.db.execute("UPDATE runs SET task_state='needs_followup',process_state='exited',pid=NULL,birth=NULL WHERE id=?",(run_id,))
+    state.db.execute('INSERT INTO decisions VALUES(?,?,?,?)',(run_id,'needs_followup','Synthetic manual review','fixture'))
+    with queue._db() as db:
+        db.execute("UPDATE jobs SET status='blocked',reason='blocked',run_id=?",(run_id,))
+    if change=='no_decision':
+        state.db.execute('DELETE FROM decisions')
+    elif change=='running':
+        state.db.execute("UPDATE runs SET process_state='running'")
+    elif change=='unreviewed_other':
+        state.db.execute("UPDATE runs SET task_state='awaiting_review'")
+        state.db.execute('DELETE FROM decisions')
+    elif change=='quota':
+        state.db.execute('UPDATE budget SET used=20')
+    elif change=='accepted':
+        state.db.execute("UPDATE decisions SET decision='accepted'")
+        state.db.execute("UPDATE runs SET task_state='accepted'")
+    elif change=='pending':
+        with queue._db() as db:db.execute("UPDATE jobs SET status='queued',run_id=NULL")
+    state.db.close()
+    with pytest.raises(SettingsRejected):
+        queue.retire({'id':'missing' if change=='wrong_id' else first['id']})
+    assert queue.status()['jobs'][0]['status']!='retired'
+
+
+def test_manual_retire_route_authentication(http_dashboard, fake_queue):
+    queue,work,_=fake_queue
+    http_dashboard[1].repairs=queue
+    assert web(http_dashboard,'/api/repairs/retire',{'id':'missing'})[0]==400
+    assert request(http_dashboard[0],'POST','/api/repairs/retire',{},json.dumps({'id':'missing'}))[0]==403
+    assert ext(http_dashboard,'POST','/api/repairs/retire',{'id':'missing'})[0]==403
+
+    queue.configure(dict(enabled=True, paused=True))
+    first=queue.enqueue(capture())
+    state=runner.State(work);run_id='b'*32
+    state.claim(task_template(first['id'],{}),runner.config(work),run_id)
+    state.db.execute("UPDATE runs SET task_state='needs_followup',process_state='interrupted',pid=NULL,birth=NULL WHERE id=?",(run_id,))
+    state.db.execute('INSERT INTO decisions VALUES(?,?,?,?)',(run_id,'needs_followup','Synthetic reviewed cancellation','fixture'))
+    state.db.close()
+    with queue._db() as db:db.execute("UPDATE jobs SET status='blocked',reason='blocked',run_id=?",(run_id,))
+    status,value,_=web(http_dashboard,'/api/repairs/retire',{'id':first['id']})
+    assert status==200 and value['paused'] and value['jobs'][0]['status']=='retired'
+    assert queue.enqueue(capture())['status']=='retired'
+
+
+def test_root_scoped_aliases_are_consistent_across_controls():
+    value=capture()
+    first=value['diagnostic']['fields'][0]
+    first.update(root_id=1, control=dict(tag='input',id='repeat',root_id=1,**{'aria-labelledby':'repeat'}),
+                 ancestors=[dict(tag='spl-input',id='repeat',root_id=0)])
+    second=json.loads(json.dumps(first));second['root_id']=2;second['control']['root_id']=2
+    value['diagnostic']['fields']=[first,second]
+    rows=evidence(value)[0]['controls']
+    assert rows[0]['control']['id']!=rows[1]['control']['id']
+    assert rows[0]['ancestors'][0]['id']==rows[1]['ancestors'][0]['id']
+    assert all(row['control']['aria-labelledby']==[row['control']['id']] for row in rows)
+    assert all(row['control']['id']!=row['ancestors'][0]['id'] for row in rows)

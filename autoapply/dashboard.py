@@ -1255,7 +1255,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if self.path not in {'/api/refresh', '/api/run', '/api/pause', '/api/resume', '/api/stop',
                              '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv',
-                             '/api/credentials', '/api/repairs', '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
+                             '/api/credentials', '/api/repairs', '/api/repairs/retire', '/api/extension-key/regenerate', '/api/ext-run', '/api/ext-run/cancel'}:
             self._reply(404, dict(error='endpoint not found'))
             return
         try:
@@ -1293,7 +1293,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._reply(200, dashboard.settings.replace_resume(body))
             elif self.path == '/api/refresh':
                 self._reply(202, dict(id=dashboard.start_refresh()))
-            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv', '/api/ext-run', '/api/repairs'} or (
+            elif self.path in {'/api/run', '/api/applied', '/api/unapplied', '/api/not-eligible', '/api/eligible', '/api/settings', '/api/cv', '/api/ext-run', '/api/repairs', '/api/repairs/retire'} or (
                     self.path == '/api/resume' and self.headers.get('Content-Length', '0') != '0'):
                 try:
                     lengths = self.headers.get_all('Content-Length', [])
@@ -1310,6 +1310,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         result = dashboard.run_worker(body.get('count'))
                     elif self.path == '/api/ext-run':
                         result = extension_api.run_start(dashboard, body)
+                    elif self.path == '/api/repairs/retire':
+                        result = dashboard.repairs.retire(body)
                     elif self.path == '/api/repairs':
                         result = dashboard.repairs.configure(body)
                     elif self.path == '/api/settings':

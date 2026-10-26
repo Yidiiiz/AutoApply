@@ -293,6 +293,11 @@ def test_actual_mv3_auth_forms_and_privacy(loaded_extension):
         page.locator('form').evaluate('form=>form.action="http://fixture.myworkdayjobs.com/insecure"')
         assert isolated('describe')['supported'] is False
         page.reload()
+        page.locator('#password').evaluate('input=>input.readOnly=true')
+        description = isolated('describe')
+        assert description['active'] and not description['supported']
+        assert isolated('privacy')['scan']['fields'] == []
+        page.reload()
         worker.evaluate('fixtureConfigured=false')
         missing = autofill()
         assert 'Set your account password' in missing['progress']
@@ -351,9 +356,10 @@ def test_toolbar_injects_missing_credentials_before_content(loaded_extension):
             const [frame]=await chrome.scripting.executeScript({target:{tabId:tab},world:'ISOLATED',func:()=>{
               if(!globalThis.autoApplyCredentials || !globalThis.autoApplyContent)return false;
               delete globalThis.autoApplyCredentials;
+              delete globalThis.autoApplyNativeRoots;
               delete globalThis.autoApplyContent;
               delete globalThis[Symbol.for('autoapply.content')];
-              return !globalThis.autoApplyCredentials && !globalThis.autoApplyContent && !globalThis[Symbol.for('autoapply.content')];
+              return !globalThis.autoApplyNativeRoots && !globalThis.autoApplyCredentials && !globalThis.autoApplyContent && !globalThis[Symbol.for('autoapply.content')];
             }});
             if(frame.result)return;
             await new Promise(resolve=>setTimeout(resolve,50));

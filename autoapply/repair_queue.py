@@ -15,6 +15,7 @@ from .runtime import ProcessLock
 CAP = 20
 INTERVAL = 15
 MESSAGES = {
+    'retired': 'Reviewed repair dismissed; its fingerprint will not launch again.',
     'disabled': 'Automatic repair work is disabled. Enable it in Settings.',
     'paused': 'Repair work is paused.',
     'queued': 'Repair queued; waiting for a safe workspace.',
@@ -48,7 +49,7 @@ SELECTOR_WORDS = set(('field of study form control input select textarea button 
                       'responsive moniker prompt menu item option checkbox panel radio btn leaf node '
                       'active list container multi multiselect single header selected value wrapper popup proxy '
                       'react search text box root group custom widget picker wd workday ui app mat ion '
-                      'vaadin now oj sl md combobox listbox trigger content viewport scroll').split())
+                      'vaadin now oj sl md combobox listbox trigger content viewport scroll spl dropzone').split())
 CAUSES = {'unsupported_widget', 'omitted_by_scanner', 'verification_failed',
           'unsupported_shadow_controls', 'native_control_missing_inventory'}
 
@@ -61,7 +62,7 @@ def public_selector(value):
     return value if set(re.split(r'[ _-]+', words)) <= SELECTOR_WORDS else None
 
 
-def widget_structure(field):
+def widget_structure(field, aliases=None):
     """Only captured control/ancestor/menu shapes; no snapshot text or answers.
 
     IDs are local opaque aliases. They preserve equality/ARIA edges while ignoring
@@ -70,16 +71,19 @@ def widget_structure(field):
     menu = field.get('menu', {})
     raw = [field.get('control', {}), *field.get('ancestors', [])[:4],
            *menu.get('containers', [])[:2], *menu.get('option_shapes', [])[:3]]
-    aliases = {}
+    aliases = {} if aliases is None else aliases
+    used = set()
 
-    def alias(value):
+    def alias(value, root=0):
         # Used only as an internal equality key; the original is never emitted.
         if not isinstance(value, str) or not 0 < len(value) <= 300 or re.search(r'\s', value):
             return None
-        return aliases.setdefault(value, 'node' + str(len(aliases) + 1))
+        identity = aliases.setdefault((field.get('frame_id', 0), root, value), 'node' + str(len(aliases) + 1))
+        used.add(identity)
+        return identity
 
     for shape in raw:
-        alias(shape.get('id'))
+        alias(shape.get('id'), shape.get('root_id', field.get('root_id', 0)))
 
     def shape(value):
         result = {}
@@ -107,13 +111,16 @@ def widget_structure(field):
                 result['class'] = ' '.join(safe)
             if len(safe) != len(set(classes.split())):
                 omitted.append('class')
-        identity = alias(value.get('id'))
+        root_id = value.get('root_id', field.get('root_id', 0))
+        if type(root_id) is int and 0 <= root_id < 128 and ('root_id' in value or 'root_id' in field):
+            result['root_id'] = 'root' + str(root_id + 1)
+        identity = alias(value.get('id'), root_id)
         if identity:
             result['id'] = identity
         for key in ('aria-controls', 'aria-owns', 'aria-labelledby'):
             refs = value.get(key, '')
             if isinstance(refs, str) and len(refs) <= 300:
-                targets = [alias(ref) for ref in refs.split()[:4]]
+                targets = [alias(ref, root_id) for ref in refs.split()[:4]]
                 if targets:
                     result[key] = [target for target in targets if target]
         for key in ('readonly', 'disabled', 'transformed'):
@@ -135,7 +142,7 @@ def widget_structure(field):
                             option_shapes=[shape(o) for o in menu.get('option_shapes', [])[:3]]))
     present = {s['id'] for s in [result['control'], *result['ancestors'],
                                *result['menu']['containers'], *result['menu']['option_shapes']] if 'id' in s}
-    result['unobserved_references'] = sorted(set(aliases.values()) - present)
+    result['unobserved_references'] = sorted(used - present)
     return result
 
 
@@ -143,7 +150,9 @@ def root_shape(root, index):
     return dict(id='root' + str(index + 1), kind=root['kind'],
                 host='document' if root['kind'] == 'document' else
                 public_selector(root.get('host')) or '[custom-element]',
-                count=min(root.get('exposed_controls', 0), 10000))
+                count=min(root.get('exposed_controls', 0), 10000),
+                **({'parent_id': 'root' + str(root['parent_id'] + 1) if root['parent_id'] is not None else None}
+                   if 'parent_id' in root else {}))
 
 
 def evidence(saved):
@@ -154,7 +163,7 @@ def evidence(saved):
             diagnostic.get('repair', {}).get('stopped', 'none') != 'none' or
             any(i.get('status') in {'access_blocked', 'loading', 'account_private', 'embedded_content_unavailable'} for i in inspections)):
         return None, 'user'
-    rows = []
+    rows, aliases = [], {}
     for field in diagnostic.get('fields', [])[:50]:
         reasons = set(field.get('reasons', []))
         status = field.get('repair_status')
@@ -170,17 +179,23 @@ def evidence(saved):
             causes = ['verification_failed']
         if not causes:
             continue
-        structure = widget_structure(field)
-        # Flat snapshot nodes lack frame IDs. Only an exact unique ID match in a
-        # single inspected frame can establish root membership without guessing.
+        structure = widget_structure(field, aliases)
+        # Explicit tree membership is authoritative; legacy flat captures require
+        # a unique ID and frame before associating a root.
         identity = field.get('control', {}).get('id')
-        if identity and len(inspections) == 1 and inspections[0].get('frame_id', 0) == field.get('frame_id', 0):
-            matches = [n for n in saved.get('nodes', [])[:10000] if n.get('id') == identity]
-            if len(matches) == 1:
-                for index, root in enumerate(inspections[0].get('roots', [])[:40]):
-                    if root.get('id') == matches[0].get('root_id'):
-                        structure['root'] = root_shape(root, index)
-                        break
+        for inspection in inspections:
+            if inspection.get('frame_id', 0) != field.get('frame_id', 0):
+                continue
+            root_id = field.get('root_id')
+            if root_id is None and identity and len(inspections) == 1:
+                matches = [n for n in saved.get('nodes', [])[:10000] if n.get('id') == identity]
+                if len(matches) == 1:
+                    root_id = matches[0].get('root_id')
+            for index, root in enumerate(inspection.get('roots', [])[:128]):
+                if root.get('id') == root_id:
+                    structure['root'] = root_shape(root, index)
+                    structure['frame_id'] = field.get('frame_id', 0)
+                    break
         # Native omissions and nontrivial widgets are structural faults regardless
         # of whether a personal answer is present. Normal unknown questions are not.
         rows.append(dict(label=label if label in LABELS else '[other label]',
@@ -190,7 +205,7 @@ def evidence(saved):
     roots = []
     for inspection in inspections[:20]:
         status = inspection.get('status')
-        captured_roots = inspection.get('roots', [])[:40]
+        captured_roots = inspection.get('roots', [])[:128]
         count = sum(r.get('exposed_controls', 0) for r in captured_roots)
         if status == 'unsupported_shadow_controls' or status == 'controls_exposed' and count and not diagnostic.get('fields'):
             roots.append(dict(cause='unsupported_shadow_controls' if status == 'unsupported_shadow_controls'
@@ -200,6 +215,9 @@ def evidence(saved):
         return None, 'normal'
     result = dict(host=saved['host'].lower(), controls=sorted(rows, key=lambda r: json.dumps(r, sort_keys=True)),
                   inventory=sorted(roots, key=lambda r: json.dumps(r, sort_keys=True)))
+    if rows:
+        result['root_trees'] = [dict(frame_id=i.get('frame_id', 0), roots=[root_shape(r, r['id']) for r in i.get('roots', [])[:128]])
+                                for i in inspections[:20] if i.get('roots')]
     return result, None
 
 
@@ -366,11 +384,30 @@ class RepairQueue:
             return None
         return dict(id=row['task_id'], status=row['status'], message=MESSAGES.get(row['reason'], MESSAGES[row['status']]))
 
+    def _retirable(self, job, rows, decisions, guard):
+        runs = [r for r in rows if r['task_id'] == job['task_id'] and r['attempt'] == 1]
+        run = runs[0] if len(runs) == 1 else None
+        return bool(job['status'] in {'blocked', 'awaiting_review'} and run and
+                    (not job['run_id'] or job['run_id'] == run['id']) and
+                    decisions.get(run['id']) in {'needs_followup', 'blocked'} and
+                    run['task_state'] in {'needs_followup', 'blocked'} and
+                    run['process_state'] not in {'running', 'auth_or_quota'} and guard is None and
+                    not (self.child and self.child.poll() is None) and
+                    not any(r['process_state'] == 'running' or r['task_state'] in {'running', 'awaiting_review', 'blocked'} and r['id'] not in decisions for r in rows) and
+                    not (job['pid'] and job['birth'] and self.birth(job['pid']) == job['birth']))
+
     def status(self):
         with self.mutex, self._db() as db:
             options = db.execute('SELECT * FROM options').fetchone()
+            jobs = db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT ?', (CAP,)).fetchall()
+            rows, decisions, guard = [], {}, 'workspace'
+            if any(j['status'] in {'blocked', 'awaiting_review'} for j in jobs):
+                try:
+                    rows, decisions, guard = self.inspect(self.source.parent / 'AutoApply-codex')
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
             return dict(enabled=bool(options['enabled']), paused=bool(options['paused']),
-                        jobs=[self._view(r) for r in db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT ?', (CAP,))])
+                        jobs=[dict(self._view(j), retireable=self._retirable(j, rows, decisions, guard)) for j in jobs])
 
     def configure(self, payload):
         from .dashboard_settings import SettingsRejected
@@ -380,6 +417,24 @@ class RepairQueue:
         with self.mutex, self._db() as db:
             for key, value in payload.items():
                 db.execute('UPDATE options SET ' + key + '=? WHERE id=1', (int(value),))
+        self.wake.set()
+        return self.status()
+
+    def retire(self, payload):
+        """Manual dismissal only; runner reports/decisions and seen tombstones survive."""
+        from .dashboard_settings import SettingsRejected
+        if not isinstance(payload, dict) or set(payload) != {'id'} or not isinstance(payload['id'], str):
+            raise SettingsRejected('Use a repair job id')
+        with self.tick_mutex, ProcessLock(self.lock_path), self.mutex, self._db() as db:
+            try:
+                rows, decisions, guard = self.inspect(self.source.parent / 'AutoApply-codex')
+            except (OSError, ValueError, sqlite3.Error):
+                raise SettingsRejected('Runner review unavailable') from None
+            self._reconcile(db, None, rows, decisions)
+            job = db.execute('SELECT * FROM jobs WHERE task_id=?', (payload['id'],)).fetchone()
+            if not job or not self._retirable(job, rows, decisions, guard):
+                raise SettingsRejected('Only reviewed terminal repairs can be dismissed; resolve runner guards first')
+            db.execute("UPDATE jobs SET status='retired',reason='retired',pid=NULL,birth=NULL WHERE fingerprint=?", (job['fingerprint'],))
         self.wake.set()
         return self.status()
 
@@ -400,7 +455,7 @@ class RepairQueue:
             if db.execute('SELECT 1 FROM seen WHERE fingerprint=?', (fingerprint,)).fetchone():
                 return dict(status='completed', message=MESSAGES['completed'])
             if db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] >= CAP:
-                old = db.execute("SELECT fingerprint FROM jobs WHERE status='completed' ORDER BY created LIMIT 1").fetchone()
+                old = db.execute("SELECT fingerprint FROM jobs WHERE status IN ('completed','retired') ORDER BY created LIMIT 1").fetchone()
                 if not old:
                     return dict(status='blocked', message=MESSAGES['capacity'])
                 db.execute('DELETE FROM jobs WHERE fingerprint=?', (old[0],))
@@ -430,7 +485,7 @@ class RepairQueue:
             self.wake.clear()
 
     def _reconcile(self, db, work, rows, decisions):
-        for job in db.execute("SELECT * FROM jobs WHERE status IN ('running','dispatching','awaiting_review') OR pid IS NOT NULL").fetchall():
+        for job in db.execute("SELECT * FROM jobs WHERE status IN ('running','dispatching','awaiting_review') OR (pid IS NOT NULL AND status!='retired')").fetchall():
             run = next((r for r in rows if r['task_id'] == job['task_id'] and r['attempt'] == 1), None)
             if run:
                 status = ('completed' if decisions.get(run['id']) == 'accepted' else

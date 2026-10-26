@@ -90,7 +90,9 @@ def _question(field):
         raise SettingsRejected('Invalid field kind, options, required, key or max_length')
     if kind == 'checkbox' and len(options) > 1 and field.get('multiple') is True:
         kind = 'multiselect'
-    return Question(field.get('key', field['label']), field['label'], kind,
+    # This observed public label is a brand, not a camelCase machine identifier.
+    label = 'Linkedin' if field['label'].strip() == 'LinkedIn' else field['label']
+    return Question(field.get('key', field['label']), label, kind,
                     field.get('required', False), options, maximum)
 
 
@@ -301,6 +303,10 @@ def _analysis_structure(value):
                'aria-labelledby', 'aria-controls', 'aria-owns', 'aria-haspopup', 'aria-expanded',
                'aria-disabled', 'aria-readonly', 'aria-hidden', 'inputmode', 'aria-autocomplete', 'display', 'visibility'}
     row = {}
+    if 'root_id' in value:
+        if type(value['root_id']) is not int or not 0 <= value['root_id'] < 128:
+            raise SettingsRejected('Invalid analysis root')
+        row['root_id'] = value['root_id']
     for key in strings & value.keys():
         if not isinstance(value[key], str):
             raise SettingsRejected('Invalid analysis attribute')
@@ -398,16 +404,29 @@ def _inspections(values):
             continue
         status = value.get('status')
         roots, frames = value.get('roots', []), value.get('frames', [])
-        if (status not in statuses or not isinstance(roots, list) or len(roots) > 40 or
+        if (status not in statuses or not isinstance(roots, list) or len(roots) > 128 or
                 not isinstance(frames, list) or len(frames) > 20):
             raise SettingsRejected('Invalid inspection inventory')
         safe_roots, safe_frames = [], []
+        root_ids = set()
         for root in roots:
             if (not isinstance(root, dict) or root.get('kind') not in {'document', 'open_shadow'} or
                     not isinstance(root.get('host'), str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}', root['host'])):
                 raise SettingsRejected('Invalid inspection root')
-            safe_roots.append(dict(id=integer(root.get('id'), 39), host=root['host'], kind=root['kind'],
+            root_id = integer(root.get('id'), 127)
+            if root_id in root_ids:
+                raise SettingsRejected('Duplicate inspection root')
+            parent = root.get('parent_id')
+            if 'parent_id' in root and (root_id != len(safe_roots) or
+                    root['kind'] != ('document' if root_id == 0 else 'open_shadow') or
+                    root['kind'] == 'document' and parent is not None or
+                    root['kind'] == 'open_shadow' and (type(parent) is not int or parent not in root_ids)):
+                raise SettingsRejected('Invalid inspection parent')
+            root_ids.add(root_id)
+            safe_roots.append(dict(id=root_id, host=root['host'], kind=root['kind'],
                                    exposed_controls=integer(root.get('exposed_controls'), 10000)))
+            if 'parent_id' in root:
+                safe_roots[-1]['parent_id'] = parent
         for frame in frames:
             if (not isinstance(frame, dict) or type(frame.get('visible')) is not bool or
                     type(frame.get('accessible')) is not bool or frame.get('ready_state') not in {'loading', 'interactive', 'complete', 'unavailable'}):
@@ -445,7 +464,7 @@ def _page_analysis(dashboard, payload, host):
             raise SettingsRejected('Invalid analysis menu shape')
         if type(field.get('multiple', False)) is not bool:
             raise SettingsRejected('Invalid analysis multiple state')
-        row = dict(label=q.label[:300], kind=field['kind'], multiple=field.get('multiple', False), required=q.required, options=[s[:200] for s in options],
+        row = dict(label=field['label'][:300], kind=field['kind'], multiple=field.get('multiple', False), required=q.required, options=[s[:200] for s in options],
                    control=_analysis_structure(field.get('control')), ancestors=[_analysis_structure(p) for p in parents],
                    menu=dict(observed=menu.get('observed', False), count=menu.get('count', 0), roles=menu.get('roles', []),
                              containers=[_analysis_structure(c) for c in containers], option_shapes=[_analysis_structure(o) for o in option_shapes]), reasons=why)
@@ -457,6 +476,11 @@ def _page_analysis(dashboard, payload, host):
         if type(frame_id) is not int or not 0 <= frame_id <= 1000000 or not isinstance(identity, str) or len(identity) > 100 or not re.fullmatch(r'[0-9:]*', identity):
             raise SettingsRejected('Invalid analysis source')
         row.update(frame_id=frame_id, page_identity=identity)
+        if 'root_id' in field:
+            root_id = field['root_id']
+            if type(root_id) is not int or not 0 <= root_id < 128 or row['control'].get('root_id') != root_id:
+                raise SettingsRejected('Invalid analysis root membership')
+            row['root_id'] = root_id
         repair_status = field.get('repair_status')
         if repair_status is not None:
             if repair_status not in {'optional_skip', 'unresolved', 'verified', 'verification_failed', 'user_edited'}:
@@ -511,7 +535,9 @@ def _page_analysis(dashboard, payload, host):
                     status = 'needs_user_fact'
                 elif resolution.descriptor.semantic_key in {'UNKNOWN_FIELD', 'REJECTED_FIELD'}:
                     status = 'unknown_concept'
-                elif q.options and resolver.resolve_result(replace(q, options=[]), app).answer is not None:
+                # Diagnostic-only fact projection: an optionless select must
+                # abstain during actual filling, even when a saved fact exists.
+                elif q.options and resolver.resolve_result(replace(q, kind='text', options=[]), app).answer is not None:
                     status = 'no_offered_match'
                 elif answers.is_writing_question(q):
                     status = 'needs_writing'
@@ -545,7 +571,7 @@ def _page_analysis(dashboard, payload, host):
                 repair.get('stopped') not in {'none', 'user_edit', 'interrupted'} or
                 not isinstance(repair.get('before'), dict) or 'repair' in repair['before']):
             raise SettingsRejected('Invalid repair diagnosis')
-        before = _page_analysis(dashboard, dict(payload, diagnostic=dict(repair['before'], reason='page_analysis')), host)
+        before = _page_analysis(dashboard, dict(payload, diagnostic=dict(repair['before'], reason='page_analysis', inspections=diagnostic.get('inspections', []))), host)
         sanitized_repair = dict(filled=repair['filled'], attempts=repair['attempts'], stopped=repair['stopped'],
                                 before=before)
         if total:
@@ -553,6 +579,13 @@ def _page_analysis(dashboard, payload, host):
         if repair['stopped'] != 'none':
             summary += ' \u00b7 Repair stopped; review and retry'
     inspections = _inspections(diagnostic.get('inspections', []))
+    for field in safe:
+        if 'root_id' not in field:
+            continue
+        inventory = next((i for i in inspections if i['frame_id'] == field['frame_id']), None)
+        ids = {r['id'] for r in inventory['roots']} if inventory else set()
+        if field['root_id'] not in ids or any(shape.get('root_id', field['root_id']) not in ids for shape in [field['control'], *field['ancestors']]):
+            raise SettingsRejected('Unknown analysis root')
     if not total and inspections:
         messages = {'unsupported_shadow_controls': 'Open shadow controls need scanner support.',
                     'access_blocked': 'Page access or verification requires user attention.',
@@ -590,7 +623,7 @@ def snapshot(dashboard, payload):
             row.pop('text', None)
         row['visible'] = node.get('visible') is True
         if 'root_id' in node:
-            if type(node['root_id']) is not int or not 0 <= node['root_id'] < 40:
+            if type(node['root_id']) is not int or not 0 <= node['root_id'] < 128:
                 raise SettingsRejected('Invalid snapshot root')
             row['root_id'] = node['root_id']
         caption = node.get('caption')
@@ -728,6 +761,9 @@ def resolve_answers(dashboard, payload):
             if (re.search(r'^if yes.*(?:name|who).*referred', normalize(q.label))
                     and profile.get('application_preferences', {}).get('referred_by_employee') is False):
                 result.append(dict(key=q.key, value='', source='profile:application_preferences.referred_by_employee', status='OPTIONAL_SKIP'))
+                continue
+            if q.kind == 'file' and not re.search(r'\b(resume|cv|cover)\b', q.label, re.I):
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT', reason='File purpose is ambiguous; choose the attachment manually.'))
                 continue
             if q.kind == 'file':
                 result.append(dict(key=q.key, value='cover_letter' if 'cover' in q.label.lower() else 'resume',

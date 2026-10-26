@@ -434,7 +434,7 @@ function repairCard(){
  async function refresh(changes){clearTimeout(repairSettingsTimer);try{const value=changes?await post('repairs',changes):await request('/api/repairs',{headers:{'X-Dashboard-Token':token}});if(!card.isConnected)return;
   toggle.textContent=value.enabled?'Disable automatic repairs':'Enable automatic repairs';toggle.onclick=()=>refresh({enabled:!value.enabled});pause.hidden=!value.enabled;pause.textContent=value.paused?'Resume repairs':'Pause repairs';pause.onclick=()=>refresh({paused:!value.paused});
   status.textContent=!value.enabled?'Disabled. Only fresh captures after enabling can queue work.':value.paused?'Paused; queued jobs are retained.':'Enabled; waiting for fresh Analyze or automatic captures.';
-  list.replaceChildren(...value.jobs.map(job=>node('li',job.status+' · '+job.message)));repairSettingsTimer=setTimeout(()=>refresh(),5000);
+  list.replaceChildren(...value.jobs.map(job=>{const row=node('li',job.status+' \u00b7 '+job.message);if(job.retireable){const dismiss=node('button','\u00d7');dismiss.title='Dismiss reviewed terminal repair';dismiss.setAttribute('aria-label',dismiss.title);dismiss.onclick=async()=>{try{await post('repairs/retire',{id:job.id});await refresh();}catch{status.textContent='Dismissal requires a terminal runner review and no active runner guards.';}};row.append(dismiss);}return row;}));repairSettingsTimer=setTimeout(()=>refresh(),5000);
  }catch{status.textContent='Repair status unavailable.';}}
  setTimeout(()=>refresh(),0);return card;
 }

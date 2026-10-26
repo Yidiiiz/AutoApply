@@ -1,12 +1,32 @@
 // Isolated-world only. Never send values through runtime messages or storage.
 (() => {
   if(globalThis.autoApplyCredentials)return;
+  const native=globalThis.autoApplyNativeRoots;
   const marked=new WeakSet(),secrets=new Set();
-  const visible=el=>Boolean(el?.isConnected && el.getClientRects().length && getComputedStyle(el).visibility!=='hidden' && getComputedStyle(el).display!=='none');
+  const visible=el=>{
+    if(!el?.isConnected || !el.getClientRects().length)return false;
+    for(let node=el;node instanceof Element;node=node.assignedSlot || native.parent(node)){
+      const style=getComputedStyle(node);
+      if(node.hidden || node.inert || node.getAttribute('aria-hidden')==='true' ||
+         style.display==='none' || ['hidden','collapse'].includes(style.visibility) || Number(style.opacity)===0)return false;
+    }
+    return true;
+  };
   const editable=el=>visible(el) && !el.disabled && !el.readOnly && !el.matches(':disabled,[aria-readonly="true"]');
   const hint=el=>[el.name,el.id,el.getAttribute('autocomplete'),el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' ');
-  const passwords=()=>Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
-  const active=()=>passwords().length>0;
+  const passwords=()=>native.query('input[type="password"]').filter(visible);
+  const active=()=>{
+    const roots=native.discover(),pw=native.query('input[type="password"]',roots);
+    // Passwords are always private, including hidden templates; only exposed
+    // passwords activate page-wide authentication privacy.
+    for(const el of pw){marked.add(el);if(el.value)secrets.add(el.value);}
+    if(!pw.some(visible))return Boolean(roots.truncated);
+    // Remember manual shadow-auth identities even if the password later disappears.
+    for(const el of native.query('input,textarea')) if(el.type==='password' || el.type==='email' || /username|user.?name|login|email/i.test(hint(el))){
+      marked.add(el);if(el.value)secrets.add(el.value);
+    }
+    return true;
+  };
   const sensitive=el=>Boolean(el && (marked.has(el) || el.type==='password' ||
     /password|username|user.?name|account.?email|login.?email/i.test(hint(el)) ||
     el.matches('input,textarea,[contenteditable]') && Array.from(secrets).some(secret=>secret && String(el.value || el.textContent || '').includes(secret)) ||
@@ -18,8 +38,11 @@
     return value;
   }
   function form(){
+    if(native.discover().truncated)return null;
     const pw=passwords();
     if(!pw.length || pw.some(el=>!editable(el)) || pw.length>2)return null;
+    // Shadow authentication is private but deliberately remains manual.
+    if(pw.some(el=>el.getRootNode()!==document))return null;
     const root=pw[0].form || pw[0].closest('[role="form"],main,[role="dialog"]');
     if(!root || pw.some(el=>!root.contains(el)))return null;
     if(/reset.?password|password.?reset|change.?password|password.?change|forgot.?password/i.test(location.pathname))return null;
