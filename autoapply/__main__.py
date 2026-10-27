@@ -251,6 +251,25 @@ def main():
         except (ValueError, RuntimeError, OSError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
+    # Claim the endpoint before Config, logging, migrations, or daily work. The
+    # OS releases this owned lock on exit/crash; never inspect or kill processes.
+    if args.command == 'dashboard' and args.port:
+        from pathlib import Path
+        from tempfile import gettempdir
+        guard = ProcessLock(Path(gettempdir()) / f'autoapply-dashboard-127.0.0.1-{args.port}.lock')
+        try:
+            guard.__enter__()
+        except RuntimeError:
+            print(f'Dashboard already running at http://127.0.0.1:{args.port}/')
+            return 0
+        try:
+            return _main_initialized(args)
+        finally:
+            guard.__exit__(None, None, None)
+    return _main_initialized(args)
+
+
+def _main_initialized(args):
     from dotenv import load_dotenv
     from pathlib import Path
     load_dotenv(Path(args.root) / ".env", override=False)

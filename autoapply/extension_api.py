@@ -92,6 +92,10 @@ def _question(field):
         kind = 'multiselect'
     # This observed public label is a brand, not a camelCase machine identifier.
     label = 'Linkedin' if field['label'].strip() == 'LinkedIn' else field['label']
+    # Lever's plain current-location text field asks for the saved home city.
+    # Choice widgets and preference questions retain their separate policies.
+    if kind == 'text' and normalize(label).strip(' *:') == 'current location':
+        label = 'City'
     return Question(field.get('key', field['label']), label, kind,
                     field.get('required', False), options, maximum)
 
@@ -568,7 +572,7 @@ def _page_analysis(dashboard, payload, host):
     if repair is not None:
         if (not isinstance(repair, dict) or type(repair.get('filled')) is not int or not 0 <= repair['filled'] <= 500 or
                 type(repair.get('attempts')) is not int or not 0 <= repair['attempts'] <= 2 or
-                repair.get('stopped') not in {'none', 'user_edit', 'interrupted'} or
+                repair.get('stopped') not in {'none', 'user_edit', 'interrupted', 'transport_error', 'repair_error'} or
                 not isinstance(repair.get('before'), dict) or 'repair' in repair['before']):
             raise SettingsRejected('Invalid repair diagnosis')
         before = _page_analysis(dashboard, dict(payload, diagnostic=dict(repair['before'], reason='page_analysis', inspections=diagnostic.get('inspections', []))), host)
@@ -576,7 +580,11 @@ def _page_analysis(dashboard, payload, host):
                                 before=before)
         if total:
             summary = f'Filled {repair["filled"]} \u00b7 {unanswered} need attention'
-        if repair['stopped'] != 'none':
+        if repair['stopped'] == 'transport_error':
+            summary += ' \u00b7 Dashboard transport unavailable after bounded retries; saved answers can be retried'
+        elif repair['stopped'] == 'repair_error':
+            summary += ' \u00b7 Local repair failed; structural evidence captured'
+        elif repair['stopped'] != 'none':
             summary += ' \u00b7 Repair stopped; review and retry'
     inspections = _inspections(diagnostic.get('inspections', []))
     for field in safe:
@@ -729,12 +737,13 @@ def resolve_answers(dashboard, payload):
     page = payload.get('page') or {}
     if not isinstance(page, dict) or not isinstance(page.get('description', ''), str):
         raise SettingsRejected('page.description must be text')
-    with dashboard.settings.mutex, dashboard.connection(writable=True) as db:
+    # Resolve on a reader. Public description caching below is nonblocking and
+    # defers archive export; saved answers never wait for unrelated disk work.
+    with dashboard.settings.mutex, dashboard.connection() as db:
         app = _application(db, payload)
         _unprotected(app)
         description = page.get('description', '')[:6000]
         if 'job_id' in app and len(description) > len(app.get('description') or ''):
-            descriptions.store(db, app['job_id'], description)
             app['description'] = description
         resolver = answers.AnswerResolver(dashboard.config, db)
         profile = dashboard.config.profile
@@ -828,6 +837,8 @@ def resolve_answers(dashboard, payload):
                                source=answer.source if answer else '', status=status,
                                **({'reason': 'No offered location matches saved preferences.'} if answer is None
                                   and re.fullmatch(r'what is your top location preference', normalize(q.label)) else {})))
+    if 'job_id' in app and description:
+        dashboard.cache_extension_description(app['job_id'], description)
     return dict(answers=result)
 
 

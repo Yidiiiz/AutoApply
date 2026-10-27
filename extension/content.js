@@ -264,9 +264,10 @@
     if(signInPage())return [];
     return Array.from(records.values()).filter(r=>!r.members.some(e=>repairEdited.has(e)) &&
       !diagnosticExcluded(r.element) && !isSkillsField(r.element) &&
-      !r.element.closest('a[href]') && !(r.element.tagName==='BUTTON' && r.element.type!=='button') &&
+      (!r.element.closest('a[href]') || leverResumeProxy(r.element)) && !(r.element.tagName==='BUTTON' && r.element.type!=='button') &&
       !isPrompt(r.element) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
-      ['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind))
+      (['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind) ||
+       r.field.kind==='file' && analyzeResume(r.element)))
       .map(r=>({...r.field,answered:occupied(r)}));
   }
   async function repairOptions(token){
@@ -276,7 +277,7 @@
       return repairFields().filter(f=>!f.answered && !repairSession.verified.has(f.key));
     });
   }
-  async function repairFill(token,answers){
+  async function repairFill(token,answers,files={}){
     return repairOperation(token,async()=>{
       const allowed=new Set(repairFields().filter(f=>!f.answered).map(f=>f.key));
       for(const answer of answers){
@@ -284,9 +285,12 @@
         if(!allowed.has(answer.key))continue;
         const record=records.get(answer.key);
         repairSession.outcomes.set(record.element,answer.status==='OPTIONAL_SKIP'?'optional_skip':'unresolved');
-        if(answer.status!=='RESOLVED')continue;
-        // No force, files, section preparation, writing, or implicit phone picker.
-        const result=await fillFields([{key:answer.key,status:'RESOLVED',value:answer.value,source:answer.source,verify_settled:true}]);
+        const resume=answer.status==='FILE' && answer.value==='resume' && record.field.kind==='file' &&
+          analyzeResume(record.element);
+        if(answer.status!=='RESOLVED' && !resume)continue;
+        // Only the explicit saved resume association can upload during Analyze.
+        // No force, cover letters, writing, or section preparation.
+        const result=await fillFields([{key:answer.key,status:resume?'FILE':'RESOLVED',value:answer.value,source:answer.source,verify_settled:true}],resume?{resume:files.resume}:{});
         await pause(400);assertRepair(token);refreshRecord(record);
         const done=result.completed[0];
         if(done && (occupied(record) || record.field.kind==='checkbox' && answer.value===false) &&
@@ -424,7 +428,20 @@
     copy.querySelectorAll('input,textarea,select,[contenteditable],script,style,[data-automation-id="selectedItem"],[class*="single-value"],[class*="singleValue"]').forEach(node=>node.remove());
     return text(copy);
   }
+  function leverQuestionLabel(element) {
+    const question=element.closest('li.application-question');
+    if(!question || !element.closest('.application-field'))return null;
+    // Bound the label to this question. Upload/location status text and a
+    // previous question or company heading are not the applicant's question.
+    const node=Array.from(question.children).find(child=>child.matches('label,.application-label'));
+    if(!node)return 'Unlabelled field';
+    const copy=node.cloneNode(true);
+    copy.querySelectorAll('.application-field,input,textarea,select,[role="status"],[role="alert"],.error,.loading').forEach(child=>child.remove());
+    return usableLabel(text(copy)) || 'Unlabelled field';
+  }
   function label(element) {
+    const lever=leverQuestionLabel(element);
+    if(lever!==null)return lever;
     const sources = [Array.from(element.labels || []).map(questionText).join(' '), questionText(element.closest('label')),
       referencedLabel(element, 'aria-labelledby')];
     const container = element.closest('[data-automation-id^="formField"],fieldset,[role="group"]');
@@ -635,7 +652,27 @@
     return Array.from(element.closest('#resumator-resume').querySelectorAll('a#resumator-choose-upload,a#resumator-resume-switch-upload'))
       .find(link=>visible(link)&&/^attach resume(?: file)?$/i.test(text(link)));
   }
+  function analyzeResume(element) {
+    if(!element?.matches('input[type="file"]') || element.disabled || element.readOnly ||
+       element.getAttribute('aria-readonly')==='true' ||
+       element.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]') ||
+       !/\b(resume|cv)\b/i.test(fileLabel(element)) || /\bcover\b/i.test(fileLabel(element)))return false;
+    return visible(element) || leverResumeProxy(element) ||
+      element.getAttribute('data-automation-id')==='file-upload-input-ref' && exposedFile(element);
+  }
+  function leverResumeProxy(element) {
+    if(location.hostname!=='jobs.lever.co' || !element.matches('input[type="file"][name="resume"]#resume-upload-input') ||
+       element.disabled || element.readOnly || element.closest('[hidden],[inert],[aria-hidden="true"],[disabled]'))return false;
+    const proxy=element.parentElement,question=element.closest('li.application-question.resume');
+    if(!proxy?.matches('a.visible-resume-upload') || !question || !visible(proxy) ||
+       question.querySelectorAll('input[type="file"]').length!==1 ||
+       !/\b(resume|cv)\b/i.test(leverQuestionLabel(element) || ''))return false;
+    const rect=element.getBoundingClientRect(),style=getComputedStyle(element);
+    return rect.width>0 && rect.height>0 && style.display!=='none' && style.visibility==='visible' &&
+      (!proxy.getAttribute('href') || proxy.getAttribute('href')==='#');
+  }
   function exposedFile(element) {
+    if(leverResumeProxy(element))return true;
     if(visible(element) || resumeAffordance(element) || attachedFile(element))return true;
     const container=fileContainer(element);
     if(!visible(container) || !/\b(resume|cv|cover)\b/i.test(fileLabel(element)))return false;
@@ -653,6 +690,8 @@
     return element.parentElement || element;
   }
   function fileLabel(element) {
+    const lever=leverQuestionLabel(element);
+    if(lever!==null)return lever;
     const direct = [Array.from(element.labels || []).map(text).filter(Boolean).join(" "),
       element.getAttribute("aria-label"), referencedLabel(element, "aria-labelledby"),
       referencedLabel(element, "aria-describedby")].map(usableFileLabel).find(Boolean);
@@ -1236,7 +1275,7 @@
             if (error) return {error: text(error)};
             const shown = Array.from(region.querySelectorAll('*')).some(node => visible(node) &&
               (text(node).includes(file.filename) || node.matches('button,[role="button"],a') && /remove/i.test(label(node))));
-            if (shown || element.isConnected && visible(element) && element.files[0]?.name === file.filename) return {ok: true};
+            if (shown || element.isConnected && (visible(element) || leverResumeProxy(element)) && element.files[0]?.name === file.filename) return {ok: true};
           }, 10000);
           if (!outcome?.ok) {
             summary.errors.push(outcome?.error ? `Upload failed: ${outcome.error}` : `Upload not yet confirmed: ${file.filename}. Check the page before retrying.`);
@@ -2237,7 +2276,7 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
   if(globalThis.autoApplyCredentials){
     for(const key of ['scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
       const original=globalThis.autoApplyContent[key];

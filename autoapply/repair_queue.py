@@ -33,6 +33,7 @@ MESSAGES = {
     'workspace': 'Queued; the verified repair worktree is unavailable.',
     'capacity': 'Repair queue is full; review existing jobs.',
     'user': 'This page needs user input or access; no engineering worker was queued.',
+    'transport': 'Dashboard transport failed after bounded retries; no new user fact is required. Retry Analyze when the dashboard is available.',
     'normal': 'No actionable scanner or fill defect was found.',
 }
 
@@ -163,7 +164,7 @@ def evidence(saved):
     diagnostic = saved.get('diagnostic', {})
     inspections = diagnostic.get('inspections', [])
     if (diagnostic.get('busy') or not diagnostic.get('responsive', True) or
-            diagnostic.get('repair', {}).get('stopped', 'none') != 'none' or
+            diagnostic.get('repair', {}).get('stopped', 'none') in {'user_edit', 'interrupted'} or
             any(i.get('status') in {'access_blocked', 'loading', 'account_private', 'embedded_content_unavailable'} for i in inspections)):
         return None, 'user'
     rows, aliases = [], {}
@@ -215,7 +216,7 @@ def evidence(saved):
                               else 'native_control_missing_inventory', count=min(count, 10000),
                               roots=[root_shape(root, index) for index, root in enumerate(captured_roots)]))
     if not rows and not roots:
-        return None, 'normal'
+        return None, 'transport' if diagnostic.get('repair', {}).get('stopped') == 'transport_error' else 'normal'
     result = dict(host=saved['host'].lower(), controls=sorted(rows, key=lambda r: json.dumps(r, sort_keys=True)),
                   inventory=sorted(roots, key=lambda r: json.dumps(r, sort_keys=True)))
     if rows:

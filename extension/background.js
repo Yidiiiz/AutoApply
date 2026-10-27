@@ -574,12 +574,28 @@ async function action(message) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
     if(!tab?.id || !/^https?:/.test(tab.url || ''))throw Error('Open an application page first.');
     if(analysisTasks.has(tab.id))return analysisTasks.get(tab.id);
-    if(running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id) || manualActionTabs.size || batchBusy ||
+    if(running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id) || manualActionTabs.size ||
        activeResults.get(tab.id)?.busy || activeResults.get(tab.id)?.coverBusy || activeResults.get(tab.id)?.waiting ||
        activeResults.get(tab.id)?.writing?.length && !activeResults.get(tab.id)?.writingSettled)
       throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
     const task=(async()=>{
+      // Reserve Analyze while a short run-status poll drains. A status request
+      // is not form work and should not randomly force a manual retry.
+      for(let wait=0;batchBusy && wait<20;wait++)await delay(50);
+      if(batchBusy || running || autofillTasks || skillsRunning || analysisBlockers)
+        throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
+      const epoch=runEpoch;
       const current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined;
+      const transport=error=>/Dashboard is busy|Dashboard is not reachable|Dashboard request failed \(503\)/i.test(error.message || '');
+      async function answerRequest(path,payload,frame){
+        for(let retry=0;;retry++){
+          await bound(frame,'repairCheck'); // recheck edits, document and run before every retry
+          try{return await api(path,payload);}catch(error){
+            if(!transport(error) || retry===2)throw error;
+            await delay(200*(retry+1));
+          }
+        }
+      }
       const inspect=(after=false)=>chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:after=>{
         const api=globalThis.autoApplyContent;
         return api?{...api.inspectPage({repair:after}),...api.pageStructure()}:null;
@@ -589,7 +605,7 @@ async function action(message) {
       if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
       const started=[];const token=crypto.randomUUID();let stopped='none',attempts=0,filled=0;
       async function bound(frame,method,args=[]){
-        if((await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+        if(staleRun(epoch) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
            (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)
           throw Error('Application changed. Analyze page again.');
         const [value]=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:[frame.documentId]},
@@ -607,11 +623,17 @@ async function action(message) {
             if(pass)fields=fields.filter(f=>['combobox','select','checkbox','radio'].includes(f.kind));
             if(!fields.length)break;
             attempts=Math.max(attempts,pass+1);
-            const response=await api('/ext/answers',{url:tab.url,application_id,page:prepared.page,fields});
-            await bound(frame,'repairFill',[response.answers || []]);
+            const response=await answerRequest('/ext/answers',{url:tab.url,application_id,page:prepared.page,fields},frame);
+            const files={};
+            if(response.answers?.some(answer=>answer.status==='FILE' && answer.value==='resume'))
+              files.resume=await answerRequest('/ext/resume',undefined,frame);
+            await bound(frame,'repairFill',[response.answers || [],files]);
           }
         }
-      }catch{stopped='interrupted';}
+      }catch(error){
+        stopped=transport(error)?'transport_error':/Pairing|Not paired/i.test(error.message)?'interrupted':
+          /answer changed/i.test(error.message)?'user_edit':'repair_error';
+      }
       const repaired=[];
       for(const frame of started){const result=await bound(frame,'repairFinish');repaired.push({...frame,result});filled+=result.filled;if(result.stopped!=='none')stopped=result.stopped;}
       // Authorized fills can change the snapshot identity. Bind the fresh post
@@ -639,7 +661,7 @@ async function action(message) {
       const budget=800000-encoder.encode(JSON.stringify(diagnostic)).length;
       for(const frame of available)for(const node of frame.result.nodes){size+=encoder.encode(JSON.stringify(node)).length+1;if(nodes.length>=10000 || size>budget){truncated=true;break;}nodes.push(node);}
       async function unchanged(){
-        if((await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+        if(staleRun(epoch) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
            (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)return false;
         const latest=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.repairContext()});
         return available.every(frame=>latest.some(f=>f.frameId===frame.frameId && f.documentId===frame.documentId && f.result?.identity===frame.result.identity && f.result.revision===frame.result.edit_revision));
@@ -666,6 +688,43 @@ async function action(message) {
         Object.assign(current,updated);
       }
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
+      // A durable capture plus queue acknowledgement can park ONLY our current
+      // owned run. Keep the unsubmitted tab and repair context intact. Persist
+      // the idempotent result before sending it so a worker restart can reconcile.
+      await runReady;
+      const {chromeRun:run,chromeRunPaused=false}=await chrome.storage.session.get(['chromeRun','chromeRunPaused']);
+      if(saved.ok && saved.analysis_id && saved.repair?.id &&
+         ['queued','dispatching','running','awaiting_review'].includes(saved.repair.status) &&
+         !['paused','disabled','quota','blocked'].includes(saved.repair.reason) &&
+         ['none','transport_error','repair_error'].includes(stopped) &&
+         !chromeRunPaused && run?.active && run.tabId===tab.id && run.current?.application_id===application_id &&
+         run.current?.run_id===current?.matched?.run_id && !current?.sign_in &&
+         !inspections.some(i=>['access_blocked','loading','account_private','embedded_content_unavailable'].includes(i.status)) &&
+         await unchanged()){
+        const status=await runStatus(run,epoch);
+        if(status && await unchanged()){
+          run.result={application_id,run_id:run.current.run_id,state:'skipped',
+            detail:`Parked unsubmitted for repair ${saved.repair.id}; capture ${saved.analysis_id}. ${saved.repair.message || ''}`.slice(0,2000)};
+          // Retain a document/edit binding for a retry after a lost HTTP ack.
+          run.parkBinding={url:tab.url,pages:available.map(frame=>({frameId:frame.frameId,documentId:frame.documentId,
+            identity:frame.result.identity,revision:frame.result.edit_revision}))};
+          await saveRun(run,false,epoch);
+          if(!await unchanged()){
+            delete run.result;delete run.parkBinding;await saveRun(run,false,epoch);
+            throw Error('Application changed. Analyze page again.');
+          }
+          await api('/ext/run/result',run.result);
+          if(staleRun(epoch))throw Error('Application work stopped.');
+          if(!await unchanged()){
+            delete run.result;delete run.parkBinding;run.paused=true;
+            run.error='Page changed while parking. Review the preserved application before resuming.';
+            await saveRun(run,true,epoch);throw Error(run.error);
+          }
+          delete run.parkBinding;
+          delete run.current;delete run.tabId;delete run.result;delete run.started;delete run.progressSent;
+          run.error='';await saveRun(run,false,epoch);
+        }
+      }
       const unavailable=!fields.length && inspections.find(i=>i.message);
       return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
     })();
@@ -926,7 +985,7 @@ async function stopRunWork(tabId) {
   // Chrome queues injected scripts behind a loading document. Pausing/closing
   // must not wait for that document (or its employer request) to complete.
   if(tab?.status!=='complete')return;
-  await Promise.race([chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.cancelSkills()}).catch(()=>{}),delay(500)]);
+  await Promise.race([chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>{globalThis.autoApplyContent?.cancelSkills();globalThis.autoApplyContent?.cancelRepair();}}).catch(()=>{}),delay(500)]);
 }
 async function runStatus(run, epoch) {
   const status=await api('/ext/run/status');
@@ -935,7 +994,7 @@ async function runStatus(run, epoch) {
   if(run.current && status.items && item?.state!=='opened') {
     const stoppedEpoch=++runEpoch;
     await stopRunWork(run.tabId);
-    delete run.current;delete run.tabId;delete run.result;delete run.started;
+    delete run.current;delete run.tabId;delete run.result;delete run.started;delete run.parkBinding;
     run.active=status.items.some(i=>['pending','opened'].includes(i.state));
     await saveRun(run,false,stoppedEpoch);
     return false;
@@ -953,6 +1012,15 @@ export async function runTick() {
     if(staleRun(epoch))return;
     const {chromeRunPaused = false} = await chrome.storage.session.get('chromeRunPaused');
     if (chromeRunPaused) return;
+    if(run.parkBinding){
+      const tab=await chrome.tabs.get(run.tabId);
+      const pages=await chrome.scripting.executeScript({target:{tabId:run.tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.repairContext()});
+      if(tab.url!==run.parkBinding.url || !run.parkBinding.pages.every(old=>pages.some(page=>
+        page.frameId===old.frameId && page.documentId===old.documentId && page.result?.identity===old.identity && page.result.revision===old.revision))){
+        delete run.result;delete run.parkBinding;run.paused=true;run.error='Page changed. Review the preserved application before resuming.';
+        await saveRun(run,true,epoch);return;
+      }
+    }
     const status=await runStatus(run,epoch);
     if(!status || staleRun(epoch))return;
     if (!run.current) {
@@ -964,7 +1032,7 @@ export async function runTick() {
       if(item.done){run.active=false;await saveRun(run,false,epoch);return;}
       epoch=++runEpoch;
       run={...run,active:true,current:item,index:item.index||1,total:item.total||run.total,error:''};
-      delete run.started;delete run.result;delete run.tabId;delete run.progressSent;
+      delete run.started;delete run.result;delete run.tabId;delete run.progressSent;delete run.parkBinding;
       if(opened) {
         const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
         const tabs=await chrome.tabs.query({});
@@ -986,7 +1054,7 @@ export async function runTick() {
       if(staleRun(epoch))return;
       // Nonterminal progress from older extension versions remains held too.
       if(run.result.state!=='skipped'){delete run.result;run.started=true;await saveRun(run,false,epoch);return;}
-      delete run.current;delete run.tabId;delete run.result;delete run.started;
+      delete run.current;delete run.tabId;delete run.result;delete run.started;delete run.parkBinding;
       await saveRun(run,false,epoch);return;
     }
     if (!run.tabId) {

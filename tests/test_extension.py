@@ -3579,7 +3579,7 @@ def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, exte
     page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
     panel=next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
     panel.locator('#send-structure').click()
-    expect(panel.locator('#analysis-summary')).to_have_text('No form controls found.')
+    expect(panel.locator('#analysis-summary')).to_have_text('No application inputs are exposed yet. Check the entry action and page loading, then Analyze again.')
     page.locator('body').evaluate("e=>e.insertAdjacentHTML('afterbegin','<form><label>Full name<input value=synthetic></label></form>')")
     expect(panel.locator('#page-analysis')).to_be_hidden()
     panel.locator('#send-structure').click()
@@ -3638,7 +3638,7 @@ def test_t063_analyze_alone_recovers_failed_capture_widget(loaded_extension, ext
     expect(page.locator('#full')).to_be_empty()
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=30000)
-    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 5')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 6')
     expect(page.locator('#full')).to_have_value('Fixture Student')
     expect(page.locator('#consent')).to_be_checked()
     expect(page.locator('#manual')).to_have_value('PRIVATE_MANUAL')
@@ -3649,22 +3649,22 @@ def test_t063_analyze_alone_recovers_failed_capture_widget(loaded_extension, ext
     assert page.locator('.react-select__single-value').all_text_contents() == [
         'Choose not to self-identify','Yes, I have a disability, or have had one in the past','I am not a protected veteran']
     assert page.evaluate('[submissions,proxyInputs,fallbackChanges,keys.includes("Enter")]') == [0,0,0,False]
-    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 0
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     expect(page.locator('textarea')).to_be_empty()
     payload = next(p for path,_,p in requests if path=='/ext/snapshot')
     saved = json.loads(max((config.private/'snapshots').glob('*.json'), key=lambda p:p.stat().st_mtime_ns).read_text(encoding='utf-8'))
     report = saved['diagnostic']
-    assert report['repair']['filled'] == 5 and report['repair']['attempts'] == 2
+    assert report['repair']['filled'] == 6 and report['repair']['attempts'] == 2
     assert report['repair']['stopped'] == 'none'
     gender=next(f for f in report['fields'] if f['label']=='Gender')
     assert gender['menu']['observed'] and gender['menu']['count']==3
     assert gender['options']==['Male','Female','Choose not to self-identify']
     assert any(f['label']=='Gender' and not f['answered'] for f in report['repair']['before']['fields'])
     assert any(f['label']=='Gender' and f['answered'] for f in report['fields'])
-    assert {'Unknown personal fact','Resume','Why this role?'} == {f['label'] for f in report['findings']}
+    assert {'Unknown personal fact','Why this role?'} == {f['label'] for f in report['findings']}
     serialized = json.dumps(payload)+json.dumps(saved)
     assert all(secret not in serialized for secret in ['PRIVATE_MANUAL','Fixture Student','student@example.test','87423','87467'])
-    assert not any(path in {'/ext/profile-sections','/ext/resume','/ext/write','/ext/cover-letter','/ext/applied','/ext/remember','/ext/chat','/ext/match'} for path,_,_ in requests)
+    assert not any(path in {'/ext/profile-sections','/ext/write','/ext/cover-letter','/ext/applied','/ext/remember','/ext/chat','/ext/match'} for path,_,_ in requests)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=15000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
@@ -3776,13 +3776,14 @@ def test_t063_duplicate_and_busy_mutation_exclusion(loaded_extension, extension_
     worker.evaluate('()=>{globalThis.fetch=repairFetch;releaseAnswers()}')
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     duplicate = panel.evaluate('()=>secondAnalysis')
-    assert duplicate['ok'] and duplicate['summary'].startswith('Filled 4')
+    assert duplicate['ok'] and duplicate['summary'].startswith('Filled 5')
     assert len([1 for path,_,_ in requests if path=='/ext/snapshot']) == 1
     expect(page.locator('#full')).to_have_value('Fixture Student')
     expect(page.locator('#email')).to_have_value('student@example.test')
     expect(page.locator('#consent')).to_be_checked()
     expect(page.locator('#country')).to_have_value('us')
     expect(page.locator('#manual')).to_have_value('PRIVATE_MANUAL')
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     assert page.evaluate('actions') == []
 
 
@@ -3828,19 +3829,21 @@ def test_t063_partial_progress_survives_failed_retry(loaded_extension, extension
     page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
     page.locator('#consent').evaluate("e=>e.addEventListener('change',()=>setTimeout(()=>e.checked=false,100))")
     worker.evaluate('''()=>{globalThis.repairFetch=fetch;let calls=0;globalThis.fetch=(url,...args)=>{
-      if(String(url).endsWith('/ext/answers')&&++calls===2)return Promise.reject(new TypeError('fixture offline'));
+      if(String(url).endsWith('/ext/answers')&&++calls>=2)return Promise.reject(new TypeError('fixture offline'));
       return repairFetch(url,...args);};}''')
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
-    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
-    expect(panel.locator('#analysis-summary')).to_contain_text('Repair stopped')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Dashboard transport unavailable after bounded retries')
     expect(page.locator('#consent')).not_to_be_checked()
     expect(page.locator('#full')).to_have_value('Fixture Student')
     expect(page.locator('#country')).to_have_value('us')
     report=json.loads(next((config.private/'snapshots').glob('*.json')).read_text(encoding='utf-8'))['diagnostic']
-    assert report['repair']['filled']==3
+    assert report['repair']['filled']==4
+    assert report['repair']['stopped']=='transport_error'
     assert next(f for f in report['findings'] if f['label']=='Contact consent')['status']=='verification_failed'
     expect(panel.locator('#send-structure')).to_be_enabled()
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     assert page.evaluate('actions') == []
 
 
@@ -3858,8 +3861,9 @@ def test_t063_iframe_bound_repair_after_sidebar_reopens(loaded_extension, extens
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     expect(page.locator('#full')).to_have_value('Fixture Student')
     expect(page.frame_locator('#application').locator('#name')).to_have_value('Embedded Student')
-    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 5')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 6')
     assert page.frame_locator('#application').locator('body').evaluate('()=>submissions')==0
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     assert page.evaluate('actions')==[]
     assert not any(path=='/ext/applied' for path,_,_ in requests)
 
@@ -3872,9 +3876,10 @@ def test_t063_manual_unchecked_answer_is_preserved(loaded_extension, extension_s
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=15000)
     expect(page.locator('#consent')).not_to_be_checked()
     expect(page.locator('#full')).to_have_value('Fixture Student')
-    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')
     payload=next(p for path,_,p in requests if path=='/ext/snapshot')
     assert next(f for f in payload['diagnostic']['fields'] if f['label']=='Contact consent')['repair_status']=='user_edited'
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     assert page.evaluate('actions')==[]
 
 
@@ -3913,12 +3918,13 @@ def test_t063_failed_checkbox_does_not_activate_adjacent_navigation(loaded_exten
     }''')
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=20000)
-    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 3')
+    expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')
     expect(page.locator('#consent')).not_to_be_checked()
     expect(page.locator('#country')).to_have_value('us')
     assert page.evaluate('checkboxAttempts')>=2
     payload=next(p for path,_,p in requests if path=='/ext/snapshot')
     assert next(f for f in payload['diagnostic']['fields'] if f['label']=='Contact consent')['repair_status']=='verification_failed'
+    assert page.locator('input[type=file]').evaluate('e=>e.files.length') == 1
     assert page.evaluate('actions')==[]
 
 

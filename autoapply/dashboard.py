@@ -79,13 +79,13 @@ class _Connection(Database):
     TEMP guards affect this connection only, including discovery's bulk writes.
     """
 
-    def __init__(self, path, history, *, writable=False, check_same_thread=True):
+    def __init__(self, path, history, *, writable=False, check_same_thread=True, timeout=5, defer_history=False):
         mode = 'rw' if writable else 'ro'
         self.conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=' + mode,
-                                    uri=True, timeout=5, isolation_level=None, check_same_thread=check_same_thread)
+                                    uri=True, timeout=timeout, isolation_level=None, check_same_thread=check_same_thread)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA foreign_keys=ON')
-        self._history_ready = writable
+        self._history_ready = writable and not defer_history
         self._flushing_history = False
         self._closed = False
         self.history = history
@@ -213,12 +213,24 @@ class Dashboard:
         self.answers = DashboardAnswers(config, self.connection, self.settings.mutex)
 
     @contextmanager
-    def connection(self, *, writable=False):
-        db = _Connection(self.path, self.history, writable=writable)
+    def connection(self, *, writable=False, timeout=5, defer_history=False):
+        db = _Connection(self.path, self.history, writable=writable, timeout=timeout, defer_history=defer_history)
         try:
             yield db
         finally:
             db.close()
+
+    def cache_extension_description(self, job_id, description):
+        # Public text is a best-effort cache, never a prerequisite for answering.
+        # No waiting for another writer, and no archive I/O under the DB lock.
+        # Dirty triggers retain the export for an existing maintenance boundary.
+        try:
+            with self.connection(writable=True, timeout=0, defer_history=True) as db:
+                with db.transaction(sync_history=False):
+                    descriptions.store(db, job_id, description)
+        except sqlite3.OperationalError as exc:
+            if not any(marker in str(exc).lower() for marker in ('locked', 'busy')):
+                raise
 
     def queue_revision(self):
         """Cheap cross-connection change check; never rank, discover or read profiles."""
