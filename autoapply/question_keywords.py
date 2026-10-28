@@ -193,3 +193,9 @@ def authorization_answer(kind, options):
         if len(hits) == 1:
             return [hits[0]] if kind == 'multiselect' else hits[0]
     return None
+
+
+
+def robot_only(label):
+    """Explicit anti-bot instructions are never applicant website questions."""
+    return bool(re.search(r'beecatcher|honey[\s_-]*pot|robots?\s+only|(?:do\s+not|don.t)\s+(?:enter|fill|complete).*\bhuman\b|leave\s+(?:this\s+)?(?:field\s+)?(?:blank|empty).*\bhuman\b', str(label or ''), re.I))

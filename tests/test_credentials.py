@@ -245,13 +245,13 @@ def test_actual_mv3_auth_forms_and_privacy(loaded_extension):
             return worker.evaluate('id=>autoApplyAutofill(id)', tab)
         result = autofill()
         assert not result.get('error'), result
-        assert 'Account fields filled' in result['progress']
+        assert 'Account action activated' in result['progress']
         assert page.locator('#email').input_value() == EMAIL
         assert page.locator('#password').input_value() == PASSWORD
         assert page.locator('#confirm').input_value() == ''
         assert page.evaluate('reactState.email') == EMAIL and page.evaluate('reactState.password') == PASSWORD
         assert page.evaluate('events') == ['email:input', 'email:change', 'password:input', 'password:change']
-        assert page.evaluate('[submissions,oauthClicks,agreement.checked]') == [0, 0, False]
+        assert page.evaluate('[submissions,oauthClicks,agreement.checked]') == [1, 0, False]
         page.locator('#mixed').fill(EMAIL)
         page.locator('#mixed').blur()
         private = isolated('privacy')
@@ -263,9 +263,10 @@ def test_actual_mv3_auth_forms_and_privacy(loaded_extension):
         page.reload()
         page.evaluate('signup()')
         result = autofill()
+        assert 'Account action activated' in result['progress']
         assert page.locator('#confirm').input_value() == PASSWORD
         assert page.evaluate('reactState.confirm') == PASSWORD
-        assert page.evaluate('[submissions,oauthClicks,agreement.checked]') == [0, 0, False]
+        assert page.evaluate('[submissions,oauthClicks,agreement.checked]') == [1, 0, False]
         page.reload()
         page.evaluate('signup()')
         page.locator('#password').fill('occupied-fixture-password')

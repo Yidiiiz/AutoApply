@@ -213,11 +213,13 @@ def test_mv3_proxy_requires_settled_positive_no_evidence(application,behavior):
 def test_mv3_deep_auth_and_incomplete_privacy(application):
     page,worker,tab,_,_,dashboard,_=application
     page.evaluate("""()=>{
+      window.authSubmissions=0;
       const host=document.createElement('auth-host');document.body.append(host);
       let root=host.attachShadow({mode:'open'});
       for(let i=0;i<12;i++){const node=document.createElement('auth-layer');root.append(node);root=node.attachShadow({mode:'open'});}
       root.innerHTML='<form><h2>Sign in</h2><label>Login email<input id=auth-email type=email></label><label>Password<input id=auth-password type=password></label><button type=submit>Sign in</button></form>';
-      root.querySelector('form').onsubmit=event=>{event.preventDefault();submissions++;};
+      // Account activation is separate from the fixture's application-submit guard.
+      root.querySelector('form').onsubmit=event=>{event.preventDefault();authSubmissions++;};
     }""")
     privacy=isolated(worker,tab,'privacy')
     assert privacy['auth']['active'] and privacy['auth']['supported']
@@ -227,12 +229,18 @@ def test_mv3_deep_auth_and_incomplete_privacy(application):
     page.locator('#auth-password').evaluate('el=>el.readOnly=false')
     absent=worker.evaluate('id=>autoApplyAutofill(id)',tab)
     assert 'Settings' in absent['progress'] and page.locator('#auth-password').input_value()==''
+    assert page.evaluate('[authSubmissions,submissions]')==[0,0]
     dashboard.settings.credentials.save(dict(email='synthetic-auth@example.test',password='synthetic-password'))
     result=worker.evaluate('id=>autoApplyAutofill(id)',tab)
-    assert 'Account fields filled' in result['progress'],result
+    assert 'Account action activated. Waiting for authentication' in result['progress'],result
+    assert page.evaluate('[authSubmissions,submissions]')==[1,0]
     expect(page.locator('#auth-email')).to_have_value('synthetic-auth@example.test')
     expect(page.locator('#auth-password')).to_have_value('synthetic-password')
     assert page.evaluate('model["auth-password"]')=='synthetic-password'
+    assert 'synthetic-password' not in json.dumps(isolated(worker,tab,'privacy'))
+    repeated=worker.evaluate('id=>autoApplyAutofill(id)',tab)
+    assert 'Account action already attempted' in repeated['progress'],repeated
+    assert page.evaluate('[authSubmissions,submissions]')==[1,0]
     assert 'synthetic-password' not in json.dumps(isolated(worker,tab,'privacy'))
     page.reload()
     page.locator('#application').evaluate("el=>el.insertAdjacentHTML('beforeend','<label>Create account optional<input id=createaccountoptional type=password></label>')")

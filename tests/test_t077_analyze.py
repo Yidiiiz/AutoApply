@@ -149,7 +149,7 @@ def test_delayed_analysis_preserves_user_and_run_guards(loaded_extension, backen
     service.repairs.configure({'enabled':True})
     state['hold'] = threading.Event()
     if change == 'auth':
-        page.locator('form').evaluate("e=>e.innerHTML='<label>Email<input type=email></label><label>Password<input type=password></label><button>Sign in</button>'")
+        page.locator('form').evaluate("e=>e.innerHTML='<label>Email<input type=email></label><label>Password<input type=password></label><button onclick=actions.push(1)>Sign in</button>'")
     panel.locator('#send-structure').click()
     if change != 'auth':
         for _ in range(100):
@@ -166,9 +166,15 @@ def test_delayed_analysis_preserves_user_and_run_guards(loaded_extension, backen
             panel.evaluate("()=>chrome.runtime.sendMessage({type:'run-cancel'})")
         state['hold'].set()
     expect(panel.locator('#send-structure')).to_be_enabled(timeout=20000) if change!='navigation' else page.wait_for_timeout(800)
-    assert not [r for r in state['replies'] if r[0]=='/ext/run/result' and r[2].get('ok')]
+    # Run ticks may report progress without releasing the current application.
+    progress = [data for path,data in state['posts'] if path=='/ext/run/result']
+    assert all(data.get('state') in {'needs_input', 'failed', 'filled'} for data in progress), progress
+    assert not [path for path,_ in state['posts'] if path in {'/ext/applied', '/ext/run/skip'}]
+    assert all(item['state']=='skipped' for item in service._ext_run) if change=='cancel' else service._ext_run[0]['state']=='opened'
     assert service._ext_run[1]['state']=='skipped' if change=='cancel' else service._ext_run[1]['state']=='pending'
-    assert page.evaluate('actions') == [] if change!='auth' else True
+    assert page.evaluate('actions') == []
+    if change == 'auth':
+        assert not any(t['url']==SECOND for t in worker.evaluate('()=>chrome.tabs.query({})'))
     if change == 'edit':
         expect(page.locator('[name=name]')).to_have_value('Synthetic manual edit')
         expect(page.locator('[name=email]')).to_be_empty()

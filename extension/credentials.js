@@ -13,8 +13,16 @@
     }
     return true;
   };
-  const editable=el=>visible(el) && !el.disabled && !el.readOnly && !el.matches(':disabled,[aria-readonly="true"]');
-  const hint=el=>[el.name,el.id,el.getAttribute('autocomplete'),el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' ');
+  const editable=el=>visible(el) && !el.disabled && !el.readOnly && !el.matches(':disabled,[aria-readonly="true"]') && !native.closest(el,'[inert],[aria-disabled="true"]');
+  const workday=root=>/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && root?.matches('form[data-automation-id="signInFormo"]');
+  let revision=0, ticket, synthetic=false, href=location.href;
+  const invalidate=()=>{revision++;ticket=undefined;};
+  // History API changes need no DOM mutation or browser event. Keep the full
+  // href private and expose only revision changes, never query/hash values.
+  const refreshContext=()=>{if(href!==location.href){href=location.href;invalidate();}};
+  for(const type of ['beforeinput','input','change','keydown'])document.addEventListener(type,e=>{if(e.isTrusted && !synthetic && !e.target.closest?.('#autoapply-sidebar'))invalidate();},true);
+  for(const type of ['pagehide','popstate','hashchange'])addEventListener(type,invalidate);
+  const hint=el=>[el.name,el.id,el.getAttribute('title'),el.getAttribute('autocomplete'),el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' ');
   const passwords=()=>native.query('input[type="password"]').filter(visible);
   const contains=(root,el)=>{for(;el;el=native.parent(el))if(el===root)return true;return false;};
   const scope=pw=>native.closest(pw,'form,[role="form"],[role="dialog"],main');
@@ -29,12 +37,12 @@
     const nodes=native.query('h1,h2,h3,legend,button,input[type="submit"],[role="button"]',roots).filter(el=>contains(root,el)&&visible(el));
     const context=[root.getAttribute('aria-label'),...nodes.map(el=>el.textContent||el.value||'')].join(' ');
     if(/create[\s_-]*account[\s_-]*optional|(?:create\s+(?:an?\s+)?account|password)\s*(?:\(\s*)?optional|optional\s+(?:account|password)/i.test(context+' '+hint(pw)))return null;
-    return /sign[\s-]*in|log[\s-]*in|create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context)?root:null;
+    return workday(root) || /sign[\s-]*in|log[\s-]*in|create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context)?root:null;
   }
   const active=()=>{
     const roots=native.discover(),pw=native.query('input[type="password"]',roots);
     for(const el of pw){marked.add(el);if(el.value)secrets.add(el.value);}
-    let found=false;
+    let found=native.query('form[data-automation-id="signInFormo"]',roots).some(root=>workday(root) && visible(root) && native.query('[data-automation-id="createAccountExpandButton"],[data-automation-id="createAccountSubmitButton"],[data-automation-id="signInSubmitButton"]',roots).some(el=>contains(root,el)&&visible(el)));
     for(const password of pw.filter(visible)){
       const auth=authContext(password,roots),root=auth || scope(password);
       if(!root || optional(password,roots))continue;
@@ -64,6 +72,7 @@
     return value;
   }
   function form(){
+    refreshContext();
     if(native.discover().truncated)return null;
     const pw=passwords();
     if(!pw.length || pw.some(el=>!editable(el)) || pw.length>2)return null;
@@ -77,8 +86,8 @@
     const context=headings+' '+(root.getAttribute('aria-label')||'')+' '+Array.from(document.querySelectorAll('h1,h2')).filter(visible).map(el=>el.textContent).join(' ');
     if(/reset\s+(?:your\s+)?password|change\s+(?:your\s+)?password|forgot\s+password|current\s+password|one.?time|verification\s+code|security\s+code/i.test(context) ||
        pw.some(el=>/current[\s_-]*password|old.?password|otp|one.?time/i.test([el.name,el.id,el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' '))))return null;
-    const signup=/create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context);
-    if(!signup && !/sign[\s-]*in|log[\s-]*in/i.test(context))return null;
+    const signup=workday(root)?native.query('[data-automation-id="createAccountSubmitButton"]',roots).some(el=>contains(root,el)&&visible(el)):/create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context);
+    if(!signup && !workday(root) && !/sign[\s-]*in|log[\s-]*in/i.test(context))return null;
     const emails=native.query('input',roots).filter(el=>contains(root,el)).filter(el=>editable(el) &&
       ['email','text',''].includes(el.type) && (el.type==='email' || /email|username|user.?name/i.test(hint(el))));
     if(emails.length!==1 || !signup && pw.length!==1 || [...emails,...pw].some(el=>el.form && el.form!==root))return null;
@@ -88,12 +97,13 @@
     for(const el of [...emails,...pw]){marked.add(el);if(el.value)secrets.add(el.value);}
     return {mode:signup?'signup':'login',email:emails[0],password:pw[0],confirm:pw[1],root,identity:[identity(root),identity(emails[0]),...pw.map(identity)].join(':')};
   }
-  const describe=()=>{const f=form();return {active:active(),supported:Boolean(f) && location.protocol==='https:',mode:f?.mode,identity:f?.identity,url:location.origin+location.pathname};};
+  const describe=()=>{const f=form();return {active:active(),supported:Boolean(f) && location.protocol==='https:',mode:f?.mode,identity:f?.identity,formIdentity:f?identity(f.root):undefined,url:location.origin+location.pathname,revision};};
   function fill(value,expected){
     const f=form();
-    if(!f || location.protocol!=='https:' || location.origin+location.pathname!==expected.url || f.mode!==expected.mode || f.identity!==expected.identity ||
+    if(!f || location.protocol!=='https:' || location.origin+location.pathname!==expected.url || f.mode!==expected.mode || f.identity!==expected.identity || revision!==expected.revision ||
        !value?.configured || typeof value.email!=='string' || typeof value.password!=='string')return {status:'unavailable',filled:0};
     secrets.add(value.email);secrets.add(value.password);
+    if([f.email,f.password,f.confirm].some(el=>el?.value && el.value!==(el===f.email?value.email:value.password)))return {status:'preserved',filled:0};
     let filled=0;
     const set=(el,text)=>{
       if(!el || !editable(el) || el.value || !el.isConnected)return;
@@ -112,5 +122,59 @@
       return {status:filled?'filled':'preserved',filled};
     }catch{return {status:'unavailable',filled:0};}
   }
-  globalThis.autoApplyCredentials={active,incomplete,sensitive,redact,describe,fill};
+
+  function action(f){
+    const roots=native.discover();
+    const candidates=native.query('button,input[type="submit"]',roots).filter(el=>contains(f.root,el) && editable(el) && el.getAttribute('data-automation-id')!=='createAccountExpandButton' &&
+      (f.mode==='signup'?/^(create\s+(?:an?\s+)?account|sign\s*up|register)$/i:/^(sign[\s-]*in|log[\s-]*in)$/i).test((el.textContent||el.value||'').trim()) &&
+      !/application|sso|google|linkedin|reset|forgot/i.test(hint(el)+' '+el.textContent) && (!el.form || el.form===f.root));
+    if(candidates.some(el=>{try{return el.hasAttribute('formaction') && new URL(el.getAttribute('formaction'),location.href).origin!==location.origin;}catch{return true;}}))return null;
+    return candidates.length===1?candidates[0]:null;
+  }
+  function consentEligible(el,f){
+    if(!contains(f.root,el) || el.disabled || el.readOnly || el.getAttribute('aria-readonly')==='true' || el.matches(':disabled') || native.closest(el,'[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]'))return false;
+    if(visible(el))return true;
+    // Only Workday's exact native checkbox can use this transparent proxy.
+    if(!workday(f.root) || el.getAttribute('data-automation-id')!=='createAccountCheckbox')return false;
+    const style=getComputedStyle(el),rect=el.getBoundingClientRect();
+    return Number(style.opacity)===0 && style.display!=='none' && style.visibility==='visible' && rect.width>1 && rect.height>1 && visible(native.parent(el));
+  }
+  function consentControls(f){
+    return native.query('input[type="checkbox"]').filter(el=>contains(f.root,el) &&
+      !/marketing|newsletter|promotional|job alerts|keep me|updates|offers/i.test(hint(el)) &&
+      (workday(f.root) && el.getAttribute('data-automation-id')==='createAccountCheckbox' ||
+       /\b(?:agree|consent|accept)\b.*\b(?:terms|privacy|above|account)\b/i.test(hint(el))));
+  }
+  const matches=(f,expected)=>f && location.protocol==='https:' && location.origin+location.pathname===expected.url &&
+    f.identity===expected.identity && f.mode===expected.mode && revision===expected.revision;
+  const validState=f=>f.root.tagName==='FORM' && f.root.checkValidity() && !native.query('[aria-invalid="true"]').some(el=>contains(f.root,el)&&visible(el));
+  async function prepare(value,expected){
+    ticket=undefined;
+    const initial=form();
+    if(!matches(initial,expected) || !action(initial))return {status:'unavailable'};
+    const result=fill(value,expected),f=form();
+    if(result.status==='unavailable' || !matches(f,expected) || !action(f) ||
+       [f.email,f.password,f.confirm].some(el=>el && el.value!==(el===f.email?value.email:value.password)))return {status:'unavailable'};
+    const consent=consentControls(f);
+    if(consent.some(el=>!consentEligible(el,f)) || native.query('input[type="checkbox"]').some(el=>contains(f.root,el) && el.required && !el.checked && !consent.includes(el)))return {status:'consent_required'};
+    synthetic=true;
+    try{for(const el of consent)if(!el.checked){el.click();el.dispatchEvent(new Event('input',{bubbles:true,composed:true}));el.dispatchEvent(new Event('change',{bubbles:true,composed:true}));}}finally{synthetic=false;}
+    await new Promise(resolve=>setTimeout(resolve,350));
+    const settled=form();
+    if(!matches(settled,expected) || !action(settled) || !consent.every(el=>el.checked && el.getAttribute('aria-checked')!=='false' && consentEligible(el,settled)) ||
+       [settled.email,settled.password,settled.confirm].some(el=>el && el.value!==(el===settled.email?value.email:value.password)) || !validState(settled))return {status:'unavailable'};
+    ticket={id:crypto.randomUUID(),href:location.href,expected,button:action(settled),consent,values:[settled.email.value,settled.password.value,settled.confirm?.value]};
+    return {status:'ready',ticket:ticket.id};
+  }
+  function activate(id){
+    const pending=ticket;ticket=undefined;
+    const f=form();
+    if(!pending || location.href!==pending.href || id!==pending.id || !matches(f,pending.expected) || action(f)!==pending.button ||
+       !pending.consent.every(el=>el.checked && el.getAttribute('aria-checked')!=='false' && consentEligible(el,f)) ||
+       [f.email.value,f.password.value,f.confirm?.value].some((v,i)=>v!==pending.values[i]) || !validState(f))return {status:'unavailable'};
+    // No asynchronous gap remains between the final document/edit guard and click.
+    pending.button.click();
+    return {status:'activated'};
+  }
+  globalThis.autoApplyCredentials={active,incomplete,sensitive,redact,describe,fill,prepare,activate,invalidate};
 })();

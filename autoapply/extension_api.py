@@ -454,6 +454,9 @@ def _page_analysis(dashboard, payload, host):
                'transparent_proxy', 'omitted_by_scanner', 'menu_not_exposed', 'hidden_control'}
     for field in fields:
         q = _question(field)
+        from .question_keywords import robot_only
+        if robot_only(q.label) or any(robot_only((field.get("control") or {}).get(k)) for k in ("id", "name", "data-automation-id")):
+            continue
         options, parents, menu = field.get('options', []), field.get('ancestors', []), field.get('menu', {})
         why = field.get('reasons', [])
         if (len(options) > 20 or not isinstance(parents, list) or len(parents) > 4 or
@@ -749,7 +752,10 @@ def resolve_answers(dashboard, payload):
         profile = dashboard.config.profile
         result = []
         for q, field in zip(questions, fields):
-            from .question_keywords import date_part_label, unusable_label
+            from .question_keywords import date_part_label, unusable_label, robot_only
+            if robot_only(q.label) or robot_only(field.get("data-automation-id")) or robot_only(field.get("name")):
+                result.append(dict(key=q.key, value=None, source="", status="OPTIONAL_SKIP"))
+                continue
             if (q.kind in {'select', 'radio', 'multiselect'} or
                     q.kind == 'combobox' and field.get('options_observed') is True and not field.get('options_partial')) and not q.options:
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP',
@@ -949,6 +955,9 @@ def _writing_result(value, key):
 
 def write(dashboard, payload):
     question = _text(payload, 'question', 8000, required=True)
+    from .question_keywords import robot_only
+    if robot_only(question):
+        return dict(answer=None, status='OPTIONAL_SKIP')
     instruction = _text(payload, 'instruction', 8000)
     previous = _text(payload, 'previous', 16000)
     limits = _limits(question)

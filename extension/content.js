@@ -263,7 +263,7 @@
   function repairFields(){
     if(signInPage())return [];
     return Array.from(records.values()).filter(r=>!r.members.some(e=>repairEdited.has(e)) &&
-      !diagnosticExcluded(r.element) && !isSkillsField(r.element) &&
+      !diagnosticExcluded(r.element) && writableRecord(r) && !isSkillsField(r.element) &&
       (!r.element.closest('a[href]') || leverResumeProxy(r.element)) && !(r.element.tagName==='BUTTON' && r.element.type!=='button') &&
       !isPrompt(r.element) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
       (['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind) ||
@@ -815,8 +815,20 @@
   }
 
   const controlSelector='input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"]),[role="textbox"],[role="checkbox"],[role="radio"],[role="switch"]';
+  function robotOnly(element){
+    const attributes=Array.from(element.attributes||[]).filter(a=>/^(?:data-|id$|name$|class$)/i.test(a.name)).map(a=>a.name+' '+a.value).join(' ');
+    const warning=[label(element),element.getAttribute('aria-description'),referencedLabel(element,'aria-describedby'),element.placeholder].join(' ');
+    return /beecatcher|honey[\s_-]*pot/i.test(attributes) || /robots?\s+only|(?:do\s+not|don.t)\s+(?:enter|fill|complete).*\bhuman\b|leave\s+(?:this\s+)?(?:field\s+)?(?:blank|empty).*\bhuman\b/i.test(warning);
+  }
+  function writableRecord(record){
+    return record.members.every(el=>!robotOnly(el) && !el.disabled && !el.matches(':disabled,[aria-disabled="true"]') &&
+      !native.closest(el,'[inert],[aria-hidden="true"],[aria-disabled="true"]') &&
+      !native.closest(record.field.kind==='file'?native.parent(el):el,'[hidden]') &&
+      (!(el.readOnly || el.getAttribute('aria-readonly')==='true') || selectOnlyControl(el)) &&
+      (record.field.kind==='file'?exposedFile(el):interactiveVisible(el)));
+  }
   function scannerControls() {
-    return Array.from(native.query('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')).filter(element=>!globalThis.autoApplyCredentials?.sensitive(element) && (element.getRootNode()===document || element.matches('input,textarea,select')))
+    return Array.from(native.query('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="combobox"],button:is([aria-haspopup="listbox"],[id$="--degree"])')).filter(element=>!robotOnly(element) && !globalThis.autoApplyCredentials?.sensitive(element) && (element.getRootNode()===document || element.matches('input,textarea,select')))
       .filter(element => (element.type === "file" ? !element.disabled && !element.matches(":disabled") && exposedFile(element) : interactiveVisible(element)) && (!["hidden", "submit", "reset", "image", "password"].includes(element.type) && (element.type !== "button" || element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])'))) &&
         !(element.closest('[role="combobox"]') !== element && element.closest('[role="combobox"]')) &&
         !(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) &&
@@ -918,7 +930,7 @@
     for (const key of keys) {
       checkRepair();
       const record = records.get(key);
-      if (!record || record.field.kind !== "combobox" || occupied(record)) continue;
+      if (!record || !writableRecord(record) || record.field.kind !== "combobox" || occupied(record)) continue;
       if (record.field.options_observed) { fields.push({...record.field}); continue; }
       try {
         await openCombo(record.element);
@@ -974,6 +986,7 @@
 
   function nativeSet(element, property, value) {
     checkRepair();
+    if(robotOnly(element))throw Error("Robot-only field excluded");
     if(property==="value" && !element.matches('input[type="password"],input[type="file"]'))trace("field","typed",element,{value});
     let prototype = Object.getPrototypeOf(element);
     while (prototype) {
@@ -1211,9 +1224,10 @@
     for (const answer of answers) {
       checkRepair();
       const record = refreshRecord(records.get(answer.key));
+      if(record?.members.some(robotOnly))continue;
       if (!record || record.pageUrl && record.pageUrl!==location.href ||
           (record.labelAtScan!==label(record.element) || record.choiceQuestionAtScan!==null && record.choiceQuestionAtScan!==choiceQuestion(record.element)) ||
-          globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
+          !writableRecord(record) || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) {trace("field","skipped",record?.element,{reason:!record?"missing":"occupied or unavailable"});summary.skipped++;continue;}
       let {element, members, field} = record;
       trace("field","found",element);
       if (isSkillsField(element)) { summary.skipped++; continue; }
@@ -1324,6 +1338,7 @@
         } else {
           const value = String(await phoneValue(element, answer.value ?? "", field));
           checkRepair();
+          if(!writableRecord(record) || record.labelAtScan!==label(element))continue;
           if (field.max_length !== null && value.length > field.max_length) { unresolved(false); continue; }
           if (element.isContentEditable || !("value" in element)){trace("field","typed",element,{value});element.textContent = value;}
           else {
@@ -2019,6 +2034,7 @@
     return Boolean(atsRoute && (resume || applicationControls || heading && contact));
   }
   function writingApplication(field, scopes) {
+    if(robotOnly(field))return false;
     if (!field.isConnected || !field.matches(writingSelector) || !visible(field) || field.closest('#autoapply-sidebar,.autoapply-ask-ai,aside,nav,[role="search"]')) return false;
     if (field.tagName === 'INPUT' && !(field.size >= 50 || field.getBoundingClientRect().height >= 60)) return false;
     // A chat/comment composer embedded alongside an application is still unrelated.
@@ -2084,13 +2100,13 @@
     if (identity !== snapshotIdentity() || signInPage() || extensionFilling) return null;
     if (!fields.every(field => {
       const record=records.get(field.key);
-      return record && record.element.isConnected && record.field.label===field.label &&
+      return record && writableRecord(record) && record.element.isConnected && record.field.label===field.label &&
         (record.field.kind==='file' || interactiveVisible(record.element)) && !occupied(record);
     })) return null;
     const structure=pageStructure();
     return {...structure,diagnostic:inspectPage({passive:true}).diagnostic};
   }
-  const diagnosticExcluded=element=>globalThis.autoApplyCredentials?.sensitive(element) || Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
+  const diagnosticExcluded=element=>robotOnly(element) || globalThis.autoApplyCredentials?.sensitive(element) || Boolean(element.closest('#autoapply-sidebar,.autoapply-ask-ai')) || Boolean(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])')) ||
     element.matches('input[type="hidden"],input[type="password"]') || /captcha|honeypot|honey.?pot|fax|website_confirm|password|secret|token|api.?key/i.test([element.id,element.name,element.getAttribute('autocomplete')].join(' '));
   function structureOf(element) {
     const style=getComputedStyle(element),rect=element.getBoundingClientRect();
@@ -2219,7 +2235,7 @@
   const chatDocument=crypto.randomUUID(),chatIdentities=new WeakMap();
   let chatEpoch=0;
   let chatFocus,chatExplicit;
-  const writableChat=el=>!globalThis.autoApplyCredentials?.active() && !globalThis.autoApplyCredentials?.sensitive(el) && el && el.isConnected && interactiveVisible(el) &&
+  const writableChat=el=>el && !robotOnly(el) && !globalThis.autoApplyCredentials?.active() && !globalThis.autoApplyCredentials?.sensitive(el) && el && el.isConnected && interactiveVisible(el) &&
     !el.readOnly && !el.matches(':disabled,[readonly],[aria-readonly="true"]') &&
     (el.matches('textarea,input[type="text"],input:not([type]),input[type="email"],input[type="tel"],input[type="url"]') || el.isContentEditable) && !el.closest('#autoapply-sidebar') && !/captcha/i.test([el.id,el.name,label(el)].join(' '));
   document.addEventListener('focusin',event=>{if(!extensionFilling && event.isTrusted && writableChat(event.target))chatFocus=event.target;},true);

@@ -45,7 +45,7 @@ async function applySidebar(tabId, mode, version) {
 chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'open').catch(async error=>{
   console.error(error);await chrome.action.setTitle({tabId:tab.id,title:error.message});await chrome.action.setBadgeText({tabId:tab.id,text:'!'});
 }));
-chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading')chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});if(change.status==='complete'){
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});}if(change.status==='complete'){
   restoreSidebar(tabId,true).catch(console.error);
 }});
 // History API navigation need not mutate the DOM. Recheck inline prompts only.
@@ -198,22 +198,27 @@ async function coverLetter(result, answers) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const formWaits = new Map(), cancelledTabs = new Set(), closedTabs = new Set();
 function cancelWait(tabId) {
+  chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});
   clearTimeout(formWaits.get(tabId)); formWaits.delete(tabId); cancelledTabs.add(tabId); pendingSteps.delete(tabId);
 }
 function pollForForm(result) {
+  const epoch=runEpoch;
+  const current=()=>!staleRun(epoch) && activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId);
+  clearTimeout(formWaits.get(result.tabId));
   const end = Date.now() + 60000;
   async function tick() {
-    if (cancelledTabs.has(result.tabId)) return;
+    if (!current()) return;
     try {
       const scanned = await scan(result.tabId);
-      if(scanned.sign_in){const detail=await fillAccount({...result,...scanned},true);if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
+      if(!current())return;
+      if(scanned.sign_in){const detail=await fillAccount(result,true);if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
       if (!scanned.sign_in && scanned.fields.length) {
         formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
       }
     } catch {
       // A document transition can temporarily make the scanner unavailable.
     }
-    if (cancelledTabs.has(result.tabId)) return;
+    if (!current()) return;
     if (Date.now() < end) formWaits.set(result.tabId, setTimeout(tick, 1000));
     else { formWaits.delete(result.tabId); result.waiting = false; result.progress = 'No form appeared. Press Autofill to try again.'; await report(result); }
   }
@@ -346,23 +351,51 @@ export async function autofill(tabId, application, advanceCount = 0) {
   finally{autofillTasks--;}
 }
 const credentialDocuments=new Map();
+const accountContexts=new WeakMap();
+let accountQueue=Promise.resolve();
 chrome.tabs.onRemoved.addListener(tabId=>credentialDocuments.delete(tabId));
 async function fillAccount(result, polling=false) {
-  if(!result.matched?.application_id || !result.url?.startsWith('https://'))return 'Account autofill needs a supported, saved application. Sign in manually.';
-  try{
-    const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',func:()=>globalThis.autoApplyCredentials?.describe()});
-    const frame=frames.find(f=>f.result?.supported && new URL(f.result.url).origin===new URL(result.url).origin);
-    if(!frame)return 'This account form needs manual entry. Sign in or create the account, then continue.';
-    const document=frame.documentId+':'+frame.result.mode;
-    if(polling && credentialDocuments.get(result.tabId)===document)return null;
-    const value=await api('/ext/credentials',{url:result.url,frame_url:frame.result.url,application_id:result.matched.application_id,run_id:result.matched.run_id,mode:frame.result.mode});
-    if(!value.configured){credentialDocuments.set(result.tabId,document);return 'Set your account password in dashboard Settings, or sign in manually.';}
-    if(cancelledTabs.has(result.tabId) || (await chrome.tabs.get(result.tabId)).url!==result.url)return 'The page changed. Press Autofill to try again.';
-    const [filled]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.fill(value,expected),args:[value,frame.result]});
-    if(filled?.result?.status==='unavailable' || !filled?.result)return 'Account fields changed or are unavailable. Review the page and sign in manually.';
-    credentialDocuments.set(result.tabId,document);
-    return filled.result.status==='filled' ? 'Account fields filled. Review them and click Sign in or Create account yourself. Autofill resumes after authentication.' : 'Existing account fields were preserved. Finish signing in yourself; Autofill resumes afterward.';
-  }catch{return 'Account autofill is unavailable for this application. Sign in manually, then continue.';}
+  // A bounded serial reservation spans credential lookup, settlement and the
+  // durable claim. Analyze calls this directly, never reenters Autofill.
+  const epoch=runEpoch, owner=activeResults.get(result.tabId), accountUrl=result.url;
+  const operation=async()=>{
+    const valid=async()=>{
+      const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
+      return !chromeRunPaused && !staleRun(epoch) && !closedTabs.has(result.tabId) && !cancelledTabs.has(result.tabId) &&
+        activeResults.get(result.tabId)===owner && (await chrome.tabs.get(result.tabId)).url===accountUrl;
+    };
+    if(!result.matched?.application_id || !accountUrl?.startsWith('https://'))return 'Account actions need a saved application. Sign in manually, then continue.';
+    try{
+      if(!await valid())return 'Account action stopped. Review the page and retry.';
+      const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',func:()=>globalThis.autoApplyCredentials?.describe()});
+      const supported=frames.filter(f=>f.result?.supported && new URL(f.result.url).origin===new URL(accountUrl).origin);
+      if(supported.length!==1)return 'Account step needs manual attention: check credentials, CAPTCHA or verification, then continue.';
+      const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
+      const binding=document+':'+frame.result.identity+':'+frame.result.revision;
+      if(polling && accountContexts.has(result) && accountContexts.get(result)!==binding)
+        return 'Account action stopped because the page changed. Press Autofill to try again.';
+      accountContexts.set(result,binding);
+      const key=result.tabId+':'+document;
+      const {accountActionClaims={}}=await chrome.storage.session.get('accountActionClaims');
+      if(accountActionClaims[key])return 'Account action already attempted. Complete verification or review the account page; Autofill resumes after authentication.';
+      if(polling && credentialDocuments.get(result.tabId)===document)return null;
+      const value=await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,application_id:result.matched.application_id,run_id:result.matched.run_id,mode:frame.result.mode});
+      if(!value.configured)return 'Set your account password in dashboard Settings, or sign in manually.';
+      if(!await valid())return 'Account action stopped. Review the page and retry.';
+      const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.prepare(value,expected),args:[value,frame.result]});
+      if(prepared?.result?.status!=='ready')return 'Account step needs manual attention: existing credentials, consent or controls could not be verified.';
+      if(!await valid())return 'Account action stopped. Review the page and retry.';
+      // Persist before activation. A timeout/restart is never permission to click
+      // again. This claim contains document identities only, never credentials.
+      accountActionClaims[key]=true;
+      await chrome.storage.session.set({accountActionClaims});
+      if(!await valid())return 'Account action stopped. Review the page and retry.';
+      const [activated]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:id=>globalThis.autoApplyCredentials?.activate(id),args:[prepared.result.ticket]});
+      credentialDocuments.set(result.tabId,document);
+      return activated?.result?.status==='activated'?'Account action activated. Waiting for authentication; review any verification request.':'Account action stopped because the form changed. Review the account page.';
+    }catch{return 'Account action unavailable. Sign in manually, then continue.';}
+  };
+  const task=accountQueue.catch(()=>{}).then(operation);accountQueue=task;return task;
 }
 async function autofillCurrent(tabId, application, advanceCount = 0) {
   if (analysisTasks.size) return {error: "Application is busy analyzing. Wait and retry."};
@@ -601,6 +634,23 @@ async function action(message) {
         return api?{...api.inspectPage({repair:after}),...api.pageStructure()}:null;
       },args:[after]});
       const before=await inspect();
+      const auth=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyCredentials?.active()});
+      if(auth.some(frame=>frame.result)){
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
+        const matched=current?.url===tab.url?current.matched:await api('/ext/match',{url:tab.url});
+        const account=current?.url===tab.url?current:{tabId:tab.id,url:tab.url,matched,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+        account.matched=matched;
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
+        const detail=await fillAccount(account);
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application work stopped.');
+        account.sign_in=true;account.waiting=true;account.busy=false;account.state='needs_input';account.progress=account.detail=detail;
+        const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application work stopped.');
+        autofillTabs[tab.id]={...autofillTabs[tab.id],url:tab.url,matched};
+        await chrome.storage.session.set({autofillTabs});
+        activeResults.set(tab.id,account);await report(account);pollForForm(account);
+        return {ok:true,tabId:tab.id,url:tab.url,summary:detail,findings:[{label:'Account step',notes:[detail]}],busy:false};
+      }
       const targets=before.filter(f=>f.result);
       if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
       const started=[];const token=crypto.randomUUID();let stopped='none',attempts=0,filled=0;

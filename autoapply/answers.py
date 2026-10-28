@@ -382,8 +382,8 @@ class AnswerResolver:
     def _resolve(self, q, app, descriptor, profile):
         from .field_mapping import REJECTED_FIELD
         mapped_key, policy = descriptor.semantic_key, descriptor.policy
-        from .question_keywords import unusable_label
-        if unusable_label(q.label):
+        from .question_keywords import unusable_label, robot_only
+        if unusable_label(q.label) or robot_only(q.label):
             return None
         # A standalone consent checkbox is its own offered action; its existing
         # explicit acknowledgement policy does not require a separate menu.
@@ -755,6 +755,9 @@ def writing_topic(question):
 
 def is_writing_question(q):
     """Only narrative prompts; a text box alone does not authorize factual invention."""
+    from .question_keywords import robot_only
+    if robot_only(q.label):
+        return False
     from .field_mapping import REJECTED_FIELD
     from .field_mapping import semantic_key
     from .concepts import REGISTRY
