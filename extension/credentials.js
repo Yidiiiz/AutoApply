@@ -23,6 +23,8 @@
   for(const type of ['beforeinput','input','change','keydown'])document.addEventListener(type,e=>{if(e.isTrusted && !synthetic && !e.target.closest?.('#autoapply-sidebar'))invalidate();},true);
   for(const type of ['pagehide','popstate','hashchange'])addEventListener(type,invalidate);
   const hint=el=>[el.name,el.id,el.getAttribute('title'),el.getAttribute('autocomplete'),el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' ');
+  const confirmation=el=>/confirm|repeat|re.?enter|\bverify[\s_-]*(?:new[\s_-]*)?password\b/i.test(hint(el)) ||
+    workday(scope(el)) && el.getAttribute('data-automation-id')==='verifyPassword';
   const passwords=()=>native.query('input[type="password"]').filter(visible);
   const contains=(root,el)=>{for(;el;el=native.parent(el))if(el===root)return true;return false;};
   const scope=pw=>native.closest(pw,'form,[role="form"],[role="dialog"],main');
@@ -91,7 +93,7 @@
     const emails=native.query('input',roots).filter(el=>contains(root,el)).filter(el=>editable(el) &&
       ['email','text',''].includes(el.type) && (el.type==='email' || /email|username|user.?name/i.test(hint(el))));
     if(emails.length!==1 || !signup && pw.length!==1 || [...emails,...pw].some(el=>el.form && el.form!==root))return null;
-    if(signup && pw.length===2 && (!/confirm|repeat|re.?enter/i.test(hint(pw[1])) || /confirm|repeat|re.?enter/i.test(hint(pw[0]))))return null;
+    if(signup && pw.length===2 && (!confirmation(pw[1]) || confirmation(pw[0])))return null;
     // CAPTCHA/OTP controls are never touched; wait for the user on such forms.
     if(native.query('input,iframe,[data-sitekey]',roots).filter(el=>contains(root,el)).some(el=>visible(el) && (el.hasAttribute('data-sitekey') || /captcha|one-time-code|otp|verification.?code|security.?code/i.test(hint(el)+' '+(el.getAttribute('src')||'')))))return null;
     for(const el of [...emails,...pw]){marked.add(el);if(el.value)secrets.add(el.value);}

@@ -197,13 +197,16 @@ async function coverLetter(result, answers) {
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const formWaits = new Map(), cancelledTabs = new Set(), closedTabs = new Set();
+const formWaitTokens = new Map();
 function cancelWait(tabId) {
   chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});
   clearTimeout(formWaits.get(tabId)); formWaits.delete(tabId); cancelledTabs.add(tabId); pendingSteps.delete(tabId);
+  formWaitTokens.delete(tabId);
 }
 function pollForForm(result) {
-  const epoch=runEpoch;
-  const current=()=>!staleRun(epoch) && activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId);
+  const epoch=runEpoch, token=Symbol();
+  formWaitTokens.set(result.tabId,token);
+  const current=()=>formWaitTokens.get(result.tabId)===token && !staleRun(epoch) && activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId);
   clearTimeout(formWaits.get(result.tabId));
   const end = Date.now() + 60000;
   async function tick() {
@@ -211,7 +214,7 @@ function pollForForm(result) {
     try {
       const scanned = await scan(result.tabId);
       if(!current())return;
-      if(scanned.sign_in){const detail=await fillAccount(result,true);if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
+      if(scanned.sign_in){const detail=await fillAccount(result,true);if(!current())return;if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
       if (!scanned.sign_in && scanned.fields.length) {
         formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
       }
@@ -353,18 +356,42 @@ export async function autofill(tabId, application, advanceCount = 0) {
 const credentialDocuments=new Map();
 const accountContexts=new WeakMap();
 let accountQueue=Promise.resolve();
+const sameAccountOrigin=(a,b)=>{
+  try{return new URL(a).protocol==='https:' && new URL(b).protocol==='https:' && new URL(a).origin===new URL(b).origin;}catch{return false;}
+};
+async function accountContext(url,saved,intent,application) {
+  // Null-ID matches are absence of attribution, not a usable stored job.
+  let matched=application?.application_id!=null?application:application!=null && typeof application!=='object'?{application_id:application}:await api('/ext/match',{url});
+  let source_url=url;
+  const prior=saved.account_action?.source_url || saved.url;
+  // A different unqueued job on the same employer must stay unattributed.
+  // Reuse only a shared account route, its parent landing route, or the same job.
+  const reusable=sameAccountOrigin(url,prior) && (()=>{
+    const path=new URL(url).pathname,previous=new URL(prior).pathname;
+    return /\/(?:login|signin|sign-in|signup|sign-up|auth|account|createaccount|create-account|userhome)(?:\/|$)/i.test(path) ||
+      previous.startsWith(path.replace(/\/$/,'')+'/') ||
+      path.replace(/\/apply(?:\/.*)?$/i,'')===previous.replace(/\/apply(?:\/.*)?$/i,'');
+  })();
+  if(matched?.application_id==null && reusable)source_url=prior;
+  if(matched?.application_id!=null && matched.application_id===saved.matched?.application_id && sameAccountOrigin(url,saved.url))matched={...saved.matched,...matched};
+  if(matched?.application_id==null && reusable && saved.matched?.application_id!=null){
+    matched=saved.matched;source_url=prior;
+  }
+  const source=new URL(source_url);
+  return {matched:matched || {application_id:null},account_action:{intent,source_url:source.origin+source.pathname}};
+}
 chrome.tabs.onRemoved.addListener(tabId=>credentialDocuments.delete(tabId));
 async function fillAccount(result, polling=false) {
   // A bounded serial reservation spans credential lookup, settlement and the
   // durable claim. Analyze calls this directly, never reenters Autofill.
-  const epoch=runEpoch, owner=activeResults.get(result.tabId), accountUrl=result.url;
+  const epoch=runEpoch, owner=activeResults.get(result.tabId), accountUrl=result.url, pollToken=formWaitTokens.get(result.tabId);
   const operation=async()=>{
     const valid=async()=>{
       const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
       return !chromeRunPaused && !staleRun(epoch) && !closedTabs.has(result.tabId) && !cancelledTabs.has(result.tabId) &&
-        activeResults.get(result.tabId)===owner && (await chrome.tabs.get(result.tabId)).url===accountUrl;
+        (!polling || !analysisTasks.has(result.tabId) && formWaitTokens.get(result.tabId)===pollToken) && activeResults.get(result.tabId)===owner && (await chrome.tabs.get(result.tabId)).url===accountUrl;
     };
-    if(!result.matched?.application_id || !accountUrl?.startsWith('https://'))return 'Account actions need a saved application. Sign in manually, then continue.';
+    if(!accountUrl?.startsWith('https://'))return 'Account actions require a supported HTTPS sign-in form.';
     try{
       if(!await valid())return 'Account action stopped. Review the page and retry.';
       const frames=await chrome.scripting.executeScript({target:{tabId:result.tabId,allFrames:true},world:'ISOLATED',func:()=>globalThis.autoApplyCredentials?.describe()});
@@ -372,14 +399,16 @@ async function fillAccount(result, polling=false) {
       if(supported.length!==1)return 'Account step needs manual attention: check credentials, CAPTCHA or verification, then continue.';
       const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
       const binding=document+':'+frame.result.identity+':'+frame.result.revision;
-      if(polling && accountContexts.has(result) && accountContexts.get(result)!==binding)
+      if(polling && accountContexts.get(result)!==binding)
         return 'Account action stopped because the page changed. Press Autofill to try again.';
       accountContexts.set(result,binding);
       const key=result.tabId+':'+document;
       const {accountActionClaims={}}=await chrome.storage.session.get('accountActionClaims');
       if(accountActionClaims[key])return 'Account action already attempted. Complete verification or review the account page; Autofill resumes after authentication.';
       if(polling && credentialDocuments.get(result.tabId)===document)return null;
-      const value=await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,application_id:result.matched.application_id,run_id:result.matched.run_id,mode:frame.result.mode});
+      const value=await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,
+        ...(result.matched?.application_id!=null?{application_id:result.matched.application_id,run_id:result.matched.run_id}:{}),
+        account_action:result.account_action,mode:frame.result.mode});
       if(!value.configured)return 'Set your account password in dashboard Settings, or sign in manually.';
       if(!await valid())return 'Account action stopped. Review the page and retry.';
       const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.prepare(value,expected),args:[value,frame.result]});
@@ -427,12 +456,14 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     activeResults.set(result.tabId, result);
     const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
     const saved = autofillTabs[result.tabId] || {};
-    result.matched = typeof application === "object" ? application : application ? {application_id: application} : saved.url?.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0]===result.url.replace(/\/apply(?:\/.*)?$/i,"").split(/[?#]/)[0] ? saved.matched : undefined;
-    if(!result.matched && saved.matched?.run_id && (result.sign_in || wasWaiting) &&
-       result.url.startsWith('https://') && saved.url?.startsWith('https://') && new URL(result.url).origin===new URL(saved.url).origin)result.matched=saved.matched;
-    result.matched ||= await api("/ext/match", {url: result.url});
+    if(result.sign_in)Object.assign(result,await accountContext(result.url,saved,'autofill',application));
+    else {
+      result.matched=typeof application==='object'?application:application?{application_id:application}:
+        saved.url?.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0]===result.url.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0]?saved.matched:undefined;
+      if(result.matched?.application_id==null)result.matched=await api('/ext/match',{url:result.url});
+    }
     if(cancelledTabs.has(result.tabId))return result;
-    autofillTabs[result.tabId] = {...saved, url: result.url, matched: result.matched};
+    autofillTabs[result.tabId] = {...saved, url: result.url, matched: result.matched,account_action:result.account_action};
     await chrome.storage.session.set({autofillTabs});
     if (result.matched.company) result.page.company = result.matched.company;
     if (result.matched.title) result.page.title = result.matched.title;
@@ -608,9 +639,13 @@ async function action(message) {
     if(!tab?.id || !/^https?:/.test(tab.url || ''))throw Error('Open an application page first.');
     if(analysisTasks.has(tab.id))return analysisTasks.get(tab.id);
     if(running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id) || manualActionTabs.size ||
-       activeResults.get(tab.id)?.busy || activeResults.get(tab.id)?.coverBusy || activeResults.get(tab.id)?.waiting ||
+       activeResults.get(tab.id)?.busy || activeResults.get(tab.id)?.coverBusy || activeResults.get(tab.id)?.skillsBusy ||
        activeResults.get(tab.id)?.writing?.length && !activeResults.get(tab.id)?.writingSettled)
       throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
+    // Stop the idle wait without cancellation or credential invalidation. The
+    // token also retires a tick already awaiting a scan; accountQueue drains
+    // an in-flight lookup before this explicit action can prepare anything.
+    clearTimeout(formWaits.get(tab.id));formWaits.delete(tab.id);formWaitTokens.delete(tab.id);pendingSteps.delete(tab.id);
     const task=(async()=>{
       // Reserve Analyze while a short run-status poll drains. A status request
       // is not form work and should not randomly force a manual retry.
@@ -637,20 +672,22 @@ async function action(message) {
       const auth=await chrome.scripting.executeScript({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyCredentials?.active()});
       if(auth.some(frame=>frame.result)){
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
-        const matched=current?.url===tab.url?current.matched:await api('/ext/match',{url:tab.url});
+        const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+        const saved=current?.matched?.application_id!=null?current:autofillTabs[tab.id] || {};
+        const {matched,account_action}=await accountContext(tab.url,saved,'analyze');
         const account=current?.url===tab.url?current:{tabId:tab.id,url:tab.url,matched,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
-        account.matched=matched;
+        account.matched=matched;account.account_action=account_action;
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
         const detail=await fillAccount(account);
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application work stopped.');
         account.sign_in=true;account.waiting=true;account.busy=false;account.state='needs_input';account.progress=account.detail=detail;
-        const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application work stopped.');
-        autofillTabs[tab.id]={...autofillTabs[tab.id],url:tab.url,matched};
+        autofillTabs[tab.id]={...autofillTabs[tab.id],url:tab.url,matched,account_action};
         await chrome.storage.session.set({autofillTabs});
         activeResults.set(tab.id,account);await report(account);pollForForm(account);
         return {ok:true,tabId:tab.id,url:tab.url,summary:detail,findings:[{label:'Account step',notes:[detail]}],busy:false};
       }
+      if(current)current.waiting=false;
       const targets=before.filter(f=>f.result);
       if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
       const started=[];const token=crypto.randomUUID();let stopped='none',attempts=0,filled=0;
@@ -779,7 +816,11 @@ async function action(message) {
       return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
     })();
     analysisTasks.set(tab.id,task);
-    try{return await task;}finally{analysisTasks.delete(tab.id);}
+    try{return await task;}finally{
+      analysisTasks.delete(tab.id);
+      const waiting=activeResults.get(tab.id);
+      if(waiting?.waiting && !formWaits.has(tab.id) && !cancelledTabs.has(tab.id))pollForForm(waiting);
+    }
   }
   if(message.type==='retry-submission-tracking') {
     const {tabResults={},autofillTabs={}}=await chrome.storage.session.get(['tabResults','autofillTabs']);

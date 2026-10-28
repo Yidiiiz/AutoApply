@@ -10,7 +10,7 @@ import pytest
 from playwright.sync_api import expect
 
 from autoapply.credentials import NAMES
-from autoapply.dashboard import DashboardServer
+from autoapply.dashboard import DashboardHandler, DashboardServer
 from autoapply.extension_api import dispatch
 from test_dashboard import dashboard, offline_descriptions
 from test_extension import loaded_extension
@@ -146,21 +146,21 @@ def test_account_abstains(browser, change):
 def test_account_pending_action_invalidated(browser, backend, monkeypatch, change):
     page, worker, tab, panel, isolated, app = browser
     entered, release = threading.Event(), threading.Event()
-    store = backend[0].settings.credentials
-    original = store.load
-    def delayed(*args, **kwargs):
-        entered.set()
-        release.wait(15)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(store, 'load', delayed)
+    original = DashboardHandler.do_POST
+    def delayed(handler):
+        if handler.path == '/ext/credentials' and handler.server.dashboard is backend[0]:
+            entered.set()
+            release.wait(15)
+        return original(handler)
+    monkeypatch.setattr(DashboardHandler, 'do_POST', delayed)
     before = isolated('describe')
-    panel.evaluate('''id=>{
+    try:
+        panel.evaluate('''id=>{
       globalThis.pendingOutcome={settled:false};
       globalThis.pending=chrome.runtime.sendMessage({type:"autofill",tabId:id}).then(
         result=>{pendingOutcome={settled:true,result};return result;},
         error=>{pendingOutcome={settled:true,error:String(error)};return pendingOutcome;});
-    }''', tab)
-    try:
+        }''', tab)
         deadline = time.monotonic() + 8
         while not entered.is_set() and time.monotonic() < deadline:
             # Yield to Playwright so routed fixture requests can be fulfilled.
@@ -168,6 +168,7 @@ def test_account_pending_action_invalidated(browser, backend, monkeypatch, chang
             outcome = panel.evaluate('()=>pendingOutcome')
             assert not outcome['settled'], outcome
         assert entered.is_set(), panel.evaluate('()=>pendingOutcome')
+        assert page.evaluate('[accountClicks,applicationClicks]') == [0, 0]
         if change == 'edit':
             page.locator('#email').fill('manual@example.test')
         elif change in ('navigation', 'hash'):
@@ -180,6 +181,7 @@ def test_account_pending_action_invalidated(browser, backend, monkeypatch, chang
     finally:
         release.set()
     result = panel.evaluate('()=>pending')
+    assert page.evaluate('[accountClicks,applicationClicks]') == [0, 0], result
     # A later poll must not turn the stopped lookup into new authorization.
     page.wait_for_timeout(1800)
     assert page.evaluate('accountClicks') == 0, result

@@ -1292,29 +1292,54 @@ def unapplied(dashboard, payload):
 
 
 def credentials(dashboard, payload):
-    """Release only to the paired extension for a stored, same-origin ATS job."""
+    """Release for a stored ATS job or an explicit, native-verified account action."""
     rejected = 'Account autofill requires an authorized HTTPS application sign-in form'
-    if set(payload) - {'url', 'frame_url', 'application_id', 'run_id', 'mode'} or payload.get('mode') not in {'login', 'signup'}:
+    if set(payload) - {'url', 'frame_url', 'application_id', 'run_id', 'mode', 'account_action'} or payload.get('mode') not in {'login', 'signup'}:
         raise SettingsRejected(rejected, status=403)
-    application_id = _id(payload.get('application_id'))
     try:
+        application_id = _id(payload['application_id']) if 'application_id' in payload else None
         page, frame = urlsplit(payload['url']), urlsplit(payload['frame_url'])
+        action = payload.get('account_action')
+        source = page
+        if action is not None:
+            if (not isinstance(action, dict) or set(action) != {'intent', 'source_url'} or
+                    action['intent'] not in {'autofill', 'analyze'} or
+                    not isinstance(action['source_url'], str)):
+                raise ValueError
+            source = urlsplit(action['source_url'])
         with dashboard.connection() as db:
-            app = db.application(application_id)
-            _unprotected(app)
-            job = urlsplit(app['canonical_url'])
-            host = job.hostname or ''
+            app = db.application(application_id) if application_id is not None else None
+            if app:
+                _unprotected(app)
+            job = urlsplit(app['canonical_url']) if app else source
+            host = page.hostname or ''
             supported = any(host == suffix or host.endswith('.' + suffix) for suffix in (
                 'myworkdayjobs.com', 'greenhouse.io', 'lever.co', 'smartrecruiters.com',
                 'pinpointhq.com', 'applytojob.com', 'icims.com', 'taleo.net', 'successfactors.com'))
             safe = supported and all(p.scheme == 'https' and p.hostname == host and
                                      p.port in (None, 443) and not p.username and not p.password
-                                     for p in (job, page, frame))
-            matched = _match(db, _url(payload['url'])) if safe else None
+                                     for p in (job, page, frame, source))
+            if not safe:
+                raise ValueError
+            matched = _match(db, _url(payload['url']))
+            source_match = _match(db, _url(source.geturl()))
+            for known in (matched, source_match):
+                if known:
+                    _unprotected(known)
+                    if application_id is not None and known['id'] != application_id:
+                        raise ValueError
         with dashboard._ext_mutex:
             active = any(i['application_id'] == application_id and i['state'] == 'opened' and
                          i['run_id'] == payload.get('run_id') for i in dashboard._ext_run)
-        if not safe or not (matched and matched['id'] == application_id or active):
+        if application_id is None:
+            # Only privileged explicit Autofill/Analyze supplies this bounded
+            # assertion after native auth-form and same-origin verification.
+            # No job/application is created or selected to authorize an account.
+            if action is None or payload.get('run_id') is not None:
+                raise ValueError
+        elif (payload.get('run_id') is not None and not active or
+              not (matched and matched['id'] == application_id or active or
+                   action is not None and source_match and source_match['id'] == application_id)):
             raise ValueError
     except (ValueError, KeyError, TypeError, SettingsRejected):
         raise SettingsRejected(rejected, status=403) from None
