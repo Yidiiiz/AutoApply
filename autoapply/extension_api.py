@@ -268,6 +268,28 @@ def secondary_address(label):
 
 
 _TRACE_LOCK = threading.Lock()
+_ACCOUNT_REASONS = frozenset('''scan_incomplete no_password controls_not_editable scope_ambiguous
+    insecure_origin cross_origin reset_password current_password otp captcha no_matching_email
+    confirmation_unrecognized action_ambiguous action_unavailable context_changed credentials_preserved
+    consent_required consent_unsettled form_invalid credentials_unconfigured frames_ambiguous unavailable'''.split())
+
+
+def _account_trace(row):
+    """Account diagnostics accept enums and bounded counts, never DOM text/values."""
+    observed = row.get('observed', {})
+    if (not isinstance(row.get('reason'), str) or row['reason'] not in _ACCOUNT_REASONS or
+            not isinstance(observed, dict) or not isinstance(observed.get('phase'), str) or
+            observed['phase'] not in {'describe', 'credentials', 'prepare', 'activate'}):
+        raise SettingsRejected('Invalid account diagnosis')
+    counts = {}
+    for key in ('password_count', 'email_count', 'action_count', 'frame_count'):
+        if key in observed:
+            value = observed[key]
+            if type(value) is not int or not 0 <= value <= 1000:
+                raise SettingsRejected('Invalid account diagnosis count')
+            counts[key] = value
+    return dict(step='account', action='rejected', label='Account step', reason=row['reason'],
+                observed=dict(phase=observed['phase'], **counts))
 
 
 def trace(dashboard, payload):
@@ -282,7 +304,8 @@ def trace(dashboard, payload):
     allowed = {'timestamp', 'step', 'action', 'label', 'automation_id', 'element_id', 'value',
                'texts', 'total', 'scrollTop', 'rows', 'target', 'verified', 'aria_label', 'pill',
                'reason', 'error', 'stack', 'observed'}
-    rows = [{key: value for key, value in row.items() if key in allowed} for row in entries]
+    rows = [_account_trace(row) if row.get('step') == 'account' else
+            {key: value for key, value in row.items() if key in allowed} for row in entries]
     data = dict(host=host, kind=kind, started=str(payload.get('started', ''))[:100],
                 ended=str(payload.get('ended', ''))[:100], entries=rows,
                 truncated=payload.get('truncated') is True)
