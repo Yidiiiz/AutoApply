@@ -168,16 +168,29 @@ def test_autofill_otp_frame_returns_promptly(native_browser, backend, db):
 @pytest.mark.browser
 def test_autofill_diagnosis_and_safe_catch(native_browser, backend, monkeypatch):
     page, worker, tab, panel, isolated, _ = native_browser
-    def fail(*args):
-        raise RuntimeError(EMAIL + PASSWORD + 'PRIVATE_SENTINEL')
+    original_load = backend[0].settings.credentials.load
+    releases = []
+    def fail(*, profile_email=False):
+        # Ordinary reads support redaction for /ext/match and /ext/trace.
+        # Fail only the authorized /ext/credentials release under test.
+        if profile_email:
+            releases.append(True)
+            raise RuntimeError(EMAIL + PASSWORD + 'PRIVATE_SENTINEL')
+        return original_load(profile_email=profile_email)
     monkeypatch.setattr(backend[0].settings.credentials, 'load', fail)
-    result = panel.evaluate('id=>chrome.runtime.sendMessage({type:"autofill",tabId:id})', tab)
+    result = bounded_action(panel, tab, 'autofill')
+    assert releases == [True]
     assert result['progress'] == 'Account action unavailable. Sign in manually, then continue.'
     rows = account_rows(page, backend[0].config)
     assert any(row['reason'] == 'unavailable' and row['observed']['phase'] == 'credentials' for row in rows)
     private(rows)
     private(result)
-    assert page.evaluate('[accountClicks,navigationClicks,applicationClicks]') == [0, 0, 0]
+    private(isolated('private'))
+    assert page.evaluate('[accountClicks,navigationClicks,applicationClicks,consent.checked,marketing.checked]') == [0, 0, 0, False, False]
+    assert page.locator('#email').input_value() == ''
+    assert page.locator('input[type=password]').evaluate_all('(els)=>els.every(e=>!e.value)')
+    for path in (backend[0].config.private / 'traces').glob('*.json'):
+        private(json.loads(path.read_text(encoding='utf-8')))
 
 
 def test_account_trace_schema(backend):
