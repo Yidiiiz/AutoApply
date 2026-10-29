@@ -269,6 +269,7 @@ def secondary_address(label):
 
 _TRACE_LOCK = threading.Lock()
 _ACCOUNT_REASONS = frozenset('''scan_incomplete no_password controls_not_editable scope_ambiguous
+    native_owner_mismatch signup_mode_unavailable account_surface_ambiguous
     insecure_origin cross_origin reset_password current_password otp captcha no_matching_email
     confirmation_unrecognized action_ambiguous action_unavailable context_changed credentials_preserved
     consent_required consent_unsettled form_invalid credentials_unconfigured frames_ambiguous unavailable'''.split())
@@ -282,7 +283,8 @@ def _account_trace(row):
             observed['phase'] not in {'describe', 'credentials', 'prepare', 'activate'}):
         raise SettingsRejected('Invalid account diagnosis')
     counts = {}
-    for key in ('password_count', 'email_count', 'action_count', 'frame_count'):
+    for key in ('password_count', 'email_count', 'action_count', 'frame_count',
+                'external_action_count', 'native_owner_mismatch_count', 'account_form_count', 'known_surface_count'):
         if key in observed:
             value = observed[key]
             if type(value) is not int or not 0 <= value <= 1000:

@@ -1,0 +1,22 @@
+<!doctype html><html><head><title>Synthetic Workday account surface</title></head><body>
+<div id="accountSurface" data-automation-id="signInContent">
+<h3 id="authViewTitle">Create Account</h3>
+<form id="accountForm" data-automation-id="signInFormo" onsubmit="event.preventDefault();submitters.push(event.submitter?.getAttribute('data-automation-id'))">
+<div role="form"><label>Email Address*<input id="email" type="email" autocomplete="username" required></label>
+<label>Password*<input id="password" type="password" autocomplete="new-password" required></label>
+<label id="confirmLabel">Verify New Password*<input id="secondaryPassword" data-automation-id="verifyPassword" type="password" required></label></div>
+</form>
+<div data-automation-id="richText">Account terms</div>
+<button type="button" data-automation-id="createAccountExpandButton">Create Account</button>
+<div style="display:flex"><div style="width:18px;height:18px"><input id="consent" type="checkbox" style="opacity:0;width:18px;height:18px" aria-checked="false" data-automation-id="createAccountCheckbox" onchange="this.setAttribute('aria-checked',String(this.checked))"></div><label for="consent">I consent to the above.</label></div>
+<label>Marketing newsletter<input id="marketing" type="checkbox"></label>
+<div role="button" aria-label="Create Account" data-automation-id="click_filter" onclick="if(event.target===this)wrapperClicks++">
+<button id="primary" type="submit" data-automation-id="createAccountSubmitButton" onclick="accountClicks++;ordered.push(consent.checked);if(!this.form){event.preventDefault();submitters.push(this.getAttribute('data-automation-id'))}">Create Account</button></div>
+<button data-automation-id="signInLink" onclick="event.preventDefault();navigationClicks++">Sign in</button>
+<button data-automation-id="forgotPasswordLink" onclick="event.preventDefault();navigationClicks++">Forgot password</button>
+</div>
+<button type="button" data-automation-id="utilityButtonSignIn">Sign in</button>
+<label hidden>Robots only<input data-automation-id="beecatcher"></label>
+<script>
+let navigationClicks=0,submitters=[],accountClicks=0,applicationClicks=0,wrapperClicks=0,ordered=[];
+</script></body></html>

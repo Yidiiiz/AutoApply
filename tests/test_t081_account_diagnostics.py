@@ -207,3 +207,21 @@ def test_account_trace_schema(backend):
                    dict(observed=dict(phase='describe', password_count=PASSWORD))]:
         with pytest.raises(SettingsRejected):
             trace(app, dict(host='fixture.myworkdayjobs.com', kind='autofill', entries=[dict(row, **change)]))
+
+
+@pytest.mark.parametrize('reason', ['native_owner_mismatch', 'signup_mode_unavailable', 'account_surface_ambiguous'])
+def test_account_relationship_trace_schema(backend, reason):
+    app = backend[0]
+    counts = dict(external_action_count=1, native_owner_mismatch_count=0,
+                  account_form_count=1, known_surface_count=1)
+    row = dict(step='account', reason=reason, observed=dict(phase='describe', **counts,
+               html=PASSWORD, url=EMAIL, label='PRIVATE_SENTINEL'))
+    result = trace(app, dict(host='fixture.myworkdayjobs.com', kind='autofill', entries=[row]))
+    saved = json.loads((app.config.private / 'traces' / result['filename']).read_text(encoding='utf-8'))
+    assert saved['entries'][0]['observed'] == dict(phase='describe', **counts)
+    private(saved)
+    for key in counts:
+        for invalid in (True, -1, 1001, PASSWORD):
+            with pytest.raises(SettingsRejected):
+                trace(app, dict(host='fixture.myworkdayjobs.com', kind='autofill', entries=[
+                    dict(row, observed=dict(phase='describe', **{key: invalid}))]))

@@ -377,6 +377,7 @@ export async function autofill(tabId, application, advanceCount = 0) {
   finally{autofillTasks--;}
 }
 const credentialDocuments=new Map();
+const accountDiagnostics=new Map();
 const accountContexts=new WeakMap();
 let accountQueue=Promise.resolve();
 const sameAccountOrigin=(a,b)=>{
@@ -403,10 +404,12 @@ async function accountContext(url,saved,intent,application) {
   const source=new URL(source_url);
   return {matched:matched || {application_id:null},account_action:{intent,source_url:source.origin+source.pathname}};
 }
-chrome.tabs.onRemoved.addListener(tabId=>credentialDocuments.delete(tabId));
+chrome.tabs.onRemoved.addListener(tabId=>{credentialDocuments.delete(tabId);accountDiagnostics.delete(tabId);});
 const accountReasons={
   scan_incomplete:'Account scan is incomplete.',no_password:'Account password control is unavailable.',
   controls_not_editable:'Account controls are not editable.',scope_ambiguous:'Account form scope is ambiguous.',
+  native_owner_mismatch:'Account controls have a different native form owner.',
+  signup_mode_unavailable:'Account signup mode is unavailable.',account_surface_ambiguous:'Account surface contains competing forms or boundaries.',
   insecure_origin:'Account actions require HTTPS.',cross_origin:'Account form targets a different origin.',
   reset_password:'Password recovery form requires manual completion.',current_password:'Password change form requires manual completion.',
   otp:'Account verification code requires manual completion.',captcha:'Account CAPTCHA requires manual completion.',
@@ -417,11 +420,14 @@ const accountReasons={
   form_invalid:'Account form validation failed.',credentials_unconfigured:'Set your account password in dashboard Settings, or sign in manually.',
   frames_ambiguous:'Multiple account frames are supported.',unavailable:'Account action unavailable. Sign in manually, then continue.'
 };
-function accountFailure(result,phase,diagnosis={}){
+function accountFailure(result,phase,diagnosis={},binding='',polling=false){
   const reason=Object.hasOwn(accountReasons,diagnosis.reason)?diagnosis.reason:'unavailable';
   const observed={phase};
-  for(const key of ['password_count','email_count','action_count','frame_count'])
+  for(const key of ['password_count','email_count','action_count','frame_count','external_action_count','native_owner_mismatch_count','account_form_count','known_surface_count'])
     if(Number.isInteger(diagnosis[key]))observed[key]=Math.max(0,Math.min(1000,diagnosis[key]));
+  const diagnostic=JSON.stringify([binding,reason,observed]);
+  if(polling && accountDiagnostics.get(result.tabId)===diagnostic)return accountReasons[reason];
+  accountDiagnostics.set(result.tabId,diagnostic);
   // Detached, best effort: trace transport cannot delay or fail account actions.
   try{void saveTrace({host:new URL(result.url).hostname,kind:'autofill',entries:[{step:'account',action:'rejected',label:'Account step',reason,observed}]}).catch(()=>{});}catch{}
   return accountReasons[reason];
@@ -431,8 +437,8 @@ async function fillAccount(result, polling=false) {
   // durable claim. Analyze calls this directly, never reenters Autofill.
   const epoch=runEpoch, owner=activeResults.get(result.tabId), accountUrl=result.url, pollToken=formWaitTokens.get(result.tabId);
   const operation=async()=>{
-    let phase='describe';
-    const failure=(reason,diagnosis={})=>accountFailure(result,phase,{...diagnosis,reason:reason || diagnosis.reason});
+    let phase='describe',diagnosticBinding='';
+    const failure=(reason,diagnosis={})=>accountFailure(result,phase,{...diagnosis,reason:reason || diagnosis.reason},diagnosticBinding,polling);
     const valid=async()=>{
       const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
       return !chromeRunPaused && !staleRun(epoch) && !closedTabs.has(result.tabId) && !cancelledTabs.has(result.tabId) &&
@@ -442,6 +448,7 @@ async function fillAccount(result, polling=false) {
     try{
       if(!await valid())return failure('context_changed');
       const frames=await accountFrames(result.tabId);
+      diagnosticBinding=JSON.stringify(frames.map(f=>[f.documentId,f.result?.revision]));
       const supported=frames.filter(f=>f.result?.supported && new URL(f.result.url).origin===new URL(accountUrl).origin);
       if(supported.length!==1){
         const rejected=frames.find(f=>f.frameId===0 && f.result?.active) || frames.find(f=>f.result?.active);
