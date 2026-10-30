@@ -60,11 +60,11 @@ CASES = {
     'separate_credentials': ("confirmLabel.remove();document.body.insertAdjacentHTML('beforeend','<form><h2>Sign in</h2><input type=email><input type=password><button>Sign in</button></form>')", 'scope_ambiguous'),
     'competing_login': ("document.body.insertAdjacentHTML('beforeend','<form><h2>Sign in</h2><input type=email><button>Sign in</button></form>')", 'account_surface_ambiguous'),
     'nested_surfaces': ("accountSurface.insertAdjacentHTML('beforebegin','<div id=outer data-automation-id=signInContent></div>');outer.append(accountSurface)", 'account_surface_ambiguous'),
-    'unrelated_create': ("document.body.append(primary)", 'signup_mode_unavailable'),
+    'unrelated_create': ("document.body.append(primary)", 'action_unavailable'),
     'unknown_surface': ("accountSurface.removeAttribute('data-automation-id')", 'signup_mode_unavailable'),
     'duplicate': ("primary.insertAdjacentHTML('afterend','<button>Create Account</button>')", 'action_ambiguous'),
     'competing_action': ("primary.insertAdjacentHTML('afterend','<button data-automation-id=signInSubmitButton>Sign in</button>')", 'action_ambiguous'),
-    'wrapper_only': ("primary.remove()", 'signup_mode_unavailable'),
+    'wrapper_only': ("primary.remove()", 'action_unavailable'),
     'action_origin': ("primary.setAttribute('formaction','https://other.test/auth')", 'cross_origin'),
     'form_origin': ("accountForm.action='https://other.test/auth'", 'cross_origin'),
     'otp': ("accountSurface.insertAdjacentHTML('beforeend','<input autocomplete=one-time-code>')", 'otp'),
@@ -96,6 +96,13 @@ def test_surface_abstains_privately(surface_browser, backend, db, case):
     if observed['phase'] == 'describe':
         assert page.locator('#email').input_value() == ''
         assert page.locator('input[type=password]').evaluate_all('(els)=>els.every(e=>!e.value)')
+    if case in {'unrelated_create', 'wrapper_only', 'application'}:
+        assert observed['phase'] == 'prepare'
+        assert 'Account details filled.' in result['summary']
+        assert page.locator('#email').input_value() == EMAIL
+        assert page.locator('input[type=password]').evaluate_all('(els)=>els.map(e=>e.value)') == [PASSWORD, PASSWORD]
+        assert page.locator('#consent').is_checked()
+        assert not worker.evaluate('async()=>(await chrome.storage.session.get("accountActionClaims")).accountActionClaims')
     assert db.rows('SELECT id FROM applications') == before
     for value in (result, saved, isolated('private')):
         private(value)
@@ -108,7 +115,7 @@ def test_identical_poll_diagnostics_deduplicated(surface_browser, backend):
     page, worker, tab, panel, isolated, _ = surface_browser
     page.evaluate('document.body.append(primary)')
     result = bounded_action(panel, tab, 'autofill')
-    assert 'signup mode' in result['progress'], result
+    assert 'Account details filled.' in result['progress'], result
     first = account_rows(page, backend[0].config)
     page.wait_for_timeout(2500)
     assert rows(backend[0].config) == first

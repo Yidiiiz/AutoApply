@@ -99,7 +99,7 @@ CASES = {
     'cross_origin': ("document.querySelector('form').action='https://other.test/auth'", 'cross_origin', 'describe'),
     'action_origin': ("document.querySelector('[type=submit]').setAttribute('formaction','https://other.test/auth')", 'cross_origin', 'describe'),
     'ambiguous': ("document.querySelector('[type=submit]').insertAdjacentHTML('afterend','<button>Create account</button>')", 'action_ambiguous', 'describe'),
-    'unavailable': ("document.querySelector('[type=submit]').textContent='Submit application'", 'action_unavailable', 'describe'),
+    'unavailable': ("document.querySelector('[type=submit]').textContent='Submit application'", 'action_unavailable', 'prepare'),
     'confirmation': ("confirmLabel.firstChild.textContent='Additional password';secondaryPassword.removeAttribute('data-automation-id')", 'confirmation_unrecognized', 'describe'),
     'disabled': ("password.disabled=true", 'controls_not_editable', 'describe'),
     'no_password': ("document.querySelectorAll('input[type=password]').forEach(e=>e.remove())", 'no_password', 'describe'),
@@ -109,7 +109,7 @@ CASES = {
     'consent_hidden': ("consent.parentElement.hidden=true", 'consent_required', 'prepare'),
     'consent_reverts': ("consent.onchange=()=>consent.checked=false", 'consent_unsettled', 'prepare'),
     'invalid': ("email.setCustomValidity('PRIVATE_SENTINEL')", 'form_invalid', 'prepare'),
-    'role_link': ("document.querySelector('[type=submit]').setAttribute('role','link')", 'action_unavailable', 'describe'),
+    'role_link': ("document.querySelector('[type=submit]').setAttribute('role','link')", 'action_unavailable', 'prepare'),
 }
 
 
@@ -137,6 +137,13 @@ def test_rejection_persisted(native_browser, backend, db, case):
         assert page.locator('input[type=password]').evaluate_all('(els)=>els.every(e=>!e.value)')
         if case != 'no_email':
             assert page.locator('#email').input_value() == ''
+    if case in {'unavailable', 'role_link'}:
+        assert description['supported'] and not description['actionReady']
+        assert 'Account details filled.' in result['summary']
+        assert page.locator('#email').input_value() == EMAIL
+        assert page.locator('input[type=password]').evaluate_all('(els)=>els.map(e=>e.value)') == [PASSWORD, PASSWORD]
+        assert page.locator('#consent').is_checked()
+        assert not worker.evaluate('async()=>(await chrome.storage.session.get("accountActionClaims")).accountActionClaims')
     assert db.rows('SELECT id FROM applications') == before
     private(rows)
     private(result)

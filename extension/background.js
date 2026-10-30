@@ -473,6 +473,11 @@ async function fillAccount(result, polling=false) {
       if(!await valid())return failure('context_changed');
       phase='prepare';
       const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.prepare(value,expected),args:[value,frame.result]});
+      if(prepared?.result?.status==='filled'){
+        if(!await valid())return failure('context_changed');
+        failure(null,prepared.result.diagnosis);
+        return `Account details filled. ${frame.result.mode==='signup'?'Create account':'Sign in'} button is not available yet.`;
+      }
       if(prepared?.result?.status!=='ready')return failure(null,prepared?.result?.diagnosis);
       if(!await valid())return failure('context_changed');
       // Persist before activation. A timeout/restart is never permission to click

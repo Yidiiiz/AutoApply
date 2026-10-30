@@ -112,7 +112,11 @@
     if(/reset\s+(?:your\s+)?password|change\s+(?:your\s+)?password|forgot\s+password/i.test(context))return reject('reset_password');
     if(/current\s+password/i.test(context) || pw.some(el=>/current[\s_-]*password|old.?password/i.test([el.name,el.id,el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' '))))return reject('current_password');
     if(/one.?time|verification\s+code|security\s+code/i.test(context) || pw.some(el=>/otp|one.?time/i.test(hint(el))))return reject('otp');
-    const signup=workday(root)?native.query('button[data-automation-id="createAccountSubmitButton"],input[type="submit"][data-automation-id="createAccountSubmitButton"]',roots).some(el=>inAccount({root,surface},el)&&visible(el)):/create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context);
+    // A unique known native Workday surface and recognized password pair are
+    // sufficient for filling. The primary action may render later.
+    const inferredSignup=workday(root) && diagnosis.account_form_count===1 && diagnosis.known_surface_count===1 &&
+      pw.length===2 && confirmation(pw[1]) && !confirmation(pw[0]);
+    const signup=workday(root)?inferredSignup || native.query('button[data-automation-id="createAccountSubmitButton"],input[type="submit"][data-automation-id="createAccountSubmitButton"]',roots).some(el=>inAccount({root,surface},el)&&visible(el)):/create\s+(?:an?\s+)?account|sign\s*up|register/i.test(context);
     if(!signup && !workday(root) && !/sign[\s-]*in|log[\s-]*in/i.test(context))return reject('scope_ambiguous');
     const emails=native.query('input',roots).filter(el=>contains(root,el)).filter(el=>editable(el) &&
       ['email','text',''].includes(el.type) && (el.type==='email' || /email|username|user.?name/i.test(hint(el))));
@@ -130,7 +134,13 @@
     for(const el of [...emails,...pw]){marked.add(el);if(el.value)secrets.add(el.value);}
     return {mode:signup?'signup':'login',email:emails[0],password:pw[0],confirm:pw[1],root,surface,identity:[identity(root),identity(surface),identity(emails[0]),...pw.map(identity)].join(':')};
   }
-  const describe=()=>{const f=form(),supported=Boolean(f && action(f));return {active:active(),supported,diagnosis:{...diagnosis},mode:f?.mode,identity:f?.identity,formIdentity:f?identity(f.root):undefined,url:location.origin+location.pathname,revision};};
+  const describe=()=>{
+    const f=form(),actionReady=Boolean(f && action(f));
+    // Missing/unavailable actions permit filling; unsafe ownership, origins
+    // and ambiguous actions still withhold credentials.
+    const supported=Boolean(f && (actionReady || diagnosis.reason==='action_unavailable'));
+    return {active:active(),supported,actionReady,diagnosis:{...diagnosis},mode:f?.mode,identity:f?.identity,formIdentity:f?identity(f.root):undefined,url:location.origin+location.pathname,revision};
+  };
   function fill(value,expected){
     const f=form();
     if(!f || location.protocol!=='https:' || location.origin+location.pathname!==expected.url || f.mode!==expected.mode || f.identity!==expected.identity || revision!==expected.revision ||
@@ -159,16 +169,22 @@
   function action(f){
     const roots=native.discover();
     const matchesMode=el=>(f.mode==='signup'?/^(create\s+(?:an?\s+)?account|sign\s*up|register)$/i:/^(sign[\s-]*in|log[\s-]*in)$/i).test((el.textContent||el.value||'').trim());
-    const candidates=native.query('button,input[type="submit"]',roots).filter(el=>inAccount(f,el) && visible(el) && !navigation(el) &&
+    const buttons=native.query('button,input[type="submit"]',roots).filter(el=>inAccount(f,el) && !navigation(el));
+    const candidates=buttons.filter(el=>visible(el) &&
       (matchesMode(el) || workday(f.root) && /^(create\s+(?:an?\s+)?account|sign\s*up|register|sign[\s-]*in|log[\s-]*in)$/i.test((el.textContent||el.value||'').trim())) &&
       !/application|sso|google|linkedin|reset|forgot/i.test(hint(el)+' '+el.textContent));
     diagnosis.action_count=Math.min(candidates.length,1000);
     diagnosis.external_action_count=Math.min(candidates.filter(el=>!contains(f.root,el)).length,1000);
-    diagnosis.native_owner_mismatch_count=Math.min([...candidates,...consentControls(f)].filter(el=>el.form && el.form!==f.root).length,1000);
+    // An unavailable known native action must not hide an unsafe owner/target.
+    const guarded=buttons.filter(el=>candidates.includes(el) || workday(f.root) &&
+      ['createAccountSubmitButton','signInSubmitButton'].includes(el.getAttribute('data-automation-id')));
+    diagnosis.native_owner_mismatch_count=Math.min([...guarded,...consentControls(f)].filter(el=>el.form && el.form!==f.root).length,1000);
     if(diagnosis.native_owner_mismatch_count)return reject('native_owner_mismatch');
-    if(candidates.some(el=>{try{const target=new URL(el.getAttribute('formaction')||location.href,location.href);return target.origin!==location.origin || target.protocol!=='https:';}catch{return true;}}))return reject('cross_origin');
+    if(guarded.some(el=>{try{const target=new URL(el.getAttribute('formaction')||location.href,location.href);return target.origin!==location.origin || target.protocol!=='https:';}catch{return true;}}))return reject('cross_origin');
     if(candidates.length!==1)return reject(candidates.length?'action_ambiguous':'action_unavailable');
-    return editable(candidates[0]) && matchesMode(candidates[0])?candidates[0]:reject('action_unavailable');
+    const button=candidates[0];
+    const trusted=!workday(f.root) || button.getAttribute('data-automation-id')===(f.mode==='signup'?'createAccountSubmitButton':'signInSubmitButton');
+    return editable(button) && matchesMode(button) && trusted?button:reject('action_unavailable');
   }
   function consentEligible(el,f){
     if(!inAccount(f,el) || el.form && el.form!==f.root || el.disabled || el.readOnly || el.getAttribute('aria-readonly')==='true' || el.matches(':disabled') || native.closest(el,'[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]'))return false;
@@ -193,23 +209,24 @@
     const initial=form();
     if(!initial)return failure();
     if(!matches(initial,expected))return failure('context_changed');
-    if(!action(initial))return failure();
+    if(!action(initial) && diagnosis.reason!=='action_unavailable')return failure();
     const result=fill(value,expected),f=form();
     if(!f)return failure();
     if(result.status==='unavailable' || !matches(f,expected))return failure('context_changed');
-    if(!action(f))return failure();
     if([f.email,f.password,f.confirm].some(el=>el && el.value!==(el===f.email?value.email:value.password)))return failure('credentials_preserved');
+    if(!action(f) && diagnosis.reason!=='action_unavailable')return failure();
     const consent=consentControls(f);
-    if(consent.some(el=>!consentEligible(el,f)) || native.query('input[type="checkbox"]').some(el=>inAccount(f,el) && el.required && !el.checked && !consent.includes(el)))return failure('consent_required');
+    const consentRequired=consent.some(el=>!consentEligible(el,f)) || native.query('input[type="checkbox"]').some(el=>inAccount(f,el) && el.required && !el.checked && !consent.includes(el));
     synthetic=true;
-    try{for(const el of consent)if(!el.checked){el.click();el.dispatchEvent(new Event('input',{bubbles:true,composed:true}));el.dispatchEvent(new Event('change',{bubbles:true,composed:true}));}}finally{synthetic=false;}
+    try{for(const el of consent)if(consentEligible(el,f) && !el.checked){el.click();el.dispatchEvent(new Event('input',{bubbles:true,composed:true}));el.dispatchEvent(new Event('change',{bubbles:true,composed:true}));}}finally{synthetic=false;}
     await new Promise(resolve=>setTimeout(resolve,350));
     const settled=form();
     if(!settled)return failure();
     if(!matches(settled,expected))return failure('context_changed');
-    if(!action(settled))return failure();
-    if(!consent.every(el=>el.checked && el.getAttribute('aria-checked')!=='false' && consentEligible(el,settled)))return failure('consent_unsettled');
     if([settled.email,settled.password,settled.confirm].some(el=>el && el.value!==(el===settled.email?value.email:value.password)))return failure('credentials_preserved');
+    if(!action(settled))return diagnosis.reason==='action_unavailable'?{status:'filled',filled:result.filled,diagnosis:{...diagnosis}}:failure();
+    if(consentRequired)return failure('consent_required');
+    if(!consent.every(el=>el.checked && el.getAttribute('aria-checked')!=='false' && consentEligible(el,settled)))return failure('consent_unsettled');
     if(!validState(settled))return failure('form_invalid');
     ticket={id:crypto.randomUUID(),href:location.href,expected,button:action(settled),consent,values:[settled.email.value,settled.password.value,settled.confirm?.value]};
     return {status:'ready',ticket:ticket.id,diagnosis:{...diagnosis}};
