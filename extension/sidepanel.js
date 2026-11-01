@@ -228,7 +228,7 @@ function renderFillButton(value) {
   const button=element('autofill');
   button.textContent=value?.busy || mainBusy ? 'Filling…' : 'Autofill';
   const settled=value?.summary && !value.stalePage && !value.busy && !mainBusy && !value.skillsBusy && !value.coverBusy &&
-    (!value.writing?.length || value.writingSettled) && !value.waiting && !value.error;
+    (!value.writing?.length || value.writingSettled) && (!value.waiting || value.sign_in) && !value.error;
   if(settled){const count=document.createElement('span');count.className='fill-count';const n=value.summary.filled || 0;count.textContent=n+' field'+(n===1?'':'s')+' filled';button.append(count);}
 }
 function render(value) {
@@ -253,10 +253,10 @@ function render(value) {
   if(value.skillsBusy)element("skills-progress").textContent=skillPlan ? skillPlan.matched.length+" matched" : "";
   else if(value.skills)renderSkills(value.skills);
   else if(element("skills-progress").textContent==="Adding skills…")element("skills-progress").textContent="Skills need review";
-  const final=value.next_action?.kind==='submit';
-  element('next-page').textContent=value.submitting?'Submitting...':final?'Submit':'Next page';
-  element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || final && (busy || value.waiting));
-  element('auto-advance').disabled=final || !autoPreferenceReady;
+  const account=value.sign_in && value.accountMode,final=!account && value.next_action?.kind==='submit';
+  element('next-page').textContent=value.submitting?'Submitting...':account?(account==='signup'?'Create account':'Sign in'):final?'Submit':'Next page';
+  element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || account && busy || final && (busy || value.waiting));
+  element('auto-advance').disabled=Boolean(account) || final || !autoPreferenceReady;
   element('auto-advance').parentElement.title=final?'Final submission requires your explicit click':'Keep Auto enabled for following pages; stops for validation and final submission';
   element('submission-status').hidden=!value.siteConfirmed;
   element('tracking-status').textContent=value.trackingError || value.trackingNote || '';
@@ -459,7 +459,7 @@ send({type: "run-status-refresh"}).then(renderRun).catch(showError);
 
 element('next-page').onclick=async event=>{
   if(!event.isTrusted)return;
-  const final=result?.next_action?.kind==='submit';
+  const final=!result?.sign_in && result?.next_action?.kind==='submit';
   element('next-page').disabled=true;
   try{await perform({type:final?'manual-submit':'next-page',tabId:result?.tabId,expected:result?.next_action});}
   catch(error){showError(error);render(result);element('error').textContent=error.message;}

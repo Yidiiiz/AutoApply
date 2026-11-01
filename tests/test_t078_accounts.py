@@ -46,7 +46,7 @@ def backend(dashboard, config, db, listing, monkeypatch):
 def browser(loaded_extension, backend):
     context, worker, extension_id = loaded_extension
     _, server, app = backend
-    worker.evaluate('v=>chrome.storage.local.set(v)', dict(server=server, key=backend[0].settings.extension_key(), autoSendStructure=False))
+    worker.evaluate('v=>chrome.storage.local.set(v)', dict(server=server, key=backend[0].settings.extension_key(), autoSendStructure=False, autoAccountFill=False))
     page = context.new_page()
     blocked = []
     def serve(route):

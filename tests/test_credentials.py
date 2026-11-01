@@ -60,7 +60,7 @@ def test_save_clear_write_only_and_separate(http_dashboard, config):
     pair = http_dashboard
     before = (config.private / 'profile.yaml').read_bytes()
     assert web(pair, {'email': EMAIL, 'password': PASSWORD})[:2] == (200, dict(
-        configured=True, email_override=True, environment_override=False))
+        configured=True, strict_configured=False, email_override=True, environment_override=False))
     store = CredentialStore(config)
     assert store.load() == dict(email=EMAIL, password=PASSWORD)
     assert (config.private / 'profile.yaml').read_bytes() == before
@@ -220,7 +220,7 @@ def test_actual_mv3_auth_forms_and_privacy(loaded_extension):
         const result=path==='/ext/match'?{application_id:1}:path==='/ext/credentials'?(fixtureConfigured?{configured:true,email:config.email,password:config.password}:{configured:false}):path==='/ext/answers'?{answers:[]}:path==='/ext/profile-sections'?{experience:[],projects:[],education:[],skills:[],links:{}}:path==='/ext/run/next'?{done:true}:path==='/ext/run/status'?{items:[]}:{};
         return new Response(JSON.stringify(result),{status:200,headers:{'Content-Type':'application/json'}});
       };
-      return chrome.storage.local.set({server:'http://127.0.0.1:9876',key:'offline-fixture-key'});
+      return chrome.storage.local.set({server:'http://127.0.0.1:9876',key:'offline-fixture-key',autoAccountFill:false});
     }''', dict(email=EMAIL, password=PASSWORD))
     page = context.new_page()
     page.route('https://fixture.myworkdayjobs.com/**', lambda route: route.fulfill(path=str(fixture), content_type='text/html'))
@@ -345,7 +345,7 @@ def test_toolbar_injects_missing_credentials_before_content(loaded_extension):
         const result=path==='/ext/match'?{application_id:1}:path==='/ext/credentials'?{configured:true,email:config.email,password:config.password}:path==='/ext/run/status'?{items:[]}:{};
         return new Response(JSON.stringify(result),{status:200,headers:{'Content-Type':'application/json'}});
       };
-      await chrome.storage.local.set({server:'http://127.0.0.1:9876',key:'offline-fixture-key'});
+      await chrome.storage.local.set({server:'http://127.0.0.1:9876',key:'offline-fixture-key',autoAccountFill:false});
     }''', dict(email=EMAIL, password=PASSWORD))
     page = context.new_page()
     page.route('https://fixture.myworkdayjobs.com/**', lambda route: route.fulfill(path=str(fixture), content_type='text/html'))

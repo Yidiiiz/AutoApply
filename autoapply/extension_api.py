@@ -272,7 +272,7 @@ _ACCOUNT_REASONS = frozenset('''scan_incomplete no_password controls_not_editabl
     native_owner_mismatch signup_mode_unavailable account_surface_ambiguous
     insecure_origin cross_origin reset_password current_password otp captcha no_matching_email
     confirmation_unrecognized action_ambiguous action_unavailable context_changed credentials_preserved
-    consent_required consent_unsettled form_invalid credentials_unconfigured frames_ambiguous unavailable'''.split())
+    consent_required consent_unsettled form_invalid credentials_unconfigured strict_required frames_ambiguous unavailable'''.split())
 
 
 def _account_trace(row):
@@ -1317,9 +1317,12 @@ def unapplied(dashboard, payload):
 
 
 def credentials(dashboard, payload):
-    """Release for a stored ATS job or an explicit, native-verified account action."""
+    """Release for a stored ATS job or a paired, native-verified account action."""
     rejected = 'Account autofill requires an authorized HTTPS application sign-in form'
-    if set(payload) - {'url', 'frame_url', 'application_id', 'run_id', 'mode', 'account_action'} or payload.get('mode') not in {'login', 'signup'}:
+    if (set(payload) - {'url', 'frame_url', 'application_id', 'run_id', 'mode', 'account_action', 'password_policy', 'remember_variant'} or
+            payload.get('mode') not in ('login', 'signup') or
+            payload.get('password_policy', 'standard') not in ('standard', 'strict') or
+            'remember_variant' in payload and (payload['remember_variant'] not in ('standard', 'strict') or payload['mode'] != 'signup')):
         raise SettingsRejected(rejected, status=403)
     try:
         application_id = _id(payload['application_id']) if 'application_id' in payload else None
@@ -1328,7 +1331,7 @@ def credentials(dashboard, payload):
         source = page
         if action is not None:
             if (not isinstance(action, dict) or set(action) != {'intent', 'source_url'} or
-                    action['intent'] not in {'autofill', 'analyze'} or
+                    action['intent'] not in {'autofill', 'analyze', 'auto_fill'} or
                     not isinstance(action['source_url'], str)):
                 raise ValueError
             source = urlsplit(action['source_url'])
@@ -1357,7 +1360,7 @@ def credentials(dashboard, payload):
             active = any(i['application_id'] == application_id and i['state'] == 'opened' and
                          i['run_id'] == payload.get('run_id') for i in dashboard._ext_run)
         if application_id is None:
-            # Only privileged explicit Autofill/Analyze supplies this bounded
+            # Only the privileged paired account pipeline supplies this bounded
             # assertion after native auth-form and same-origin verification.
             # No job/application is created or selected to authorize an account.
             if action is None or payload.get('run_id') is not None:
@@ -1368,7 +1371,18 @@ def credentials(dashboard, payload):
             raise ValueError
     except (ValueError, KeyError, TypeError, SettingsRejected):
         raise SettingsRejected(rejected, status=403) from None
-    value = dashboard.settings.credentials.load(profile_email=True)
+    store = dashboard.settings.credentials
+    if 'password_policy' in payload or 'remember_variant' in payload:
+        origin = 'https://' + page.hostname
+        value = store.select(origin, payload['mode'], payload.get('password_policy', 'standard'))
+        if 'remember_variant' in payload:
+            if (not action or action['intent'] == 'auto_fill' or not value.get('configured') or
+                    value['variant'] != payload['remember_variant']):
+                raise SettingsRejected(rejected, status=403)
+            store.remember(origin, value['variant'])
+            return dict(remembered=True)
+        return value
+    value = store.load(profile_email=True)
     if not value['password'] or not value['email']:
         return dict(configured=False)
     return dict(configured=True, **value)

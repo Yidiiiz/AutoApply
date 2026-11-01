@@ -45,8 +45,9 @@ async function applySidebar(tabId, mode, version) {
 chrome.action.onClicked.addListener(tab=>showSidebar(tab.id,'open').catch(async error=>{
   console.error(error);await chrome.action.setTitle({tabId:tab.id,title:error.message});await chrome.action.setBadgeText({tabId:tab.id,text:'!'});
 }));
-chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});}if(change.status==='complete'){
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){clearAutoAccount(tabId);chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});chrome.runtime.sendMessage({type:'analysis-invalidated',tabId}).catch(()=>{});}if(change.status==='complete'){
   restoreSidebar(tabId,true).catch(console.error);
+  scheduleAutoAccount(tabId);
 }});
 // History API navigation need not mutate the DOM. Recheck inline prompts only.
 chrome.tabs.onUpdated.addListener((tabId,change)=>{
@@ -237,7 +238,7 @@ function pollForForm(result) {
     try {
       const scanned = await scan(result.tabId);
       if(!current())return;
-      if(scanned.sign_in){const detail=await fillAccount(result,true);if(!current())return;if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
+      if(scanned.sign_in){const detail=await fillAccount(result,true,Boolean(result.accountPreview));if(!current())return;if(detail && detail!==result.progress){result.progress=result.detail=detail;await report(result);}}
       if (!scanned.sign_in && scanned.fields.length) {
         formWaits.delete(result.tabId); pendingSteps.add(result.tabId); drainSteps(); return;
       }
@@ -380,6 +381,64 @@ const credentialDocuments=new Map();
 const accountDiagnostics=new Map();
 const accountContexts=new WeakMap();
 let accountQueue=Promise.resolve();
+const autoAccountTimers=new Map(),autoAccountTasks=new Set(),autoAccountRetries=new Map();
+const supportedAccountUrl=url=>{try{const u=new URL(url);return u.protocol==='https:' && (!u.port || u.port==='443') && !u.username && !u.password && /(?:^|\.)(?:myworkdayjobs\.com|greenhouse\.io|lever\.co|smartrecruiters\.com|pinpointhq\.com|applytojob\.com|icims\.com|taleo\.net|successfactors\.com)$/.test(u.hostname);}catch{return false;}};
+function clearAutoAccount(tabId){
+  clearTimeout(autoAccountTimers.get(tabId));
+  autoAccountTimers.delete(tabId);autoAccountRetries.delete(tabId);
+}
+function scheduleAutoAccount(tabId,retry){
+  // Retain a changed-state signal across transient work, with one timer per tab.
+  // Fresh signals renew the budget; navigation and closure retire the old one.
+  const state=retry || {remaining:12,end:Date.now()+6000};
+  if(retry && (autoAccountRetries.get(tabId)!==state || !state.remaining || Date.now()>=state.end)){
+    if(autoAccountRetries.get(tabId)===state)clearAutoAccount(tabId);
+    return;
+  }
+  clearTimeout(autoAccountTimers.get(tabId));
+  autoAccountRetries.set(tabId,state);
+  autoAccountTimers.set(tabId,setTimeout(async()=>{
+    autoAccountTimers.delete(tabId);state.remaining--;
+    let busy=false;
+    try{busy=await autoFillAccount(tabId,state);}catch{}
+    if(autoAccountRetries.get(tabId)!==state)return;
+    if(busy)scheduleAutoAccount(tabId,state);else clearAutoAccount(tabId);
+  },300));
+}
+async function autoFillAccount(tabId,state){
+  const current=()=>autoAccountRetries.get(tabId)===state && !closedTabs.has(tabId) && !cancelledTabs.has(tabId);
+  const idle=()=>!running && !autofillTasks && !skillsRunning && !analysisTasks.size && !analysisBlockers && !batchBusy && !manualActionTabs.size && !writingTasks.has(tabId) &&
+    !closedTabs.has(tabId) && !cancelledTabs.has(tabId) && !activeResults.get(tabId)?.busy && !activeResults.get(tabId)?.coverBusy && !activeResults.get(tabId)?.skillsBusy &&
+    (!activeResults.get(tabId)?.writing?.length || activeResults.get(tabId)?.writingSettled);
+  if(!current())return;
+  if(autoAccountTasks.has(tabId) || !idle())return true;
+  autoAccountTasks.add(tabId);
+  try{
+    const {autoAccountFill=true}=await chrome.storage.local.get('autoAccountFill');
+    const {chromeRunPaused=false,chromeRun,autofillTabs={}}=await chrome.storage.session.get(['chromeRunPaused','chromeRun','autofillTabs']);
+    if(!current() || !autoAccountFill || chromeRunPaused || chromeRun?.active)return;
+    if(!idle())return true;
+    const tab=await chrome.tabs.get(tabId);
+    if(!supportedAccountUrl(tab.url))return;
+    const frames=await accountFrames(tabId),supported=frames.filter(f=>f.result?.supported && f.result.autoEligible && sameAccountOrigin(f.result.url,tab.url));
+    if(!current() || supported.length!==1)return;
+    if(!idle())return true;
+    const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
+    const previous=activeResults.get(tabId);
+    const auth=await accountContext(tab.url,autofillTabs[tabId] || {},'auto_fill');
+    if(!current() || (await chrome.tabs.get(tabId)).url!==tab.url)return;
+    if(!idle())return true;
+    const result=previous?.accountDocument===document && previous.url===tab.url?previous:
+      {tabId,url:tab.url,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+    Object.assign(result,auth,{sign_in:true,accountPreview:true,waiting:true,busy:false,state:'needs_input'});
+    activeResults.set(tabId,result);
+    const detail=await fillAccount(result,false,true);
+    if(!current() || activeResults.get(tabId)!==result || (await chrome.tabs.get(tabId)).url!==tab.url)return;
+    if(!idle())return true;
+    result.progress=result.detail=detail;
+    await report(result);
+  }finally{autoAccountTasks.delete(tabId);}
+}
 const sameAccountOrigin=(a,b)=>{
   try{return new URL(a).protocol==='https:' && new URL(b).protocol==='https:' && new URL(a).origin===new URL(b).origin;}catch{return false;}
 };
@@ -404,7 +463,7 @@ async function accountContext(url,saved,intent,application) {
   const source=new URL(source_url);
   return {matched:matched || {application_id:null},account_action:{intent,source_url:source.origin+source.pathname}};
 }
-chrome.tabs.onRemoved.addListener(tabId=>{credentialDocuments.delete(tabId);accountDiagnostics.delete(tabId);});
+chrome.tabs.onRemoved.addListener(tabId=>{credentialDocuments.delete(tabId);accountDiagnostics.delete(tabId);clearAutoAccount(tabId);});
 const accountReasons={
   scan_incomplete:'Account scan is incomplete.',no_password:'Account password control is unavailable.',
   controls_not_editable:'Account controls are not editable.',scope_ambiguous:'Account form scope is ambiguous.',
@@ -418,6 +477,7 @@ const accountReasons={
   context_changed:'Account form changed; retry Analyze or Autofill.',credentials_preserved:'Existing different account credentials were preserved.',
   consent_required:'Account consent control is unavailable or requires attention.',consent_unsettled:'Account consent did not remain checked.',
   form_invalid:'Account form validation failed.',credentials_unconfigured:'Set your account password in dashboard Settings, or sign in manually.',
+  strict_required:'Set strict password in Settings (12+ characters, uppercase, lowercase, number and special character).',
   frames_ambiguous:'Multiple account frames are supported.',unavailable:'Account action unavailable. Sign in manually, then continue.'
 };
 function accountFailure(result,phase,diagnosis={},binding='',polling=false){
@@ -432,7 +492,7 @@ function accountFailure(result,phase,diagnosis={},binding='',polling=false){
   try{void saveTrace({host:new URL(result.url).hostname,kind:'autofill',entries:[{step:'account',action:'rejected',label:'Account step',reason,observed}]}).catch(()=>{});}catch{}
   return accountReasons[reason];
 }
-async function fillAccount(result, polling=false) {
+async function fillAccount(result, polling=false, preview=false) {
   // A bounded serial reservation spans credential lookup, settlement and the
   // durable claim. Analyze calls this directly, never reenters Autofill.
   const epoch=runEpoch, owner=activeResults.get(result.tabId), accountUrl=result.url, pollToken=formWaitTokens.get(result.tabId);
@@ -440,8 +500,10 @@ async function fillAccount(result, polling=false) {
     let phase='describe',diagnosticBinding='';
     const failure=(reason,diagnosis={})=>accountFailure(result,phase,{...diagnosis,reason:reason || diagnosis.reason},diagnosticBinding,polling);
     const valid=async()=>{
-      const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
-      return !chromeRunPaused && !staleRun(epoch) && !closedTabs.has(result.tabId) && !cancelledTabs.has(result.tabId) &&
+      const {chromeRunPaused=false,chromeRun}=await chrome.storage.session.get(['chromeRunPaused','chromeRun']);
+      const enabled=!preview || (await chrome.storage.local.get('autoAccountFill')).autoAccountFill!==false;
+      return enabled && !chromeRunPaused && !staleRun(epoch) && !closedTabs.has(result.tabId) && !cancelledTabs.has(result.tabId) &&
+        (!preview || !chromeRun?.active && !running && !autofillTasks && !skillsRunning && !analysisTasks.size && !analysisBlockers && !manualActionTabs.size && !batchBusy) &&
         (!polling || !analysisTasks.has(result.tabId) && formWaitTokens.get(result.tabId)===pollToken) && activeResults.get(result.tabId)===owner && (await chrome.tabs.get(result.tabId)).url===accountUrl;
     };
     if(!accountUrl?.startsWith('https://'))return failure('insecure_origin');
@@ -457,6 +519,9 @@ async function fillAccount(result, polling=false) {
           ...rejected?.result?.diagnosis,frame_count:frames.length});
       }
       const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
+      if(preview && !frame.result.autoEligible)return failure('context_changed');
+      result.accountDocument=document;result.accountMode=frame.result.mode;result.accountReady=frame.result.actionReady;
+      result.summary.filled=frame.result.filled || 0;
       const binding=document+':'+frame.result.identity+':'+frame.result.revision;
       if(polling && accountContexts.get(result)!==binding)
         return failure('context_changed');
@@ -468,11 +533,13 @@ async function fillAccount(result, polling=false) {
       phase='credentials';
       const value=await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,
         ...(result.matched?.application_id!=null?{application_id:result.matched.application_id,run_id:result.matched.run_id}:{}),
-        account_action:result.account_action,mode:frame.result.mode});
-      if(!value.configured)return failure('credentials_unconfigured');
+        account_action:result.account_action,mode:frame.result.mode,password_policy:frame.result.passwordPolicy});
+      if(!value.configured)return preview?accountReasons[value.strict_required?'strict_required':'credentials_unconfigured']:failure(value.strict_required?'strict_required':'credentials_unconfigured');
       if(!await valid())return failure('context_changed');
       phase='prepare';
-      const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected)=>globalThis.autoApplyCredentials?.prepare(value,expected),args:[value,frame.result]});
+      const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected,preview)=>globalThis.autoApplyCredentials?.prepare(value,expected,preview),args:[value,frame.result,preview]});
+      result.summary.filled=prepared?.result?.filled || 0;
+      result.accountReady=prepared?.result?.status==='ready';
       if(prepared?.result?.status==='filled'){
         if(!await valid())return failure('context_changed');
         failure(null,prepared.result.diagnosis);
@@ -480,6 +547,7 @@ async function fillAccount(result, polling=false) {
       }
       if(prepared?.result?.status!=='ready')return failure(null,prepared?.result?.diagnosis);
       if(!await valid())return failure('context_changed');
+      if(preview)return `Account details filled. Review the page, then click ${frame.result.mode==='signup'?'Create account':'Sign in'}.`;
       // Persist before activation. A timeout/restart is never permission to click
       // again. This claim contains document identities only, never credentials.
       accountActionClaims[key]=true;
@@ -488,6 +556,12 @@ async function fillAccount(result, polling=false) {
       phase='activate';
       const [activated]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:id=>globalThis.autoApplyCredentials?.activate(id),args:[prepared.result.ticket]});
       credentialDocuments.set(result.tabId,document);
+      if(activated?.result?.status==='activated' && frame.result.mode==='signup' && ['standard','strict'].includes(value.variant)){
+        // Remember only after the guarded native signup action was clicked.
+        await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,
+          ...(result.matched?.application_id!=null?{application_id:result.matched.application_id,run_id:result.matched.run_id}:{}),
+          account_action:result.account_action,mode:'signup',password_policy:frame.result.passwordPolicy,remember_variant:value.variant}).catch(()=>{});
+      }
       return activated?.result?.status==='activated'?'Account action activated. Waiting for authentication; review any verification request.':failure('context_changed');
     }catch{return failure('unavailable');}
   };
@@ -743,7 +817,7 @@ async function action(message) {
         const saved=current?.matched?.application_id!=null?current:autofillTabs[tab.id] || {};
         const {matched,account_action}=await accountContext(tab.url,saved,'analyze');
         const account=current?.url===tab.url?current:{tabId:tab.id,url:tab.url,matched,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
-        account.matched=matched;account.account_action=account_action;
+        account.matched=matched;account.account_action=account_action;account.accountPreview=false;
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
         const detail=await fillAccount(account);
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application work stopped.');
@@ -938,6 +1012,18 @@ async function action(message) {
     const scanned=await scan(message.tabId);
     const {tabResults={}}=await chrome.storage.session.get('tabResults');
     const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId]||{...scanned,pending:[],writing:[],summary:{filled:0,skipped:0,errors:[]}};
+    if(scanned.sign_in){
+      const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+      Object.assign(current,{...scanned},await accountContext(scanned.url,autofillTabs[scanned.tabId] || current,'autofill'));
+      current.accountPreview=false;
+      activeResults.set(scanned.tabId,current);
+      autofillTabs[scanned.tabId]={...autofillTabs[scanned.tabId],url:scanned.url,matched:current.matched,account_action:current.account_action};
+      await chrome.storage.session.set({autofillTabs});
+      current.detail=current.progress=await fillAccount(current);
+      current.waiting=true;current.busy=false;
+      pollForForm(current);
+      return report(current);
+    }
     if(await clickNext(current) && !running)return autofill(current.tabId,current.matched);
     return current;
   }
@@ -1322,6 +1408,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   const tabId=sender.tab.id;
   if(message.type==='sidebar-layout-state' && sender.frameId===0){chrome.runtime.sendMessage({...message,tabId}).catch(()=>{});return;}
   if(message.type==='sidebar-ready' && sender.frameId===0)restoreSidebar(tabId).catch(console.error);
+  if(message.type==='sidebar-ready' || message.type==='account-state-changed')scheduleAutoAccount(tabId);
   if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
   if(!['ask-ai','sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;

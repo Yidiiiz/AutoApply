@@ -177,13 +177,13 @@ def test_autofill_diagnosis_and_safe_catch(native_browser, backend, monkeypatch)
     page, worker, tab, panel, isolated, _ = native_browser
     original_load = backend[0].settings.credentials.load
     releases = []
-    def fail(*, profile_email=False):
+    def fail(*, profile_email=False, include_strict=False):
         # Ordinary reads support redaction for /ext/match and /ext/trace.
         # Fail only the authorized /ext/credentials release under test.
         if profile_email:
             releases.append(True)
             raise RuntimeError(EMAIL + PASSWORD + 'PRIVATE_SENTINEL')
-        return original_load(profile_email=profile_email)
+        return original_load(profile_email=profile_email, include_strict=include_strict)
     monkeypatch.setattr(backend[0].settings.credentials, 'load', fail)
     result = bounded_action(panel, tab, 'autofill')
     assert releases == [True]
