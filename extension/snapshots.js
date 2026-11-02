@@ -1,5 +1,5 @@
 // Background-owned, event-driven diagnostics. Session digests survive MV3 restarts.
-export function snapshotCollector({api, current, report, delay}) {
+export function snapshotCollector({api, current, report, delay, recover}) {
   let queue=Promise.resolve();
   async function preference(value) {
     if(value!==undefined)await chrome.storage.local.set({autoSendStructure:Boolean(value)});
@@ -13,6 +13,7 @@ export function snapshotCollector({api, current, report, delay}) {
       (!result.writing?.length || result.writingSettled) && JSON.stringify(unresolved(result))===problem;
   }
   async function collect(result) {
+    if(recover){recover(result);return;}
     const fields=unresolved(result), problem=JSON.stringify(fields);
     if(!eligible(result,problem) || !(await preference()).enabled)return;
     async function structure() {

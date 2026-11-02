@@ -48,9 +48,12 @@ def completed_education(label):
 def preference_boolean(label):
     """Return an explicit preference path and question polarity, never a default."""
     text = _norm(label)
+    short_privacy = re.fullmatch(
+        r'(?:i )?(?:agree to|acknowledge|acknowledge that i have read) (?:the )?privacy (?:policy|notice)', text)
     if (re.search(r'\bprivacy (?:policy|notice)\b', text)
-            and re.search(r'\bread\b', text) and re.search(r'\bunderstand\b', text)
-            and not re.search(r'\b(?:not|disagree|waive|release|certify|accurate)\b', text)):
+            and (short_privacy or re.search(r'\bread\b', text) and re.search(r'\bunderstand\b', text))
+            and not re.search(r'\b(?:not|never|no|disagree|waiv\w*|releas\w*|certif\w*|accurate|truthful|'
+                              r'marketing|promotional|subscribe|sms|whatsapp|background|criminal)\b', text)):
         return 'application_preferences.ordinary_policy_acknowledgement', False
     if re.search(r'\b(?:sms|text messages?|whatsapp)\b', text):
         # A future right to withdraw is boilerplate, not the requested action.

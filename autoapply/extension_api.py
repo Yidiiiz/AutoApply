@@ -530,6 +530,13 @@ def _page_analysis(dashboard, payload, host):
             if repair_status not in {'optional_skip', 'unresolved', 'verified', 'verification_failed', 'user_edited'}:
                 raise SettingsRejected('Invalid repair field status')
             row['repair_status'] = repair_status
+        reason_code = field.get('reason_code')
+        if reason_code is not None:
+            if reason_code not in {'answer_available', 'needs_fact', 'needs_writing', 'optional_skip',
+                                   'unsupported_field', 'no_offered_options', 'reasoning_pending',
+                                   'provider_invalid', 'provider_unavailable', 'stale_data'}:
+                raise SettingsRejected('Invalid answer reason')
+            row['reason_code'] = reason_code
         row['active'] = _analysis_active(row)
         safe.append(row)
     for key in ('busy', 'responsive', 'truncated'):
@@ -546,7 +553,7 @@ def _page_analysis(dashboard, payload, host):
         resolver = answers.AnswerResolver(dashboard.config, db)
         for field in safe:
             if (field['answered'] or not field['active'] or field.get('repair_status') == 'verified' and field['kind'] == 'checkbox' or
-                    field.get('repair_status') == 'optional_skip' and not field['required']):
+                    field.get('repair_status') == 'optional_skip' and field.get('reason_code', 'optional_skip') == 'optional_skip' and not field['required']):
                 continue
             q = _question(field)
             why = field['reasons']
@@ -595,6 +602,10 @@ def _page_analysis(dashboard, payload, host):
                 'needs_writing': 'This needs a written answer. Use the answer helper or explicit Autofill.',
                 'answer_check_unavailable': 'Saved-answer check unavailable; structural findings are still saved.'}
             notes.append(messages[status])
+            if field.get('reason_code') == 'needs_fact' and field['detected']:
+                status, notes = 'needs_user_fact', ['Needs your input: no usable saved fact was found.']
+            elif field.get('reason_code') in {'provider_invalid', 'provider_unavailable', 'stale_data'}:
+                status, notes = 'answer_check_unavailable', ['Answer provider unavailable or profile changed; retry Analyze.']
             if field.get('repair_status') == 'verification_failed':
                 status = 'verification_failed'
                 notes = ['The offered answer did not remain selected after retry. Review this control on the page.']
@@ -810,6 +821,9 @@ def resolve_answers(dashboard, payload):
     fields = payload.get('fields')
     if not isinstance(fields, list) or len(fields) > 500:
         raise SettingsRejected('fields must be a list of at most 500 fields')
+    allow_ai = payload.get('allow_ai', True)
+    if not isinstance(allow_ai, bool):
+        raise SettingsRejected('allow_ai must be a boolean')
     questions = [_question(field) for field in fields]
     page = payload.get('page') or {}
     if not isinstance(page, dict) or not isinstance(page.get('description', ''), str):
@@ -932,7 +946,7 @@ def resolve_answers(dashboard, payload):
                 elif not repeated and not education_part and not field.get('section_missing_date'):
                     facts = answers.repair_facts(q, descriptor, profile)
                     if facts:
-                        if (len(pending) < REPAIR_FIELD_LIMIT and len(q.label) <= 1000
+                        if (len(pending) < REPAIR_FIELD_LIMIT and len(q.label) <= 2000
                                 and len(q.options) <= 100 and all(len(o) <= 300 for o in q.options)
                                 and sum(other.key == q.key for other in questions) == 1):
                             pending.append((len(result), q, descriptor, facts))
@@ -944,7 +958,10 @@ def resolve_answers(dashboard, payload):
                                **({'reason': 'No offered location matches saved preferences.'} if answer is None
                                   and re.fullmatch(r'what is your top location preference', normalize(q.label)) else {})))
         revision = resolver._revision
-    if pending:
+    if pending and not allow_ai:
+        for index, *_ in pending:
+            result[index]['reason_code'] = 'reasoning_pending'
+    if pending and allow_ai:
         proposals, failure = _repair_batch(dashboard, pending, revision)
         for index, q, _, _ in pending:
             row = result[index]
@@ -962,7 +979,7 @@ def resolve_answers(dashboard, payload):
                        'optional_skip' if row['status'] == 'OPTIONAL_SKIP' else 'unsupported_field')
     if 'job_id' in app and description:
         dashboard.cache_extension_description(app['job_id'], description)
-    return dict(answers=result)
+    return dict(answers=result, profile_revision=revision[0], facts_revision=revision[1])
 
 
 def remember(dashboard, payload):

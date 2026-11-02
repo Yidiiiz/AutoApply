@@ -7,7 +7,16 @@
     for (; node instanceof Element; node = parent(node)) if (node.matches(selector)) return node;
     return null;
   }
+  let readRoots;
+  // Only synchronous read sections may share traversal. Never retain a cache
+  // across events, native writes, await, or callbacks into the employer page.
+  function read(operation){
+    if(readRoots)return operation();
+    readRoots=discover();
+    try{return operation();}finally{readRoots=undefined;}
+  }
   function discover() {
+    if(readRoots)return readRoots;
     const roots = [{root:document,host:'document',parent_id:null,depth:0,elements:[]}];
     let visited = 0;
     for (let i=0;i<roots.length;i++) {
@@ -41,5 +50,5 @@
   // IDREFs stay in their tree; duplicate IDs in other roots are unrelated.
   const byId = (element,id) => id ? element.getRootNode().getElementById?.(id) || null : null;
   const eventTarget = event => event.composedPath?.()[0] || event.target;
-  globalThis.autoApplyNativeRoots={discover,query,parent,closest,byId,eventTarget};
+  globalThis.autoApplyNativeRoots={read,discover,query,parent,closest,byId,eventTarget};
 })();

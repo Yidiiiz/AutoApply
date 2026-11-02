@@ -8,7 +8,7 @@ let sidebarQueue=Promise.resolve();
 function showSidebar(tabId, mode='open', restoreVersion) {
   if(tabId===undefined)return chrome.tabs.query({active:true,currentWindow:true}).then(([tab])=>{if(!tab?.id)throw Error('Open an application page first.');return showSidebar(tab.id,mode,restoreVersion);});
   const version=restoreVersion ?? (sidebarVersions.get(tabId)||0)+1;
-  if(restoreVersion===undefined){sidebarVersions.set(tabId,version);sidebarStates.delete(tabId);if(mode!=='toggle')sidebarStates.set(tabId,mode);}
+  if(restoreVersion===undefined){sidebarVersions.set(tabId,version);sidebarStates.delete(tabId);if(mode!=='toggle')sidebarStates.set(tabId,mode);if(mode==='closed')automaticPending.delete(tabId);}
   const task=sidebarQueue.catch(()=>{}).then(()=>applySidebar(tabId,restoreVersion===undefined?mode:sidebarStates.get(tabId)||mode,version));
   sidebarQueue=task;return task;
 }
@@ -62,7 +62,7 @@ const analysisTasks = new Map();
 let analysisBlockers=0;
 let autofillTasks=0;
 const skillSelections = new Map();
-const snapshots=snapshotCollector({api,report,delay:ms=>delay(ms),current:result=>activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId) && !pendingSteps.has(result.tabId)});
+const snapshots=snapshotCollector({api,report,recover:result=>queueAutomaticAnalysis(result.tabId),delay:ms=>delay(ms),current:result=>activeResults.get(result.tabId)===result && !cancelledTabs.has(result.tabId) && !pendingSteps.has(result.tabId)});
 function skillContext(result) {
   const page=result.page || {};
   return JSON.stringify([result.url?.split(/[?#]/)[0],page.description || '']);
@@ -114,6 +114,7 @@ function report(result, valid) {
   await chrome.runtime.sendMessage({type: "autofill-result", result}).catch(() => {});
   return result;
   });
+  reporting.finally(drainAutomaticAnalysis).catch(()=>{});
   return reporting;
 }
 
@@ -166,10 +167,16 @@ async function scan(tabId) {
   await chrome.storage.session.set({jobContexts});
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
-  return {tabId: tab.id, url: tab.url, page, fields, pageIdentities:Object.fromEntries(frames.map(frame=>[frame.frameId,{identity:frame.result.page_identity,documentId:frame.documentId}])), next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
+  return {tabId: tab.id, url: tab.url, page, fields, pageIdentities:Object.fromEntries(frames.map(frame=>[frame.frameId,{identity:frame.result.page_identity,documentId:frame.documentId}])), next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, accountMode:accounts.find(f=>f.result?.active)?.result.mode, accountReady:accounts.find(f=>f.result?.active)?.result.actionReady, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
 }
 
 const context = result => ({page: result.page, url: result.url, application_id: result.matched?.application_id});
+async function applicationMatch(url,saved={},application){
+  const jobUrl=value=>value?.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0];
+  const matched=typeof application==='object'?application:application?{application_id:application}:
+    jobUrl(saved.url)===jobUrl(url)?saved.matched:undefined;
+  return matched?.application_id!=null?matched:await api('/ext/match',{url});
+}
 
 async function fill(result, values, files = {}) {
   if (cancelledTabs.has(result.tabId)) return;
@@ -318,7 +325,9 @@ async function matchAndFill(result, prepare = false) {
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
     const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
-    let {answers} = await api("/ext/answers", {...context(result), url: result.url, fields});
+    const response = await api("/ext/answers", {...context(result), url: result.url, fields});
+    result.answerRevision=[response.profile_revision,response.facts_revision];
+    let {answers}=response;
     if (cancelledTabs.has(result.tabId)) return;
     answers.push(...sectionAnswers);
     // Remote vocabulary searches retain their profile-first fast path.
@@ -375,7 +384,7 @@ async function rescanRevealed(result) {
 export async function autofill(tabId, application, advanceCount = 0) {
   autofillTasks++;
   try{return await autofillCurrent(tabId,application,advanceCount);}
-  finally{autofillTasks--;}
+  finally{autofillTasks--;drainAutomaticAnalysis();}
 }
 const credentialDocuments=new Map();
 const accountDiagnostics=new Map();
@@ -416,14 +425,25 @@ async function autoFillAccount(tabId,state){
   try{
     const {autoAccountFill=true}=await chrome.storage.local.get('autoAccountFill');
     const {chromeRunPaused=false,chromeRun,autofillTabs={}}=await chrome.storage.session.get(['chromeRunPaused','chromeRun','autofillTabs']);
-    if(!current() || !autoAccountFill || chromeRunPaused || chromeRun?.active)return;
+    if(!current() || chromeRunPaused || chromeRun?.active)return;
     if(!idle())return true;
     const tab=await chrome.tabs.get(tabId);
     if(!supportedAccountUrl(tab.url))return;
     const frames=await accountFrames(tabId),supported=frames.filter(f=>f.result?.supported && f.result.autoEligible && sameAccountOrigin(f.result.url,tab.url));
-    if(!current() || supported.length!==1)return;
+    if(!current())return;
+    const observed=frames.find(f=>f.result?.active && sameAccountOrigin(f.result.url,tab.url));
+    if(observed){
+      const previous=activeResults.get(tabId);
+      const result=previous?.url===tab.url?previous:{tabId,url:tab.url,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+      Object.assign(result,{sign_in:true,accountPreview:true,accountMode:observed.result.mode,accountReady:observed.result.actionReady});
+      if(supported.length!==1 || !autoAccountFill){
+        result.progress=result.detail=supported.length!==1?accountFailure(result,'describe',{...observed.result.diagnosis,reason:observed.result.supported && !observed.result.autoEligible?'credentials_preserved':observed.result.diagnosis.reason},observed.documentId,true):'Review the account page, then sign in or fill account details.';
+        activeResults.set(tabId,result);await report(result);return;
+      }
+    }
+    if(supported.length!==1 || !autoAccountFill)return;
     if(!idle())return true;
-    const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
+    const frame=supported[0],document=frame.documentId+':'+frame.result.identity+':'+frame.result.mode;
     const previous=activeResults.get(tabId);
     const auth=await accountContext(tab.url,autofillTabs[tabId] || {},'auto_fill');
     if(!current() || (await chrome.tabs.get(tabId)).url!==tab.url)return;
@@ -518,7 +538,7 @@ async function fillAccount(result, polling=false, preview=false) {
         return failure(supported.length>1?'frames_ambiguous':foreign?'cross_origin':rejected?.result?.diagnosis?.reason || 'unavailable',{
           ...rejected?.result?.diagnosis,frame_count:frames.length});
       }
-      const frame=supported[0],document=frame.documentId+':'+frame.result.formIdentity;
+      const frame=supported[0],document=frame.documentId+':'+frame.result.identity+':'+frame.result.mode;
       if(preview && !frame.result.autoEligible)return failure('context_changed');
       result.accountDocument=document;result.accountMode=frame.result.mode;result.accountReady=frame.result.actionReady;
       result.summary.filled=frame.result.filled || 0;
@@ -534,7 +554,7 @@ async function fillAccount(result, polling=false, preview=false) {
       const value=await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,
         ...(result.matched?.application_id!=null?{application_id:result.matched.application_id,run_id:result.matched.run_id}:{}),
         account_action:result.account_action,mode:frame.result.mode,password_policy:frame.result.passwordPolicy});
-      if(!value.configured)return preview?accountReasons[value.strict_required?'strict_required':'credentials_unconfigured']:failure(value.strict_required?'strict_required':'credentials_unconfigured');
+      if(!value.configured)return failure(value.strict_required?'strict_required':'credentials_unconfigured');
       if(!await valid())return failure('context_changed');
       phase='prepare';
       const [prepared]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:(value,expected,preview)=>globalThis.autoApplyCredentials?.prepare(value,expected,preview),args:[value,frame.result,preview]});
@@ -600,16 +620,14 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     const saved = autofillTabs[result.tabId] || {};
     if(result.sign_in)Object.assign(result,await accountContext(result.url,saved,'autofill',application));
     else {
-      result.matched=typeof application==='object'?application:application?{application_id:application}:
-        saved.url?.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0]===result.url.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0]?saved.matched:undefined;
-      if(result.matched?.application_id==null)result.matched=await api('/ext/match',{url:result.url});
+      result.matched=await applicationMatch(result.url,saved,application);
     }
     if(cancelledTabs.has(result.tabId))return result;
     autofillTabs[result.tabId] = {...saved, url: result.url, matched: result.matched,account_action:result.account_action};
     await chrome.storage.session.set({autofillTabs});
     if (result.matched.company) result.page.company = result.matched.company;
     if (result.matched.title) result.page.title = result.matched.title;
-    if (!result.sign_in && result.next_action?.kind==='submit') {
+    if (!result.sign_in && !result.fields.length && result.next_action?.kind==='submit') {
       result.progress = 'Review the application. Submit when you are ready.';
       return await report({...result,busy:false});
     }
@@ -644,7 +662,7 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
       result.summary.errors.push(error.message);
       return report(result);
-    }).finally(() => { result.writingSettled=true; if(activeResults.get(result.tabId)===result)report(result); snapshots.capture(result); if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId); });
+    }).finally(() => { result.writingSettled=true; if(activeResults.get(result.tabId)===result)report(result); snapshots.capture(result); if (writingTasks.get(result.tabId) === task) writingTasks.delete(result.tabId);drainAutomaticAnalysis(); });
     writingTasks.set(result.tabId, task);
   }
   else snapshots.capture(result);
@@ -795,23 +813,29 @@ async function action(message) {
       if(batchBusy || running || autofillTasks || skillsRunning || analysisBlockers)
         throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
       const epoch=runEpoch;
-      const current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined;
+      let current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined,
+        run_id=current?.url===tab.url?current.matched?.run_id:undefined;
       const transport=error=>/Dashboard is busy|Dashboard is not reachable|Dashboard request failed \(503\)/i.test(error.message || '');
       async function answerRequest(path,payload,frame){
         for(let retry=0;;retry++){
-          await bound(frame,'repairCheck'); // recheck edits, document and run before every retry
+          for(const target of Array.isArray(frame)?frame:[frame])await bound(target,'repairCheck');
           try{return await api(path,payload);}catch(error){
             if(!transport(error) || retry===2)throw error;
             await delay(200*(retry+1));
           }
         }
       }
-      const inspect=(after=false)=>readFrames({target:{tabId:tab.id,allFrames:true},func:after=>{
-        const api=globalThis.autoApplyContent;
-        return api?{...api.inspectPage({repair:after}),...api.pageStructure()}:null;
-      },args:[after]});
+      const inspect=(after=false)=>readFrames({target:{tabId:tab.id,allFrames:true},func:(after,automatic)=>{
+        const api=globalThis.autoApplyContent;if(!api)return null;
+        const inspected=api.inspectPage({repair:after});
+        const structural=inspected.diagnostic.fields.some(f=>!f.answered && f.repair_status!=='optional_skip' &&
+          (f.repair_status==='verification_failed' || f.reasons.some(r=>['unsupported_widget','omitted_by_scanner','menu_not_exposed'].includes(r))));
+        return {...inspected,...(!automatic || structural?api.pageStructure():{nodes:[],truncated:false}),structural,
+          ...(automatic && after?{automaticState:api.runtimeState()}: {})};
+      },args:[after,Boolean(message.automatic)]});
       const auth=await accountFrames(tab.id);
       if(auth.some(frame=>frame.result?.active)){
+        if(message.automatic){scheduleAutoAccount(tab.id);return {ok:true,summary:'Account details require private preview.',findings:[]};}
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
         const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
         const saved=current?.matched?.application_id!=null?current:autofillTabs[tab.id] || {};
@@ -828,35 +852,76 @@ async function action(message) {
         activeResults.set(tab.id,account);await report(account);pollForForm(account);
         return {ok:true,tabId:tab.id,url:tab.url,summary:detail,findings:[{label:'Account step',notes:[detail]}],busy:false};
       }
-      const before=await inspect();
+      // Bind compact control metadata first. No DOM serialization precedes fills.
+      const before=await readFrames({target:{tabId:tab.id,allFrames:true},func:()=>{
+        const api=globalThis.autoApplyContent;if(!api)return null;
+        return {diagnostic:{fields:[],busy:false,truncated:false},state:api.runtimeState()};
+      }});
       if(current)current.waiting=false;
       const targets=before.filter(f=>f.result);
       if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
+      const fresh=!current || current.url!==tab.url;
+      if(fresh){
+        current={tabId:tab.id,url:tab.url,page:{},fields:[],pending:[],writing:[],completed:[],
+          pageIdentities:Object.fromEntries(targets.map(f=>[f.frameId,{documentId:f.documentId}])),
+          summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+        activeResults.set(tab.id,current);
+      }
       const started=[];const token=crypto.randomUUID();let stopped='none',attempts=0,filled=0;
       async function bound(frame,method,args=[]){
-        if(staleRun(epoch) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
-           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id || current.matched?.run_id!==run_id)
           throw Error('Application changed. Analyze page again.');
+        if(message.automatic && !(await snapshots.preference()).enabled)throw Error('Automatic analysis disabled.');
         const [value]=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:[frame.documentId]},
           func:async(method,args)=>{try{return await globalThis.autoApplyContent[method](...args);}catch(error){return {error:error.message};}},args:[method,[token,...args]]});
         if(value?.documentId!==frame.documentId || value?.result?.error)throw Error(value?.result?.error || 'Application changed. Analyze page again.');
         return value.result;
       }
-      // Prepare only the existing controls. Retry known unresolved widgets once,
-      // rediscovering live choices and resolving through the usual grounded API.
+      // One tab-wide fast batch, followed by at most one grounded AI batch.
+      // Keys are frame-bound here and stripped only at the native write boundary.
       try{
+        const candidates=[];let page;
         for(const frame of targets){
           const prepared=await bound(frame,'repairStart');started.push(frame);
-          for(let pass=0;pass<2;pass++){
-            let fields=await bound(frame,'repairOptions');
-            if(pass)fields=fields.filter(f=>['combobox','select','checkbox','radio'].includes(f.kind));
-            if(!fields.length)break;
-            attempts=Math.max(attempts,pass+1);
-            const response=await answerRequest('/ext/answers',{url:tab.url,application_id,page:prepared.page,fields},frame);
-            const files={};
-            if(response.answers?.some(answer=>answer.status==='FILE' && answer.value==='resume'))
-              files.resume=await answerRequest('/ext/resume',undefined,frame);
-            await bound(frame,'repairFill',[response.answers || [],files]);
+          if(frame.frameId===0 || !page)page=prepared.page;
+          frame.result.diagnostic.fields=prepared.before;
+          candidates.push(...prepared.fields.filter(f=>!f.answered).map(f=>({...f,key:`${frame.frameId}:${f.key}`})));
+        }
+        // Establish the same queue attribution as Autofill, after binding the
+        // document and before any answer or explicit submission can use it.
+        const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+        const matched=await applicationMatch(tab.url,autofillTabs[tab.id],current.matched);
+        for(const frame of started)await bound(frame,'repairCheck');
+        application_id=matched?.application_id;run_id=matched?.run_id;current.matched=matched;
+        autofillTabs[tab.id]={...autofillTabs[tab.id],url:tab.url,matched};
+        await chrome.storage.session.set({autofillTabs});
+        const apply=async response=>{
+          const files={};
+          if(response.answers?.some(answer=>answer.status==='FILE' && answer.value==='resume'))
+            files.resume=await answerRequest('/ext/resume',undefined,started);
+          for(const frame of started){
+            const prefix=frame.frameId+':';
+            const local=(response.answers || []).filter(a=>a.key.startsWith(prefix)).map(a=>({...a,key:a.key.slice(prefix.length)}));
+            if(local.length)await bound(frame,'repairFill',[local,files]);
+          }
+        };
+        if(candidates.length){
+          const fast=await answerRequest('/ext/answers',{url:tab.url,application_id,page,fields:candidates,allow_ai:false},started);
+          attempts=1;current.answerRevision=[fast.profile_revision,fast.facts_revision];await apply(fast);
+          const eligible=new Set((fast.answers || []).filter(a=>['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
+          const remaining=[];
+          if(eligible.size)for(const frame of started){
+            // Only unresolved, eligible menus may be opened, once per revision.
+            const keys=[...eligible].filter(k=>k.startsWith(frame.frameId+':')).map(k=>k.slice(k.indexOf(':')+1));
+            if(!keys.length)continue;
+            const fields=await bound(frame,'repairOptions',[keys]);
+            remaining.push(...fields.map(f=>({...f,key:`${frame.frameId}:${f.key}`})).filter(f=>eligible.has(f.key) && (f.kind!=='combobox' || f.options.length)));
+          }
+          if(remaining.length){
+            current.progress='Reasoning about remaining answers...';await report(current);
+            const response=await answerRequest('/ext/answers',{url:tab.url,application_id,page,fields:remaining},started);
+            attempts=2;await apply(response);
           }
         }
       }catch(error){
@@ -890,28 +955,43 @@ async function action(message) {
       const budget=800000-encoder.encode(JSON.stringify(diagnostic)).length;
       for(const frame of available)for(const node of frame.result.nodes){size+=encoder.encode(JSON.stringify(node)).length+1;if(nodes.length>=10000 || size>budget){truncated=true;break;}nodes.push(node);}
       async function unchanged(){
-        if(staleRun(epoch) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
-           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id)return false;
+        if(staleRun(epoch) || cancelledTabs.has(tab.id) || closedTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url || activeResults.get(tab.id)!==current ||
+           (current?.url===tab.url?current.matched?.application_id:undefined)!==application_id || current.matched?.run_id!==run_id)return false;
         const latest=await readFrames({target:{tabId:tab.id,allFrames:true},func:()=>globalThis.autoApplyContent?.repairContext()});
         return available.every(frame=>latest.some(f=>f.frameId===frame.frameId && f.documentId===frame.documentId && f.result?.identity===frame.result.identity && f.result.revision===frame.result.edit_revision));
       }
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
       const context=new URL(tab.url);context.search='';context.hash='';context.username='';context.password='';
-      const saved=await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic});
+      const attention=fields.filter(f=>!f.answered && f.repair_status!=='verified' && f.repair_status!=='optional_skip');
+      const liveSummary=`Filled ${filled}; ${attention.length} need your input`;
+      const saved=message.automatic && !available.some(f=>f.result.structural)?
+        {ok:true,summary:liveSummary,findings:attention.map(f=>({label:f.label,notes:[f.reason_code?.startsWith('provider_')?'Answer provider unavailable; retry Analyze.':'Needs your input.']}))}:
+        await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic,automatic:Boolean(message.automatic)});
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
-      if(saved.ok && current?.url===tab.url && current.fields &&
-         Object.entries(current.pageIdentities || {}).every(([id,page])=>targets.some(frame=>String(frame.frameId)===id && frame.documentId===page.documentId))){
+      if(saved.ok && current?.url===tab.url){
         const live=new Map(repaired.flatMap(frame=>frame.result.fields.map(field=>[`${frame.frameId}:${field.key}`,{...field,key:`${frame.frameId}:${field.key}`}])));
-        const completed=[...(current.completed || [])];let added=0;
+        const bindings=new Map(repaired.flatMap(frame=>frame.result.fields.map(field=>[
+          frame.documentId+':'+field.control_identity,live.get(`${frame.frameId}:${field.key}`)])));
+        const retained=(field,answered=true)=>{
+          const frameId=Number(field.key.split(':')[0]),documentId=current.pageIdentities?.[frameId]?.documentId;
+          const now=field.control_identity && bindings.get(documentId+':'+field.control_identity);
+          return now && (!answered || now.answered)?{...field,...now}:null;
+        };
+        const completed=(current.completed || []).map(field=>retained(field)).filter(Boolean);
         for(const frame of repaired)for(const answer of frame.result.completed){
           const item={...answer,key:`${frame.frameId}:${answer.key}`},index=completed.findIndex(old=>old.key===item.key);
-          if(index<0){completed.push(item);added++;}else completed[index]=item;
+          if(index<0)completed.push(item);else completed[index]=item;
         }
-        const pending=current.pending.map(field=>({...field,...live.get(field.key)})).filter(field=>!live.get(field.key)?.answered);
-        const updated={...current,snapshotFeedback:undefined,completed,pending,
-          fields:current.fields.map(field=>({...field,...live.get(field.key)})),
+        const pending=[...live.values()].filter(field=>!field.answered && field.repair_status!=='optional_skip' && field.reason_code!=='optional_skip');
+        const writing=(current.writing || []).map(field=>retained(field,false)).filter(Boolean);
+        const top=repaired.find(frame=>frame.frameId===0)?.result;
+        const updated={...current,snapshotFeedback:undefined,completed,pending,writing,
+          fields:[...live.values()],page:{...(top?.page || {}),url:tab.url,...(current.matched?.company?{company:current.matched.company}:{}),...(current.matched?.title?{title:current.matched.title}:{})},
+          next_action:top?.next_action,sign_in:false,accountMode:undefined,waiting:false,busy:false,stalePage:false,
           pageIdentities:Object.fromEntries(available.map(frame=>[frame.frameId,{identity:frame.result.identity,documentId:frame.documentId}])),
-          summary:{...current.summary,filled:current.summary.filled+added,needs_input:pending.map(field=>field.label)}};
+          progress:pending.some(f=>/^provider_|^stale_data$/.test(f.reason_code || ''))?'Answer provider unavailable; retry Analyze.':pending.length?'Needs your input: '+pending.map(f=>f.label).slice(0,3).join('; '):`Filled ${filled} answers.`,
+          summary:{...current.summary,filled:completed.length,skipped:[...live.values()].filter(f=>f.repair_status==='optional_skip').length,
+            needs_input:pending.map(field=>field.label),needs_writing:writing.map(field=>field.label)}};
         await report(updated,unchanged);
         if(!await unchanged())throw Error('Application changed. Analyze page again.');
         Object.assign(current,updated);
@@ -955,11 +1035,21 @@ async function action(message) {
         }
       }
       const unavailable=!fields.length && inspections.find(i=>i.message);
-      return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy};
+      let automaticSignature;
+      if(message.automatic && saved.ok && stopped==='none'){
+        // Cache the inspected post-fill state only while its original repair
+        // capability still binds this document, edit revision and step. A late
+        // replacement step must retain its queued signal instead of being seen.
+        for(const frame of started)await bound(frame,'repairCheck');
+        if(await unchanged())automaticSignature=automaticAnalysisSignature(available.filter(f=>f.result.automaticState?.application)
+          .map(f=>({...f,result:f.result.automaticState})));
+      }
+      return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy,
+        ...(automaticSignature?{automaticSignature}: {})};
     })();
     analysisTasks.set(tab.id,task);
     try{return await task;}finally{
-      analysisTasks.delete(tab.id);
+      analysisTasks.delete(tab.id);drainAutomaticAnalysis();
       const waiting=activeResults.get(tab.id);
       if(waiting?.waiting && !formWaits.has(tab.id) && !cancelledTabs.has(tab.id))pollForForm(waiting);
     }
@@ -1122,7 +1212,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
   const blocksAnalysis=['autofill','autofill-skills','chat-replace','fill-answer','cover-letter','next-page','page-context','load-options'].includes(message.type);
   if(blocksAnalysis)analysisBlockers++;
-  action(message).then(respond, error => respond({error: error.message})).finally(()=>{if(blocksAnalysis)analysisBlockers--;});
+  action(message).then(respond, error => respond({error: error.message})).finally(()=>{if(blocksAnalysis)analysisBlockers--;drainAutomaticAnalysis();});
   return true;
 });
 chrome.commands.onCommand.addListener(command => {
@@ -1335,7 +1425,7 @@ export async function runTick() {
     if(signature!==run.progressSent){await api('/ext/run/result',progress);if(staleRun(epoch))return;run.progressSent=signature;}
     run.error='';await saveRun(run,false,epoch);
   } catch(error) {if(!staleRun(epoch)){run.error=error.message;await saveRun(run,false,epoch);}}
-  finally {batchBusy=false;}
+  finally {batchBusy=false;drainAutomaticAnalysis();}
 }
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "chrome-run") runTick(); });
 chrome.alarms.create("chrome-run", {periodInMinutes: 0.5});
@@ -1402,12 +1492,83 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 globalThis.autoApplyRunTick = runTick;
 runTick();
 
+// Automatic recovery shares page-snapshot's guarded live repair. Signals carry
+// no field values; the worker rebinds document and shape before doing work.
+const automaticPending=new Map(),automaticSeen=new Map(),automaticRunning=new Set();
+const automaticAnalysisSignature=frames=>JSON.stringify([...frames].sort((a,b)=>a.frameId-b.frameId).map(f=>[f.documentId,f.result.shape]));
+let automaticDrain,automaticDraining=false;
+function queueAutomaticAnalysis(tabId){
+  if(!tabId || closedTabs.has(tabId) || cancelledTabs.has(tabId))return;
+  automaticPending.set(tabId,true);drainAutomaticAnalysis();
+}
+function drainAutomaticAnalysis(){
+  clearTimeout(automaticDrain);
+  automaticDrain=setTimeout(()=>void runAutomaticAnalysis(),100);
+}
+async function runAutomaticAnalysis(){
+  if(running || autofillTasks || skillsRunning || analysisBlockers || batchBusy || manualActionTabs.size || analysisTasks.size)return;
+  if(automaticDraining)return;automaticDraining=true;
+  try{for(const tabId of automaticPending.keys()){
+    const old=activeResults.get(tabId);
+    if(pendingSteps.has(tabId) || writingTasks.has(tabId) || old?.busy || old?.coverBusy || old?.skillsBusy)continue;
+    automaticPending.delete(tabId);
+    try{
+      const {autoSendStructure=true}=await chrome.storage.local.get('autoSendStructure');
+      const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
+      if(!autoSendStructure || chromeRunPaused || sidebarStates.get(tabId)==='closed' || closedTabs.has(tabId) || cancelledTabs.has(tabId))continue;
+      const tab=await chrome.tabs.get(tabId);
+      const frames=await readFrames({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.runtimeState()});
+      if(frames.some(f=>f.result?.account)){scheduleAutoAccount(tabId);continue;}
+      const valid=frames.filter(f=>f.result?.application);
+      if(!valid.length)continue;
+      const signature=automaticAnalysisSignature(valid);
+      const cached=automaticSeen.get(tabId),revision=JSON.stringify(old?.answerRevision);
+      if(cached?.signature===signature && cached.revision===revision)continue;
+      automaticSeen.set(tabId,{signature,revision});
+      automaticRunning.add(tabId);
+      try{
+        const analyzed=await action({type:'page-snapshot',tabId,automatic:true});
+        if(analyzed.automaticSignature)automaticSeen.set(tabId,{signature:analyzed.automaticSignature,
+          revision:JSON.stringify(activeResults.get(tabId)?.answerRevision)});
+      }finally{automaticRunning.delete(tabId);}
+    }catch{/* A new shape, user action or profile refresh can rearm recovery. */}
+  }}finally{automaticDraining=false;}
+}
+chrome.tabs.onRemoved.addListener(tabId=>{automaticPending.delete(tabId);automaticSeen.delete(tabId);});
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){automaticPending.delete(tabId);automaticSeen.delete(tabId);}});
+chrome.storage.onChanged.addListener((changes,area)=>{
+  if(area!=='local' || !changes.autoSendStructure)return;
+  if(changes.autoSendStructure.newValue===false){
+    automaticPending.clear();
+    for(const tabId of automaticRunning)chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.cancelRepair()}).catch(()=>{});
+  }else{
+    automaticSeen.clear();
+    chrome.tabs.query({}).then(tabs=>tabs.filter(t=>/^https?:/.test(t.url || '')).forEach(t=>queueAutomaticAnalysis(t.id))).catch(()=>{});
+  }
+});
 const confirmingTabs=new Set();
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
   const tabId=sender.tab.id;
   if(message.type==='sidebar-layout-state' && sender.frameId===0){chrome.runtime.sendMessage({...message,tabId}).catch(()=>{});return;}
   if(message.type==='sidebar-ready' && sender.frameId===0)restoreSidebar(tabId).catch(console.error);
+  if(message.type==='application-state-changed'){
+    // Footer state is read-only, refreshed even with automatic repair disabled.
+    readFrames({target:{tabId,frameIds:[sender.frameId || 0]},func:()=>globalThis.autoApplyContent?.runtimeState()}).then(async frames=>{
+      let result=activeResults.get(tabId);const state=frames[0]?.result;
+      if(!result && state?.application){
+        result={tabId,url:sender.tab.url,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+        activeResults.set(tabId,result);
+      }
+      if(state?.account){
+        const auth=(await accountFrames(tabId)).find(f=>f.result?.active);
+        if(auth && result){result.sign_in=true;result.accountMode=auth.result.mode;result.accountReady=auth.result.actionReady;await report(result);}
+        scheduleAutoAccount(tabId);return;
+      }
+      if(result && state && sender.frameId===0){if(result.sign_in){result.waiting=false;result.accountPreview=false;result.progress=result.detail='Review the application.';}result.sign_in=false;delete result.accountMode;result.next_action=state.navigation;await report(result);}
+      if(state?.application)queueAutomaticAnalysis(tabId);
+    }).catch(()=>{});
+  }
   if(message.type==='sidebar-ready' || message.type==='account-state-changed')scheduleAutoAccount(tabId);
   if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}

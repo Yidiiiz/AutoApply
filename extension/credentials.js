@@ -22,12 +22,26 @@
     ['forgotPasswordLink','signInLink','createAccountExpandButton'].includes(el.getAttribute('data-automation-id'));
   let diagnosis={reason:'no_password',password_count:0,email_count:0,action_count:0};
   const reject=reason=>{diagnosis.reason=reason;return null;};
-  let revision=0, ticket, synthetic=false, href=location.href, autoEdited=false, verified;
+  let revision=0, ticket, synthetic=false, href=location.href, verified;
   const invalidate=()=>{revision++;ticket=undefined;};
   // History API changes need no DOM mutation or browser event. Keep the full
   // href private and expose only revision changes, never query/hash values.
   const refreshContext=()=>{if(href!==location.href){href=location.href;invalidate();}};
-  for(const type of ['beforeinput','input','change','keydown'])document.addEventListener(type,e=>{if(e.isTrusted && !synthetic && !e.target.closest?.('#autoapply-sidebar')){autoEdited=true;invalidate();}},true);
+  const edited=new WeakMap();
+  const editedForms=new WeakMap();
+  for(const type of ['beforeinput','input','change'])document.addEventListener(type,e=>{
+    const target=native.eventTarget(e);
+    if(!e.isTrusted || synthetic || native.closest(target,'#autoapply-sidebar'))return;
+    if(!target.matches?.('input,textarea,select,[contenteditable]'))return;
+    const f=form();
+    if(f && inAccount(f,target) && (!target.form || target.form===f.root) &&
+       ([f.email,f.password,f.confirm].includes(target) || consentControls(f).includes(target))){
+      const key=f.identity+':'+f.mode;
+      const forms=editedForms.get(f.root) || new Set();forms.add(key);editedForms.set(f.root,forms);
+      const controls=edited.get(target) || new Set();controls.add(key);edited.set(target,controls);
+    }
+    invalidate();
+  },true);
   for(const type of ['pagehide','popstate','hashchange'])addEventListener(type,invalidate);
   const hint=el=>[el.name,el.id,el.getAttribute('title'),el.getAttribute('autocomplete'),el.getAttribute('aria-label'),...Array.from(el.labels||[],l=>l.textContent)].join(' ');
   const confirmation=el=>/confirm|repeat|re.?enter|\bverify[\s_-]*(?:new[\s_-]*)?password\b/i.test(hint(el)) ||
@@ -142,12 +156,22 @@
   };
   const verifiedCount=f=>f && verified?.identity===f.identity && verified.revision===revision?
     verified.fields.filter(({el,value})=>el.isConnected && editable(el) && el.value===value).length:0;
+  function readonlyMode(){
+    const roots=native.discover(),pw=native.query('input[type="password"]',roots).filter(visible);
+    const root=pw[0] && authContext(pw[0],roots);if(!root)return;
+    const modes=native.query('button,input[type="submit"]',roots).filter(el=>contains(root,el) && visible(el) && !navigation(el)).map(el=>{
+      const caption=(el.textContent || el.value || '').trim();
+      if(workday(root))return el.getAttribute('data-automation-id')==='createAccountSubmitButton'?'signup':el.getAttribute('data-automation-id')==='signInSubmitButton'?'login':undefined;
+      return /^(create\s+(?:an?\s+)?account|sign\s*up|register)$/i.test(caption)?'signup':/^(sign[\s-]*in|log[\s-]*in)$/i.test(caption)?'login':undefined;
+    }).filter(Boolean);
+    return new Set(modes).size===1?modes[0]:undefined;
+  }
   const describe=()=>{
     const f=form(),actionReady=Boolean(f && action(f));
     // Missing/unavailable actions permit filling; unsafe ownership, origins
     // and ambiguous actions still withhold credentials.
     const supported=Boolean(f && (actionReady || diagnosis.reason==='action_unavailable'));
-    return {active:active(),supported,actionReady,diagnosis:{...diagnosis},mode:f?.mode,identity:f?.identity,formIdentity:f?identity(f.root):undefined,url:location.origin+location.pathname,revision,passwordPolicy:passwordPolicy(f),filled:verifiedCount(f),autoEligible:!autoEdited};
+    return {active:active(),supported,actionReady,diagnosis:{...diagnosis},mode:f?.mode || readonlyMode(),identity:f?.identity,formIdentity:f?identity(f.root):undefined,url:location.origin+location.pathname,revision,passwordPolicy:passwordPolicy(f),filled:verifiedCount(f),autoEligible:Boolean(f && !editedForms.get(f.root)?.has(f.identity+':'+f.mode) && ![f.email,f.password,f.confirm].some(el=>el && edited.get(el)?.has(f.identity+':'+f.mode)))};
   };
   function fill(value,expected){
     const f=form();
@@ -252,23 +276,22 @@
     return {status:'activated'};
   }
   globalThis.autoApplyCredentials={active,incomplete,sensitive,redact,describe,fill,prepare,activate,invalidate};
-  // Bounded document initialization, including delayed native form rendering.
+  // Persistent event-driven initialization; one finite probe per changed shape.
   // Signals contain no DOM text/values. Background re-probes before any release.
   if(location.protocol==='https:' && /(?:^|\.)(?:myworkdayjobs\.com|greenhouse\.io|lever\.co|smartrecruiters\.com|pinpointhq\.com|applytojob\.com|icims\.com|taleo\.net|successfactors\.com)$/.test(location.hostname)){
-    let timer,last='',signals=0;
+    let timer,last='';
     const observer=new MutationObserver(records=>{
       if(records.every(record=>record.target.closest?.('#autoapply-sidebar')))return;
       schedule();
     });
     const schedule=()=>{clearTimeout(timer);timer=setTimeout(()=>{
-      if(autoEdited || signals>=24)return;
       const state=describe(),signature=JSON.stringify([state.identity,state.revision,state.mode,state.supported,state.actionReady,state.passwordPolicy]);
       if(!state.active || signature===last)return;
-      last=signature;signals++;
+      last=signature;
       chrome.runtime.sendMessage({type:'account-state-changed'}).catch(()=>{});
     },250);};
-    observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
-    setTimeout(()=>{observer.disconnect();clearTimeout(timer);},60000);
+    observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true,attributeFilter:['type','hidden','style','class','disabled','readonly','aria-hidden','aria-label','data-automation-id','minlength']});
+    for(const event of ['popstate','hashchange'])addEventListener(event,schedule);
     schedule();
   }
 })();

@@ -1,0 +1,20 @@
+<!doctype html><html><head><title>Synthetic application</title><style>
+label{display:block;margin:6px}input,textarea,[contenteditable]{min-height:24px}#tools-menu[hidden]{display:none}
+</style></head><body><nav><button role="combobox" data-automation-id="utilityMenuButton">Settings</button><input type="search" aria-label="Search"></nav>
+<form id="application"><h1>Job application</h1>
+<label>Full name<input id="name" name="name"></label><label>Email<input id="email" type="email"></label>
+<label>Phone<input id="phone" type="tel"></label><label>City<input id="city"></label><label>State<input id="state"></label>
+<label>Country<input id="country"></label><label>Personal website<input id="portfolio" type="url"></label>
+<label id="tools-label">Which programming tools do you use?</label><div id="tools-text" contenteditable="true" role="textbox" aria-labelledby="tools-label"></div>
+<label for="tools">Which programming tools do you use?</label><button id="tools" type="button" role="combobox" aria-controls="tools-menu" aria-expanded="false" onclick="opens++;this.setAttribute('aria-expanded','true');document.querySelector('#tools-menu').hidden=false">Select one</button>
+<div id="tools-menu" role="listbox" hidden><div role="option" onclick="choose(this)">Python (programming)</div><div role="option" onclick="choose(this)">Rust</div></div>
+<input type="hidden" aria-label="Duplicate tools mirror"><input hidden aria-label="Duplicate mirror">
+<label><input id="privacy" type="checkbox">By checking this box, you will declare that you read and understand the privacy policy of Synthetic.</label>
+<label>Highest level of education achieved<select id="achieved" required><option value="">Select one</option><option>Bachelor's</option><option>High school</option></select></label>
+<label>Military spouse<input id="spouse" required></label><label>Hispanic or Latino<select id="hispanic"><option value="">Select one</option><option>Yes</option><option>No</option></select></label>
+<div id="aria-policy" role="checkbox" tabindex="0" aria-checked="false" aria-label="I agree to the privacy policy" onclick="this.setAttribute('aria-checked',this.getAttribute('aria-checked')==='true'?'false':'true')">Privacy policy</div>
+<div role="checkbox" aria-label="Unsupported score" tabindex="0">score</div>
+<button id="next" type="button" onclick="actions.push('next')">Next</button></form>
+<script>let opens=0,actions=[];function choose(el){const b=document.querySelector('#tools');b.textContent=el.textContent;b.setAttribute('aria-valuetext',el.textContent);b.setAttribute('aria-expanded','false');el.parentElement.hidden=true;}
+function step(){document.querySelector('#application').innerHTML=`<h1>Job application</h1><label>Email<input type="email" id="step-email"></label><button type="submit" onclick="event.preventDefault();actions.push('submit')">Submit application</button>`;}
+</script></body></html>

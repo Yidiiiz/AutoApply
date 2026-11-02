@@ -88,7 +88,8 @@ def open_fixture(loaded_extension, backend, *, broken=False):
     context, worker, extension_id = loaded_extension
     service, server, state, ids = backend
     worker.evaluate('value=>chrome.storage.local.set(value)',
-                    {'server': server, 'key': service.settings.extension_key()})
+                    {'server': server, 'key': service.settings.extension_key(),
+                     'autoSendStructure': False, 'autoAccountFill': False})
     html = FIXTURE.read_text(encoding='utf-8')
     if broken:
         html = html.replace('</ul>', '<li class="application-question"><label>Unsupported fixture<div class="application-field"><input type="range" id="broken"></div></label></li></ul>')
