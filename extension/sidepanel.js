@@ -254,7 +254,7 @@ function render(value) {
   else if(value.skills)renderSkills(value.skills);
   else if(element("skills-progress").textContent==="Adding skills…")element("skills-progress").textContent="Skills need review";
   const account=value.sign_in && value.accountMode,final=!account && value.next_action?.kind==='submit';
-  element('next-page').textContent=value.submitting?'Submitting...':account?(account==='signup'?'Create account':'Sign in'):final?'Submit':'Next page';
+  element('next-page').textContent=value.submitting?'Submitting...':account?(account==='signup'?'Create account':'Sign in'):final?'Submit':value.next_action?.kind==='entry'?value.next_action.label:'Next page';
   element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || account && busy || final && (busy || value.waiting));
   element('auto-advance').disabled=Boolean(account) || final || !autoPreferenceReady;
   element('auto-advance').parentElement.title=final?'Final submission requires your explicit click':'Keep Auto enabled for following pages; stops for validation and final submission';

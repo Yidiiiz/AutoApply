@@ -191,30 +191,48 @@
   }
   document.addEventListener('change',learn,true); document.addEventListener('blur',learn,true);
   document.addEventListener('click',event=>{
-    const button=event.target.closest('button,input[type="submit"],[role="button"]');
+    const button=native.closest(native.eventTarget(event),'button,input[type="submit"],[role="button"]');
     if(event.isTrusted && button && visible(button) && (/^(submit(?: application)?|apply(?: now| application)?)$/i.test(clean(button.textContent||button.value)))) {
-      armSubmission();
-      chrome.runtime.sendMessage({type:'submit-intent',url:location.href}).catch(()=>{});
+      if(button===navigationButton(true))announceSubmission();
     }
   },true);
-  let confirmationTimer, submissionIntent;
+  document.addEventListener('submit',event=>{
+    if(event.isTrusted && event.submitter===navigationButton(true) &&
+       (!submissionIntent || location.href!==submissionIntent.url || Date.now()-submissionIntent.at>1000))announceSubmission();
+  },true);
+  let confirmationTimer, submissionIntent, confirmationSent='';
   function confirmationEvidence() {
-    const pattern=/thank you for applying|application (?:has been |was )?submitted|we have received your application|application received/i;
-    return Array.from(document.querySelectorAll('h1,h2,h3,#confirmation,[role="dialog"],[role="status"],[data-automation-id="congratulations"],main p'))
-      .filter(el=>visible(el)&&!el.closest("#autoapply-sidebar"))
-      .map(el=>clean(el.innerText)).find(value=>pattern.test(value)) || "";
+    const pattern=/thank you for applying|application (?:has been |was )?(?:successfully )?submitted|we have received your application|application received|you (?:have )?successfully submitted your application|your application has been successfully submitted/i;
+    return Array.from(document.querySelectorAll('h1,h2,h3,#confirmation,[role="dialog"],[role="status"],[data-automation-id="congratulations"],[data-automation-id="applicationConfirmation"],main p'))
+      .filter(el=>visible(el)&&!el.closest('#autoapply-sidebar,[data-automation-id="jobPostingDescription"],.job-description,#job-description,[itemprop="description"]'))
+      .filter(el=>!/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) ||
+        el.matches('#confirmation,[role="dialog"],[role="status"],[data-automation-id="congratulations"],[data-automation-id="applicationConfirmation"]') ||
+        el.closest('#confirmation,[role="dialog"],[role="status"],[data-automation-id="congratulations"],[data-automation-id="applicationConfirmation"]') ||
+        el.matches('h1,h2,h3') && el.closest('main') && !document.querySelector('[data-automation-id="jobPostingDescription"]'))
+      .map(el=>clean(el.innerText).slice(0,2000)).find(value=>pattern.test(value)) || "";
   }
-  function armSubmission() {submissionIntent={url:location.href,at:Date.now(),before:confirmationEvidence()};}
+  function armSubmission() {submissionIntent={url:location.href,at:Date.now(),before:confirmationEvidence()};confirmationSent='';}
+  function announceSubmission(){armSubmission();chrome.runtime.sendMessage({type:'submit-intent',url:location.href,before:submissionIntent.before}).catch(()=>{});}
 
   function detectConfirmation() {
     const url=location.href;
     const strong=/greenhouse\.io|lever\.co/.test(location.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(location.pathname)||/ashbyhq\.com/.test(location.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(location.pathname);
     const evidence=confirmationEvidence();
-    if(!strong && (!submissionIntent || Date.now()-submissionIntent.at>120000 || evidence===submissionIntent.before))return;
+    // A fresh document can offer a receipt candidate; only the background's
+    // persisted explicit intent and native recheck can authorize that handoff.
+    if(!strong && (submissionIntent?Date.now()-submissionIntent.at>120000 || evidence===submissionIntent.before:!evidence))return;
     const invalid=Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).some(el=>visible(el)&&(/error|required|invalid|missing|correct/i.test(text(el))||el.getAttribute('aria-invalid')==='true'));
-    if(!invalid&&(strong||evidence)) chrome.runtime.sendMessage({type:'submission-confirmation',url,evidence:evidence||'Confirmation URL',strong:Boolean(strong)}).catch(()=>{});
+    const signature=JSON.stringify([url,evidence]);
+    if(!invalid&&(strong||evidence) && confirmationSent!==signature){
+      confirmationSent=signature;
+      chrome.runtime.sendMessage({type:'submission-confirmation',url,evidence:evidence||'Confirmation URL',strong:Boolean(strong)}).catch(()=>{confirmationSent='';});
+    }
   }
-  new MutationObserver(()=>{clearTimeout(confirmationTimer);confirmationTimer=setTimeout(detectConfirmation,300);}).observe(document.body,{childList:true,subtree:true,characterData:true});
+  new MutationObserver(()=>{
+    // Receipt proof must not be starved by a continuously mutating SPA.
+    detectConfirmation();
+    if(!confirmationTimer)confirmationTimer=setTimeout(()=>{confirmationTimer=undefined;detectConfirmation();},300);
+  }).observe(document.body,{childList:true,subtree:true,characterData:true});
   setTimeout(detectConfirmation,300);
   let records = new Map();
   const clean = value => String(value || "").replace(/\s+/g, " ").trim();
@@ -291,7 +309,7 @@
       (!r.element.closest('a[href]') || leverResumeProxy(r.element)) &&
       (r.element.tagName!=='BUTTON' || r.element.type==='button' ||
        ['checkbox','radio'].includes(r.field.kind) && noSubmitProxyChoice(r.element)) &&
-      !isPrompt(r.element) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
+      (!isPrompt(r.element) || sourcePrompt(r.element)) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
       (['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind) ||
        r.field.kind==='file' && analyzeResume(r.element)))
       .map(r=>({...r.field,answered:occupied(r)}));
@@ -567,7 +585,15 @@
     }
     return element.parentElement || element;
   }
-  const openedCombos=new WeakSet();
+  const openedCombos=new WeakSet(), comboBindings=new WeakMap();
+  let comboOwner;
+  const popupSelector='[data-automation-id="responsiveMonikerPrompt"],[data-automation-id="activeListContainer"],[role="listbox"]:not([data-automation-id="selectedItemList"])';
+  function visiblePopups(element){
+    const nodes=Array.from(element.getRootNode().querySelectorAll(popupSelector)).filter(node=>visible(node) &&
+      !node.closest('[data-automation-id="selectedItemList"]') &&
+      Array.from(node.querySelectorAll('[role="option"],[data-automation-id="menuItem"],[data-automation-id="promptOption"]')).some(visible));
+    return nodes.filter(node=>!nodes.some(parent=>parent!==node && parent.contains(node)));
+  }
   const settledChoiceNodes=new WeakMap();
   const choiceObservations=new WeakMap();
   let choiceRevision=0;
@@ -580,16 +606,26 @@
   }
   function comboOptions(element) {
     const ids = clean(element.getAttribute("aria-controls") || element.getAttribute("aria-owns") || element.getAttribute("list")).split(" ");
-    const lists = ids.map(id => native.byId(element,id)).filter(Boolean);
+    const lists = ids.map(id => native.byId(element,id)).filter(node=>node && (node.tagName==='DATALIST' || visible(node)));
     if (!lists.length) {
-      lists.push(comboContainer(element));
-      if (!selectOnlyControl(element) && (openedCombos.has(element) || element.getAttribute("aria-expanded") === "true" || isPrompt(element) && comboInput(element)===document.activeElement)) lists.push(...element.getRootNode().querySelectorAll('[data-automation-id="activeListContainer"],[data-automation-id="responsiveMonikerPrompt"],[role="listbox"]:not([data-automation-id="selectedItemList"])'));
+      const container=comboContainer(element);
+      if(!container.matches('body,html,form,main'))lists.push(container);
+      const binding=comboBindings.get(element);
+      if(binding && comboOwner===element && openedCombos.has(element)){
+        if(binding.popup?.isConnected && visible(binding.popup))lists.push(binding.popup);
+        else {
+          const candidates=visiblePopups(element).filter(node=>!binding.before.has(node));
+          // An unlabelled body portal belongs only to the control that opened
+          // it, and only when exactly one new popup appeared. Old portals stay excluded.
+          if(candidates.length===1){binding.popup=candidates[0];lists.push(binding.popup);}
+        }
+      }
     }
     const selector = '[role="option"],option,[data-automation-id="menuItem"],[data-automation-id="promptOption"]' +
       (selectOnlyControl(element) ? ',.react-select__menu .react-select__option' : '');
     return [...new Set(lists.flatMap(list => Array.from(list.querySelectorAll(selector)).map(option=>option.closest('[data-automation-id="menuItem"]') || option)))]
       .filter(option => !option.closest('[data-automation-id="selectedItemList"]') && !option.disabled && option.getAttribute("aria-disabled") !== "true" &&
-        (text(option) || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
+        (text(option) || option.getAttribute('aria-label') || option.getAttribute('data-automation-label')) && !/^(loading\b|no (?:options|results|items)\b)/i.test(text(option)) &&
         (option.tagName === "OPTION" || visible(option)));
   }
   async function settledComboOptions(element, timeout = 6000) {
@@ -606,10 +642,15 @@
     trace('dropdown','skipped',element,{reason:'options did not settle'});
     return [];
   }
+  function bindCombo(element){
+    if(comboOwner && comboOwner!==element)closeCombo(comboOwner);
+    if(!openedCombos.has(element))comboBindings.set(element,{before:new Set(visiblePopups(element))});
+    comboOwner=element;openedCombos.add(element);
+  }
   async function openCombo(element) {
     checkRepair();
     trace("dropdown","opened",element);
-    openedCombos.add(element);
+    bindCombo(element);
     // Some button menus ignore Escape. Reuse the same still-visible observation
     // rather than activating the control again and mounting duplicate portals.
     const retained=settledChoiceNodes.get(element), current=comboOptions(element);
@@ -635,7 +676,14 @@
     }
   }
   function closeCombo(element) {
-    checkRepair(); keypress(element, "Escape"); element.blur(); openedCombos.delete(element); }
+    checkRepair(); keypress(element, "Escape"); comboInput(element)?.blur();element.blur();
+    // Target the inert body surface itself, never a neighbouring control or pill.
+    if(comboOwner===element && comboOptions(element).length){
+      for(const type of ['mousedown','mouseup','click'])repairDispatch(()=>document.body.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0})));
+    }
+    openedCombos.delete(element);comboBindings.delete(element);settledChoiceNodes.delete(element);
+    if(comboOwner===element)comboOwner=undefined;
+  }
   function comboInput(element) {
     return element.matches("input,textarea") ? element : element.querySelector("input,textarea") ||
       (element.isContentEditable ? element :
@@ -717,17 +765,26 @@
     return rect.width>0 && rect.height>0 && style.display!=='none' && style.visibility==='visible' &&
       (!proxy.getAttribute('href') || proxy.getAttribute('href')==='#');
   }
+  function workdayUploadGroup(element){
+    if(element.getAttribute('data-automation-id')!=='file-upload-input-ref')return null;
+    const group=element.closest('[data-automation-id="attachments-FileUpload"],[data-automation-id="fileUpload"],[data-automation-id^="formField"]');
+    if(!group || !visible(group) || group.querySelectorAll('input[type="file"]').length!==1)return null;
+    const buttons=Array.from(group.querySelectorAll('button[data-automation-id="select-files"]')).filter(visible);
+    return buttons.length===1 || group.matches('[data-automation-id^="formField"]') && /\b(resume|cv)\b/i.test(uploadGroupLabel(group,element))?group:null;
+  }
   function exposedFile(element) {
     if(leverResumeProxy(element))return true;
+    if(element.getAttribute('data-automation-id')==='file-upload-input-ref' && !visible(element))return Boolean(workdayUploadGroup(element));
     if(visible(element) || resumeAffordance(element) || attachedFile(element))return true;
     const container=fileContainer(element);
     if(!visible(container) || !/\b(resume|cv|cover)\b/i.test(fileLabel(element)))return false;
     // Workday keeps this input hidden even in the active, visible resume section.
-    if(element.getAttribute('data-automation-id')==='file-upload-input-ref')return true;
+    if(element.getAttribute('data-automation-id')==='file-upload-input-ref')return Boolean(workdayUploadGroup(element));
     return Array.from(container.querySelectorAll('button,[role="button"],label')).some(node=>visible(node) &&
       /^(attach|upload|browse|choose|select)\b/i.test(text(node))) || Array.from(element.labels||[]).some(visible);
   }
   function fileContainer(element) {
+    const workday=workdayUploadGroup(element);if(workday)return workday;
     let container = element.parentElement;
     while (container && !container.matches("form,body")) {
       if (uploadGroupLabel(container, element)) return container;
@@ -748,7 +805,7 @@
     const purpose = /\bcover\b/.test(identity) ? "Cover Letter" : /\b(resume|cv)\b/.test(identity) ? "Resume/CV" : "";
     const fieldLabel = direct || group;
     return purpose && !/\b(resume|cv|cover)\b/i.test(fieldLabel || "") ? purpose : fieldLabel || purpose ||
-      (element.getAttribute('data-automation-id') === 'file-upload-input-ref' ? 'Resume/CV' : 'File attachment');
+      'File attachment';
   }
   function attachedFile(element) {
     const container = element.closest('[data-automation-id^="formField"],[data-automation-id="fileUpload"],[class*="upload"],[class*="Upload"]') || fileContainer(element);
@@ -818,7 +875,7 @@
     return Array.from(document.querySelectorAll('[data-automation-id="applyManually"]')).find(visible);
   }
 
-  function enterApplication() {
+  function applicationEntry() {
     if (signInPage() || /review/i.test(workdayState()?.step || '')) return false;
     const manual = manualEntry();
     // Entry must never replace a real form, including an exposed shadow form.
@@ -826,7 +883,7 @@
     if(roots.truncated || scannerControls().length || roots.some(({root})=>
       Array.from(root.querySelectorAll(controlSelector)).some(e=>!diagnosticExcluded(e) && visible(e))))return false;
     const activeStep=workdayState()?.step;
-    const workdayLanding=!activeStep && !document.querySelector('[data-automation-id="progressBar"]') &&
+    const workdayLanding=!/review/i.test(activeStep || '') && !document.querySelector('[data-automation-id="progressBar"],[data-automation-id="progressBarActiveStep"]') &&
       (/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && /\/job\//.test(location.pathname) ||
        document.querySelector('[data-automation-id="jobPostingPage"],[data-automation-id="jobPostingHeader"]'));
     const smartLanding=location.hostname==='jobs.smartrecruiters.com' && /^\/[^/]+\/\d+\/?$/.test(location.pathname);
@@ -850,12 +907,18 @@
     const targets=new Set(entries.map(element=>element.tagName==='A'?element.href:element));
     const entry=entries[0];
     if (!entry || targets.size!==1 || entry.type === "submit" || entry.form || entry.closest('form,[role="form"]')) return false;
+    if(entry.tagName==='A'){try{const target=new URL(entry.href);if(!/^https?:$/.test(target.protocol) || target.username || target.password || /^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && (target.origin!==location.origin || entry.target && entry.target!=='_self'))return false;}catch{return false;}}
+    return entry;
+  }
+  function enterApplication() {
+    const entry=applicationEntry();if(!entry)return false;
     trace('entry', 'click', null, {caption:(entry.getAttribute('aria-label') || entry.textContent).trim().slice(0,80)});
     // Exact entry labels only: never Next, Save and Continue, or Submit.
     if (entry.tagName === 'A') {
       let url;try {url=new URL(entry.href);} catch {return false;}
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
-      location.assign(url.href);
+      if(/^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname))entry.click();
+      else location.assign(url.href);
     } else entry.click();
     return true;
   }
@@ -876,7 +939,7 @@
   function excludedControl(element){
     return Boolean(native.closest(element,'#autoapply-sidebar,.autoapply-ask-ai,nav,header,[role="navigation"],[role="search"],[data-automation-id="utilityButtonBar"]')) ||
       element.matches('[data-automation-id="utilityMenuButton"],input[type="search"]') ||
-      /\bsearch\b/i.test(label(element)) && !native.closest(element,'form,[role="form"]');
+      /\bsearch\b/i.test(label(element)) && !isPrompt(element) && !native.closest(element,'form,[role="form"]');
   }
   function supportedControl(element){
     // Text needs native/editable semantics; ARIA choices need explicit checked state and keyboard focus.
@@ -1002,7 +1065,7 @@
       try {
         await openCombo(record.element);
         const options=await settledComboOptions(record.element, 3000);
-        record.field.options = options.map(text);
+        record.field.options = sourcePrompt(record.element)?await sourceChoices(record.element):options.map(text);
         record.field.options_observed = true;
         rememberChoices(record);
         if(repairExecuting)repairSession.menus.set(record.element,{options:record.field.options,
@@ -1135,6 +1198,7 @@
   }
 
   async function fillCombo(element, value, force = false) {
+    if(sourcePrompt(element)){if(!force && occupied({element,members:[element],field:{kind:'combobox'}}))return false;return fillSource(element,value);}
     if (isPrompt(element) && isSkillsField(element)) return (await fillSkills(element, [value])).skipped === 0;
     if (!force && occupied({element,members:[element],field:{kind:'combobox'}})) return false;
     const initial=element;
@@ -1355,7 +1419,7 @@
           const transfer = new DataTransfer();
           transfer.items.add(new File([bytes], file.filename, {type: file.mime}));
           const container = fileContainer(element);
-          const region = container.parentElement || container;
+          const region = workdayUploadGroup(element) || container.parentElement || container;
           nativeSet(element, "files", transfer.files);
           events(element);
           const outcome = await waitFor(() => {
@@ -1548,6 +1612,65 @@
     return Boolean(element.closest('[data-automation-id="multiSelectContainer"]')) || element.matches('input[data-automation-id="searchBox"]') ||
       Boolean(element.querySelector('input[data-automation-id="searchBox"]'));
   }
+  function sourcePrompt(element){
+    return /^(?:.+\.)?myworkdayjobs\.com$/.test(location.hostname) && isPrompt(element) &&
+      element.matches('input[data-automation-id="searchBox"]') &&
+      /how did you (?:hear|learn|find)|(?:application|candidate|job) source/i.test(label(element));
+  }
+  const sourcePaths=new WeakMap();
+  const sourceBranch=row=>!row.querySelector('[data-automation-id="checkboxPanel"],input[type="checkbox"],input[type="radio"],[role="checkbox"]') &&
+    !/ (?:not )?checked$/i.test(row.getAttribute('aria-label') || '') &&
+    (row.matches('[aria-haspopup="listbox"],[aria-haspopup="true"],[aria-expanded]') ||
+     Boolean(row.querySelector('[data-automation-id="chevronRight"],[aria-haspopup="listbox"]')));
+  const safePromptRow=row=>!row.closest('a[href],button:not([type="button"]),input[type="submit"],input[type="image"]');
+  async function sourceChoices(element){
+    const before=JSON.stringify(selectedSkills(element)),paths=new Map();
+    const roots=await settledComboOptions(element,1500);
+    if(roots.length>40)return [];
+    const branches=roots.filter(sourceBranch).map(optionName);
+    if(branches.length>8)return [];
+    const add=(row,path)=>{const name=optionName(row);if(!name)return;
+      if(paths.has(name))paths.set(name,null);else paths.set(name,path);};
+    roots.filter(row=>!sourceBranch(row)).forEach(row=>add(row,[]));
+    for(const category of branches){
+      closeCombo(element);await openCombo(element);
+      const rows=await settledComboOptions(element,1000),matches=rows.filter(row=>sourceBranch(row) && optionName(row)===category);
+      if(matches.length!==1 || !safePromptRow(matches[0]))continue;
+      const branch=matches[0],signature=JSON.stringify(rows.map(optionName));
+      if(!pointerClick(branch,()=>comboOptions(element).includes(branch) && sourceBranch(branch)))continue;
+      if(!await waitFor(()=>JSON.stringify(comboOptions(element).map(optionName))!==signature,600))continue;
+      const leaves=await settledComboOptions(element,1000);
+      if(leaves.length>40 || JSON.stringify(selectedSkills(element))!==before)break;
+      leaves.filter(row=>!sourceBranch(row)).forEach(row=>add(row,[category]));
+    }
+    const unique=new Map([...paths].filter(([,path])=>path));
+    sourcePaths.set(element,{url:location.href,label:label(element),paths:unique});
+    return [...unique.keys()];
+  }
+  async function fillSource(element,value){
+    const saved=sourcePaths.get(element);
+    if(!saved || saved.url!==location.href || saved.label!==label(element) || !saved.paths.has(value))return false;
+    const before=JSON.stringify(selectedSkills(element));
+    try{
+      await openCombo(element);
+      for(const category of saved.paths.get(value)){
+        const rows=await settledComboOptions(element,1000),matches=rows.filter(row=>sourceBranch(row) && optionName(row)===category);
+        if(matches.length!==1 || !safePromptRow(matches[0]))return false;
+        const branch=matches[0],signature=JSON.stringify(rows.map(optionName));
+        if(!pointerClick(branch,()=>comboOptions(element).includes(branch) && sourceBranch(branch)))return false;
+        if(!await waitFor(()=>JSON.stringify(comboOptions(element).map(optionName))!==signature,600))return false;
+      }
+      const matches=(await settledComboOptions(element,1000)).filter(row=>!sourceBranch(row) && optionName(row)===value);
+      if(matches.length!==1 || !safePromptRow(matches[0]) || JSON.stringify(selectedSkills(element))!==before)return false;
+      const row=matches[0],target=row.querySelector('[data-automation-id="checkboxPanel"],input[type="checkbox"],[role="checkbox"]') || row;
+      if(!pointerClick(target,()=>comboOptions(element).includes(row) && !target.disabled && target.getAttribute('aria-disabled')!=='true'))return false;
+      let since=0;
+      return Boolean(await waitFor(()=>{
+        if(!element.isConnected || saved.url!==location.href || saved.label!==label(element) || !selectedSkills(element).some(pill=>normal(pill)===normal(value))){since=0;return false;}
+        since ||= Date.now();return Date.now()-since>=200;
+      },1500));
+    }finally{closeCombo(element);}
+  }
   function promptEnter(input) {
     // React handlers still receive Enter, but it cannot submit the form.
     const stop = event => { if (event.key === 'Enter') event.preventDefault(); };
@@ -1615,7 +1738,7 @@
   }
   let skillsCancelled=false, skillsState={busy:false,progress:''};
   const optionName = option => text(option.querySelector('[data-automation-id="promptOption"]')) ||
-    clean(option.getAttribute('data-automation-label')) || text(option);
+    clean(option.getAttribute('data-automation-label')) || text(option) || clean(option.getAttribute('aria-label')).replace(/ (?:not )?checked$/i,'');
   const skillRequest = async (type, payload={}) => {
     try {const response=await chrome.runtime.sendMessage({type,...payload});if(response?.error)trace(type,'error',null,{error:response.error});return response;}catch(error){trace(type,'error',null,{error:error.message,stack:error.stack});return {}; }
   };
@@ -1625,14 +1748,9 @@
       .map(part=>expanded[normal(part)] || part.trim()))];
   }
   function skillResults(element, previousLists) {
-    const lists=Array.from(document.querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]'))
-      .filter(list=>!list.matches('[data-automation-id="selectedItemList"]') && visible(list) &&
-        (list.matches('[data-automation-id="activeListContainer"]') || !previousLists.has(list) ||
-         comboContainer(element).contains(list) ||
-         clean(element.getAttribute('aria-controls') || element.getAttribute('aria-owns')).split(' ').includes(list.id)));
-    const rows=[...new Set(lists.flatMap(list=>Array.from(list.querySelectorAll('[role="option"],[data-automation-id="menuItem"],[data-automation-id="promptOption"],option')).map(row=>row.closest('[data-automation-id="menuItem"][role="option"]') || row)))]
-      .filter(row=>visible(row) && row.getAttribute('aria-disabled')!=='true' && optionName(row) &&
-        !/^(loading\b|no (?:items|options|results)\b)/i.test(optionName(row)));
+    const rows=comboOptions(element);
+    const lists=Array.from(element.getRootNode().querySelectorAll('[data-automation-id="activeListContainer"],[role="listbox"]'))
+      .filter(list=>visible(list) && !list.matches('[data-automation-id="selectedItemList"]') && rows.some(row=>list.contains(row)));
     return {rows,lists};
   }
   async function selectSkillOption(element, name, previousLists, cancelled) {
@@ -1717,7 +1835,7 @@
         try {
           progress(index,skill,'pending');
           const previous=new Set(Array.from(document.querySelectorAll('[role="listbox"]')).filter(visible));
-          comboInput(element)?.focus(); searchCombo(element,''); searchCombo(element,skill);
+          bindCombo(element);comboInput(element)?.focus(); searchCombo(element,''); searchCombo(element,skill);
           if(isPrompt(element)) promptEnter(comboInput(element)); else keypress(comboInput(element),'ArrowDown');
           const options=await skillOptions(element,previous); popup=options.popup;
           trace("skills",popup?"opened":"skipped",element,{reason:popup?"results ready":"no results popup"});
@@ -2048,16 +2166,18 @@
   }
   function navigationState() {
     const final=Boolean(navigationButton(true));
-    return {kind:final?'submit':navigationButton()?'next':'none',url:location.href,step:workdayState()?.step || ''};
+    const entry=!final && !navigationButton() && applicationEntry();
+    return {kind:final?'submit':navigationButton()?'next':entry?'entry':'none',...(entry?{label:clean(entry.getAttribute('aria-label') || entry.textContent)}:{}),url:location.href,step:workdayState()?.step || ''};
   }
   async function manualSubmit(expected) {
     const state=navigationState(), errors=validationErrors();
     if(!expected || expected.url!==state.url || expected.step!==state.step || state.kind!=='submit' ||
        errors.length || signInPage() || (await scan()).fields.some(f=>f.required&&!f.answered))
       return {clicked:false,errors,message:'Application changed or needs review. Use the employer page.'};
-    const button=navigationButton(true);
-    if(!button)return {clicked:false,errors:[],message:'Submit is unavailable. Use the employer page.'};
+    const button=navigationButton(true),fresh=navigationState();
+    if(!button || fresh.url!==state.url || fresh.step!==state.step || fresh.kind!=='submit')return {clicked:false,errors:[],message:'Submit is unavailable. Use the employer page.'};
     armSubmission(); button.click();
+    detectConfirmation();
     return {clicked:true,errors:validationErrors()};
   }
   async function nextPage(requireComplete = false) {
@@ -2066,6 +2186,7 @@
     if (signInPage()) return {clicked: false, errors: ['Sign in before continuing.']};
     if (requireComplete && (await scan()).fields.some(field => field.required && !field.answered)) return {clicked: false, errors: []};
     if(navigationState().kind==='submit')return {clicked:false,errors:[],message:'Final submit is yours'};
+    if(navigationState().kind==='entry')return {clicked:enterApplication(),errors:[]};
     const button = navigationButton();
     if (!button) {
       const final = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]')).some(node =>
@@ -2211,7 +2332,7 @@
          !element.matches('[aria-haspopup="listbox"],[role="combobox"]') &&
          !(supportedControl(element) && ['checkbox','radio'].includes(choiceKind(element))) || grouped.has(element))continue;
       if(element.parentElement?.closest('[contenteditable]:not([contenteditable="false"])') || element.closest('[role="combobox"]') && !element.matches('[role="combobox"]'))continue;
-      const kind=element.tagName==='SELECT'?'select':element.matches('[role="combobox"],[aria-haspopup="listbox"]')?'combobox':element.tagName==='TEXTAREA'||element.isContentEditable?'textarea':choiceKind(element) || 'text';
+      const kind=element.tagName==='SELECT'?'select':element.matches('[role="combobox"],[aria-haspopup="listbox"],button[id$="--degree"]') || isPrompt(element)?'combobox':element.tagName==='TEXTAREA'||element.isContentEditable?'textarea':choiceKind(element) || 'text';
       const supported=supportedControl(element);
       const container=['radio','checkbox'].includes(kind)?choiceContainer(element):null;
       let members=['radio','checkbox'].includes(kind)?inputInventory(roots).filter(other=>choiceKind(other)===kind && sameChoiceScope(element,other) && (kind==='radio' && element.name?other.name===element.name:choiceContainer(other)===container && (container || other===element))):[element];
@@ -2261,7 +2382,8 @@
   function runtimeStateRead(){
     if(globalThis.autoApplyCredentials?.active())return {account:true,navigation:{kind:'none'}};
     const controls=inputInventory().filter(el=>interactiveVisible(el) || el.type==='file' && exposedFile(el));
-    let application=controls.some(el=>applicationWritingScope(writingScope(el)));
+    const navigation=navigationState();
+    let application=navigation.kind==='submit' || controls.some(el=>applicationWritingScope(writingScope(el)));
     if(!application && recognizedApplication)application=controls.some(el=>{
       const root=writingScope(el);return root && Array.from(root.querySelectorAll('h1,h2,h3,legend')).some(h=>visible(h) && /job application|application (?:form|questions)|your application/i.test(text(h)));
     });
@@ -2271,7 +2393,7 @@
       return [repairNodes.get(el),label(el).slice(0,2000),el.type,el.disabled,el.readOnly,el.required,el.getAttribute('aria-required'),
         el.matches('select')?Array.from(el.options,o=>[o.value,o.text,o.disabled]):el.matches('[role="combobox"]') && !occupied({element:el,members:[el],field:{kind:'combobox'}})?comboOptions(el).slice(0,100).map(text):el.getAttribute('aria-controls')];
     })]);
-    return {application,shape,revision:repairRevision,navigation:navigationState()};
+    return {application,shape,revision:repairRevision,navigation};
   }
   function signalRuntime(){
     clearTimeout(runtimeTimer);runtimeTimer=setTimeout(()=>{
@@ -2409,9 +2531,9 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, validationErrors};
+  globalThis.autoApplyContent = {runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, submissionBaseline:()=>submissionIntent?.before, validationErrors};
   if(globalThis.autoApplyCredentials){
-    for(const key of ['runtimeState','scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
+    for(const key of ['runtimeState','scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','submissionBaseline','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
       const original=globalThis.autoApplyContent[key];
       globalThis.autoApplyContent[key]=(...args)=>{const value=original(...args);return value?.then?value.then(globalThis.autoApplyCredentials.redact):globalThis.autoApplyCredentials.redact(value);};
     }

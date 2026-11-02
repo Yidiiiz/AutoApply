@@ -570,12 +570,14 @@ async function fillAccount(result, polling=false, preview=false) {
       if(preview)return `Account details filled. Review the page, then click ${frame.result.mode==='signup'?'Create account':'Sign in'}.`;
       // Persist before activation. A timeout/restart is never permission to click
       // again. This claim contains document identities only, never credentials.
-      accountActionClaims[key]=true;
+      const claim=crypto.randomUUID();accountActionClaims[key]=claim;
+      const releaseClaim=async()=>{const {accountActionClaims:latest={}}=await chrome.storage.session.get('accountActionClaims');if(latest[key]===claim){delete latest[key];await chrome.storage.session.set({accountActionClaims:latest});}};
       await chrome.storage.session.set({accountActionClaims});
-      if(!await valid())return failure('context_changed');
+      if(!await valid()){await releaseClaim();return failure('context_changed');}
       phase='activate';
       const [activated]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[frame.documentId]},world:'ISOLATED',func:id=>globalThis.autoApplyCredentials?.activate(id),args:[prepared.result.ticket]});
-      credentialDocuments.set(result.tabId,document);
+      if(activated?.result?.status==='unavailable'){await releaseClaim();return failure('context_changed');}
+      if(activated?.result?.status==='activated')credentialDocuments.set(result.tabId,document);
       if(activated?.result?.status==='activated' && frame.result.mode==='signup' && ['standard','strict'].includes(value.variant)){
         // Remember only after the guarded native signup action was clicked.
         await api('/ext/credentials',{url:accountUrl,frame_url:frame.result.url,
@@ -908,8 +910,13 @@ async function action(message) {
         };
         if(candidates.length){
           const fast=await answerRequest('/ext/answers',{url:tab.url,application_id,page,fields:candidates,allow_ai:false},started);
-          attempts=1;current.answerRevision=[fast.profile_revision,fast.facts_revision];await apply(fast);
-          const eligible=new Set((fast.answers || []).filter(a=>['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
+          attempts=1;current.answerRevision=[fast.profile_revision,fast.facts_revision];
+          // A saved answer is not an offered option. Defer closed choices until
+          // their bound menu has been observed, while native answers fill now.
+          const unobserved=new Set(candidates.filter(f=>f.kind==='combobox' && !f.options?.length && !f.options_observed).map(f=>f.key));
+          const deferred=new Set((fast.answers || []).filter(a=>a.status==='RESOLVED' && unobserved.has(a.key)).map(a=>a.key));
+          await apply({...fast,answers:(fast.answers || []).filter(a=>!deferred.has(a.key))});
+          const eligible=new Set((fast.answers || []).filter(a=>deferred.has(a.key) || ['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
           const remaining=[];
           if(eligible.size)for(const frame of started){
             // Only unresolved, eligible menus may be opened, once per revision.
@@ -964,7 +971,8 @@ async function action(message) {
       const context=new URL(tab.url);context.search='';context.hash='';context.username='';context.password='';
       const attention=fields.filter(f=>!f.answered && f.repair_status!=='verified' && f.repair_status!=='optional_skip');
       const liveSummary=`Filled ${filled}; ${attention.length} need your input`;
-      const saved=message.automatic && !available.some(f=>f.result.structural)?
+      const reviewOnly=!fields.length && repaired.find(f=>f.frameId===0)?.result.next_action?.kind==='submit';
+      const saved=reviewOnly || message.automatic && !available.some(f=>f.result.structural)?
         {ok:true,summary:liveSummary,findings:attention.map(f=>({label:f.label,notes:[f.reason_code?.startsWith('provider_')?'Answer provider unavailable; retry Analyze.':'Needs your input.']}))}:
         await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic,automatic:Boolean(message.automatic)});
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
@@ -1058,7 +1066,7 @@ async function action(message) {
     const {tabResults={},autofillTabs={}}=await chrome.storage.session.get(['tabResults','autofillTabs']);
     const current=activeResults.get(message.tabId)||tabResults[message.tabId], authorized=autofillTabs[message.tabId];
     const tab=await chrome.tabs.get(message.tabId);
-    if(!current?.siteConfirmed || !authorized || current.url!==tab.url || authorized.applied || confirmingTabs.has(tab.id))
+    if(!current?.siteConfirmed || !authorized || current.url!==tab.url || authorized.applied || authorized.undone || submissionRevocations.has(tab.id) || confirmingTabs.has(tab.id))
       throw Error('Application changed. Review the employer page.');
     const [frame]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>globalThis.autoApplyContent?.confirmationEvidence()});
     if(!frame.result)throw Error('The employer confirmation is no longer visible.');
@@ -1066,28 +1074,47 @@ async function action(message) {
     try {
       if(!authorized.matched?.application_id){authorized.matched=await api('/ext/match',{url:tab.url});current.matched=authorized.matched;}
       if(!authorized.matched?.application_id)throw Error('No matching application to track');
-      await api('/ext/applied',{application_id:authorized.matched.application_id,run_id:authorized.matched.run_id,url:tab.url,evidence:frame.result});
-      authorized.applied=true;current.applied=true;current.trackingError='';await chrome.storage.session.set({autofillTabs});
+      const latest=await chrome.storage.session.get(['pendingSubmissions','autofillTabs']);
+      const binding=latest.autofillTabs?.[tab.id];
+      if(binding && !binding.matched?.application_id && !binding.undone && binding.url===authorized.url)binding.matched=authorized.matched;
+      if(!binding || binding.undone || submissionRevocations.has(tab.id) || binding.matched?.application_id!==authorized.matched.application_id ||
+         binding.matched?.run_id!==authorized.matched.run_id || binding.url!==authorized.url)throw Error('Submission binding changed.');
+      const pendingSubmissions=latest.pendingSubmissions || {};
+      if(!pendingSubmissions[tab.id]){
+        const pending={id:crypto.randomUUID(),bindingUrl:binding.url,documentId:frame.documentId,payload:{application_id:binding.matched.application_id,
+          run_id:binding.matched.run_id,url:tab.url,evidence:frame.result}};
+        binding.pendingSubmissionId=pending.id;pendingSubmissions[tab.id]=pending;
+        await chrome.storage.session.set({autofillTabs:latest.autofillTabs,pendingSubmissions});
+      }
+      await commitSubmission(tab.id,pendingSubmissions[tab.id]);
     }catch(error){current.trackingError='Tracking failed: '+error.message+'. Retry applied tracking.';}
     finally{confirmingTabs.delete(tab.id);}
     return report(current);
   }
   if (message.type === 'manual-submit') {
-    if(running || skillsRunning || batchBusy)throw Error('Wait for autofill and the run to finish.');
-    const scanned=await scan(message.tabId);
-    const {tabResults={},autofillTabs={},chromeRun={}}=await chrome.storage.session.get(['tabResults','autofillTabs','chromeRun']);
+    for(let wait=0;batchBusy && wait<20;wait++)await delay(50);
+    if(running || autofillTasks || skillsRunning || batchBusy || analysisTasks.size)throw Error('Wait for autofill to finish.');
+    const epoch=runEpoch,scanned=await scan(message.tabId);
+    const {tabResults={},autofillTabs={},chromeRun={},chromeRunPaused=false}=await chrome.storage.session.get(['tabResults','autofillTabs','chromeRun','chromeRunPaused']);
     const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId];
     const authorized=autofillTabs[scanned.tabId];
-    if(chromeRun.active || chromeRun.current || !current || current.busy || current.waiting || current.submitting ||
+    const ownsRun=chromeRun.tabId===scanned.tabId && chromeRun.current?.application_id===current?.matched?.application_id &&
+      chromeRun.current?.run_id===current?.matched?.run_id && current?.matched?.application_id!=null &&
+      authorized?.matched?.application_id===current.matched.application_id && authorized?.matched?.run_id===current.matched.run_id;
+    if(staleRun(epoch) || chromeRunPaused || (chromeRun.active || chromeRun.current) && !ownsRun || !current || current.busy || current.coverBusy || current.skillsBusy || current.waiting || current.submitting ||
        current.writing?.length || cancelledTabs.has(scanned.tabId) || scanned.url!==current.url ||
        scanned.next_action?.kind!=='submit' || message.expected?.url!==scanned.url ||
        message.expected?.step!==scanned.next_action.step || current.next_action?.step!==scanned.next_action.step)
       throw Error('Application changed or is busy. Review the employer page and run Autofill again.');
-    if(authorized){delete authorized.undone;authorized.submitAt=Date.now();authorized.submitUrl=scanned.url;await chrome.storage.session.set({autofillTabs});}
+    const [baseline]=await readFrames({target:{tabId:scanned.tabId,documentIds:[scanned.pageIdentities[0].documentId]},func:()=>globalThis.autoApplyContent?.confirmationEvidence()});
+    if(!baseline || baseline.documentId!==scanned.pageIdentities[0].documentId || staleRun(epoch))throw Error('Application changed. Review the employer page.');
+    if(authorized){submissionRevocations.delete(scanned.tabId);delete authorized.undone;authorized.submitBefore=baseline.result;authorized.submitAt=Date.now();authorized.submitUrl=scanned.url;authorized.submitDocumentId=scanned.pageIdentities?.[0]?.documentId;
+      authorized.submitApplicationId=authorized.matched?.application_id;authorized.submitRunId=authorized.matched?.run_id;await chrome.storage.session.set({autofillTabs});}
     current.submitting=true;current.progress='Submitting... Waiting for employer confirmation.';await report(current);
     try {
-      if(running || skillsRunning || batchBusy || activeResults.has(scanned.tabId) && activeResults.get(scanned.tabId)!==current || current.waiting)throw Error('Application became busy. Review the employer page.');
-      const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId},
+      const {chromeRunPaused:paused=false}=await chrome.storage.session.get('chromeRunPaused');
+      if(staleRun(epoch) || paused || cancelledTabs.has(scanned.tabId) || closedTabs.has(scanned.tabId) || running || skillsRunning || analysisTasks.size || writingTasks.has(scanned.tabId) || activeResults.has(scanned.tabId) && activeResults.get(scanned.tabId)!==current || current.waiting)throw Error('Application became busy. Review the employer page.');
+      const [frame]=await chrome.scripting.executeScript({target:{tabId:scanned.tabId,documentIds:[scanned.pageIdentities[0].documentId]},
         func:expected=>globalThis.autoApplyContent.manualSubmit(expected),args:[message.expected]});
       if(!frame.result?.clicked || frame.result.errors?.length){
         current.submitting=false;current.progress=frame.result?.errors?.join('\n') || frame.result?.message || 'Submission needs review on the employer page.';
@@ -1137,6 +1164,11 @@ async function action(message) {
     await rescanRevealed(result);
     if ((await advancePreference()).enabled && await clickNext(result,true)) return autofill(result.tabId,result.matched);
   } else if (message.type === 'undo-applied') {
+    await retireSubmissionProof(result.tabId);
+    // An HTTP write already accepted before Undo must settle first, so the
+    // explicit reversal remains the last server operation.
+    await submissionTasks.get(result.tabId)?.catch(()=>{});
+    await submissionWrites.get(result.tabId)?.catch(()=>{});
     await api('/ext/unapplied',{application_id:result.matched.application_id});result.applied=false;
     result.progress='';result.trackingError='';result.trackingNote='Tracking undone. Site submission is unchanged.';
     const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
@@ -1261,6 +1293,7 @@ async function flushRunCancel() {
 }
 function cancelOwnedRun(run) {
   const epoch=++runEpoch; // before ANY await, including storage and tab cleanup
+  const retired=retireSubmissionProof(run.tabId);
   cancelWait(run.tabId);activeResults.delete(run.tabId);
   const stopping=stopRunWork(run.tabId);
   const stopped={...run,active:false,paused:false,error:''};
@@ -1269,7 +1302,7 @@ function cancelOwnedRun(run) {
   // One durable tombstone survives worker restarts and failed HTTP responses.
   const persisted=chrome.storage.session.set({chromeRun:stopped,chromeRunPaused:false,pendingRunCancel:{run_id:run.current.run_id}});
   const saved=saveRun(stopped,true,epoch);
-  return persisted.then(()=>Promise.all([saved,flushRunCancel(),stopping]));
+  return persisted.then(()=>Promise.all([saved,flushRunCancel(),stopping,retired]));
 }
 async function refreshRunStatus() {
   const epoch=runEpoch;
@@ -1347,6 +1380,16 @@ export async function runTick() {
     if(staleRun(epoch))return;
     const {chromeRunPaused = false} = await chrome.storage.session.get('chromeRunPaused');
     if (chromeRunPaused) return;
+    const {pendingSubmissions={}}=await chrome.storage.session.get('pendingSubmissions');
+    // Verified receipts outlive tabs and owned runs. Retry each persisted proof
+    // once on the existing tick, without accessing a closed document again.
+    for(const [id,pending] of Object.entries(pendingSubmissions)){
+      const tabId=Number(id);
+      if(submissionTasks.has(tabId) || submissionWrites.has(tabId))continue;
+      await commitSubmission(tabId,pending).catch(()=>{});
+      if(staleRun(epoch))return;
+    }
+    if(submissionTasks.has(run.tabId) || submissionWrites.has(run.tabId))return;
     if(run.parkBinding){
       const tab=await chrome.tabs.get(run.tabId);
       const pages=await chrome.scripting.executeScript({target:{tabId:run.tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.repairContext()});
@@ -1445,19 +1488,28 @@ chrome.tabs.onActivated.addListener(async ({tabId}) => {
   if (tabResults[tabId]) await chrome.storage.session.set({lastResult: tabResults[tabId]});
 });
 chrome.tabs.onRemoved.addListener(async tabId => {
-  closedTabs.add(tabId);cancelWait(tabId);activeResults.delete(tabId);
-  // Ownership is kept in memory before saving/loading the application. On a
-  // restarted worker runReady restores it before any tick can claim work.
-  if(ownedRun?.tabId===tabId && ownedRun.current)await cancelOwnedRun(ownedRun).catch(console.error);
-  else {
-    await runReady;
-    if(ownedRun?.tabId===tabId && ownedRun.current)await cancelOwnedRun(ownedRun).catch(console.error);
+  closedTabs.add(tabId);
+  // Retire polls immediately; an already received proof message still gets its
+  // bounded native verification before cancellation can invalidate its owner.
+  clearTimeout(formWaits.get(tabId));formWaits.delete(tabId);formWaitTokens.delete(tabId);pendingSteps.delete(tabId);
+  await submissionTasks.get(tabId)?.catch(()=>{});
+  cancelWait(tabId);
+  await runReady;
+  const {pendingSubmissions={},autofillTabs:authorizedTabs={}}=await chrome.storage.session.get(['pendingSubmissions','autofillTabs']);
+  const pending=pendingSubmissions[tabId],authorized=authorizedTabs[tabId];
+  const preserveProof=validSubmissionProof(tabId,authorized,pending);
+  const owner=ownedRun?.tabId===tabId && ownedRun.current?ownedRun:null;
+  const matches=payload=>owner && payload?.application_id===owner.current.application_id && payload?.run_id===owner.current.run_id;
+  if(owner){
+    if(preserveProof && matches(pending.payload)){/* Retain ownership until acknowledgement. */}
+    else if(authorized?.applied && matches(authorized.matched))await runStatus(owner,runEpoch).catch(console.error);
+    else await cancelOwnedRun(owner).catch(console.error);
   }
   const {tabResults = {}} = await chrome.storage.session.get("tabResults");
   const {autofillTabs = {}} = await chrome.storage.session.get("autofillTabs");
   cancelWait(tabId);
   activeResults.delete(tabId);
-  delete tabResults[tabId]; delete autofillTabs[tabId]; pendingSteps.delete(tabId);
+  delete tabResults[tabId]; if(!preserveProof)delete autofillTabs[tabId]; pendingSteps.delete(tabId);
   const {sidebarTabs={}}=await chrome.storage.session.get("sidebarTabs");delete sidebarTabs[tabId];await chrome.storage.session.set({sidebarTabs});
   await chrome.storage.session.set({tabResults, autofillTabs});
 });
@@ -1471,6 +1523,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       // Advance the epoch before any await; in-flight fills cannot publish or open another tab.
       const current=run.current;
       if(message.type==='run-cancel' && run.current){await cancelOwnedRun(run);return ownedRun;}
+      await retireSubmissionProof(run.tabId);
       await stopRunWork(run.tabId);
       if(staleRun(commandEpoch))return run;
       await api(message.type==='run-cancel'?'/ext/run/cancel':'/ext/run/skip', message.type==='run-cancel'?{run_id:current?.run_id}:{application_id:current?.application_id,run_id:current?.run_id});
@@ -1481,7 +1534,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return run;
     }
     run.paused = Boolean(message.paused);
-    if(run.paused)await stopRunWork(run.tabId);
+    if(run.paused){
+      // Pausing revokes unverified intent across suspension/restart. Already
+      // verified pending receipts remain durable and wait for resume.
+      const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
+      for(const binding of Object.values(autofillTabs))delete binding.submitAt;
+      await chrome.storage.session.set({autofillTabs});
+      await stopRunWork(run.tabId);
+    }
     else if(run.tabId)cancelledTabs.delete(run.tabId);
     await saveRun(run,true,commandEpoch);
     if (!run.paused) runTick();
@@ -1546,6 +1606,72 @@ chrome.storage.onChanged.addListener((changes,area)=>{
     chrome.tabs.query({}).then(tabs=>tabs.filter(t=>/^https?:/.test(t.url || '')).forEach(t=>queueAutomaticAnalysis(t.id))).catch(()=>{});
   }
 });
+const submissionTasks=new Map(), submissionWrites=new Map(), submissionRevocations=new Set();
+function validSubmissionProof(tabId,binding,proof){
+  return Boolean(proof?.id && proof.payload?.application_id!=null && binding && !binding.undone && !binding.applied &&
+    !submissionRevocations.has(tabId) && binding.matched?.application_id===proof.payload.application_id &&
+    binding.matched?.run_id===proof.payload.run_id && binding.url===(proof.bindingUrl || proof.payload.url) &&
+    (!binding.pendingSubmissionId || binding.pendingSubmissionId===proof.id));
+}
+async function retireSubmissionProof(tabId){
+  if(tabId==null)return;
+  submissionRevocations.add(tabId);
+  const {autofillTabs={},pendingSubmissions={}}=await chrome.storage.session.get(['autofillTabs','pendingSubmissions']);
+  if(autofillTabs[tabId]){
+    autofillTabs[tabId].undone=true;delete autofillTabs[tabId].submitAt;delete autofillTabs[tabId].pendingSubmissionId;
+  }
+  delete pendingSubmissions[tabId];
+  await chrome.storage.session.set({autofillTabs,pendingSubmissions});
+}
+function sameWorkdayPosting(before,after){
+  try{
+    const a=new URL(before),b=new URL(after);
+    const job=path=>path.replace(/\/apply(?:\/.*)?$/i,'').replace(/\/$/,'');
+    return a.protocol==='https:' && a.origin===b.origin && /^(?:.+\.)?myworkdayjobs\.com$/.test(a.hostname) &&
+      /\/job\/.+/i.test(a.pathname) && job(a.pathname)===job(b.pathname);
+  }catch{return false;}
+}
+async function commitSubmission(tabId,proof){
+  if(submissionWrites.has(tabId))return submissionWrites.get(tabId);
+  const task=(async()=>{
+    const initial=await chrome.storage.session.get(['autofillTabs','pendingSubmissions']);
+    const binding=initial.autofillTabs?.[tabId];
+    if(initial.pendingSubmissions?.[tabId]?.id!==proof.id || !validSubmissionProof(tabId,binding,proof)){
+      // Retire invalid proofs rather than reviving them if the tab is assigned
+      // back to this application later.
+      if(initial.pendingSubmissions?.[tabId]?.id===proof.id){delete initial.pendingSubmissions[tabId];await chrome.storage.session.set({pendingSubmissions:initial.pendingSubmissions});}
+      return;
+    }
+    // The existing endpoint reconciles lost acknowledgements idempotently using
+    // the same application/run/evidence payload and duplicate-submission guard.
+    await api('/ext/applied',proof.payload);
+    const {autofillTabs={},pendingSubmissions={},tabResults={}}=await chrome.storage.session.get(['autofillTabs','pendingSubmissions','tabResults']);
+    const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];
+    const stillBound=validSubmissionProof(tabId,authorized,proof);
+    if(stillBound){authorized.applied=true;delete authorized.pendingSubmissionId;}
+    // Save the acknowledgement before any best-effort UI notification. A failed
+    // panel update must not cause a second applied request.
+    if(pendingSubmissions[tabId]?.id===proof.id)delete pendingSubmissions[tabId];
+    await chrome.storage.session.set({autofillTabs,pendingSubmissions});
+    const closed=closedTabs.has(tabId) || !await chrome.tabs.get(tabId).catch(()=>null);
+    if(closed && stillBound){
+      await runReady;
+      const {chromeRun:run}=await chrome.storage.session.get('chromeRun');
+      const owner=run?.tabId===tabId && run.current?.application_id===proof.payload.application_id && run.current?.run_id===proof.payload.run_id;
+      // Reconcile the acknowledged owner before removing its close-race marker.
+      if(owner)await runStatus(run,runEpoch).catch(()=>{});
+      if(!owner || ownedRun?.tabId!==tabId){
+        delete autofillTabs[tabId];delete tabResults[tabId];activeResults.delete(tabId);
+        await chrome.storage.session.set({autofillTabs,tabResults});
+      }
+    }
+    if(stillBound && !closed && result?.matched?.application_id===proof.payload.application_id && result?.matched?.run_id===proof.payload.run_id){
+      result.applied=true;result.trackingError='';result.progress='';await report(result).catch(()=>{});
+    }
+  })();
+  submissionWrites.set(tabId,task);
+  try{return await task;}finally{if(submissionWrites.get(tabId)===task)submissionWrites.delete(tabId);}
+}
 const confirmingTabs=new Set();
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(sender.id!==chrome.runtime.id||!sender.tab?.id)return;
@@ -1556,7 +1682,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     // Footer state is read-only, refreshed even with automatic repair disabled.
     readFrames({target:{tabId,frameIds:[sender.frameId || 0]},func:()=>globalThis.autoApplyContent?.runtimeState()}).then(async frames=>{
       let result=activeResults.get(tabId);const state=frames[0]?.result;
-      if(!result && state?.application){
+      if(!result && (state?.application || state?.navigation?.kind==='entry')){
         result={tabId,url:sender.tab.url,page:{},fields:[],pending:[],writing:[],completed:[],summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
         activeResults.set(tabId,result);
       }
@@ -1573,8 +1699,11 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
   if(!['ask-ai','sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
-  (async()=>{
-    const {autofillTabs={},tabResults={}}=await chrome.storage.session.get(['autofillTabs','tabResults']);
+  const submissionMessage=['submit-intent','submission-confirmation'].includes(message.type);
+  const prior=submissionTasks.get(tabId),epoch=runEpoch;
+  const task=(async()=>{
+    if(submissionMessage)await prior?.catch(()=>{});
+    const {autofillTabs={},tabResults={},chromeRun,chromeRunPaused=false}=await chrome.storage.session.get(['autofillTabs','tabResults','chromeRun','chromeRunPaused']);
     if(message.type==='ask-ai') {
       const scanned=await scan(tabId), key=sender.frameId+':'+message.key;
       const field=scanned.fields.find(field=>field.key===key); if(!field)return;
@@ -1605,24 +1734,66 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(field.kind!=='textarea'&&message.value!==''&&message.value!==null){await api('/ext/remember',{...field,...context(result),url:result.url,value:message.value});result.saved='Saved';}
       await report(result);return;
     }
-    if(!authorized||sender.frameId!==0||cancelledTabs.has(tabId))return;
-    if(message.type==='submit-intent'){if(message.url!==sender.tab.url || result?.url!==sender.tab.url)return;delete authorized.undone;authorized.submitAt=Date.now();authorized.submitUrl=sender.tab.url;await chrome.storage.session.set({autofillTabs});return;}
-    if(authorized.applied||authorized.undone||result?.siteConfirmed||confirmingTabs.has(tabId))return;
+    if(!authorized||sender.frameId!==0||cancelledTabs.has(tabId) || staleRun(epoch) || chromeRunPaused ||
+       (chromeRun?.active || chromeRun?.current) && (chromeRun.tabId!==tabId ||
+        chromeRun.current?.application_id!==authorized.matched?.application_id || chromeRun.current?.run_id!==authorized.matched?.run_id))return;
+    if(message.type==='submit-intent'){
+      if(message.url!==sender.tab.url || result?.url!==sender.tab.url ||
+         result.pageIdentities?.[0]?.documentId!==sender.documentId)return;
+      const [baseline]=await readFrames({target:{tabId,documentIds:[sender.documentId]},func:()=>globalThis.autoApplyContent?.submissionBaseline()}).catch(()=>[]);
+      if(staleRun(epoch) || cancelledTabs.has(tabId))return;
+      submissionRevocations.delete(tabId);delete authorized.undone;
+      // A native click can navigate before the original document can answer a
+      // read. Its already document-bound intent carries only the empty baseline
+      // needed for handoff; receipt evidence is always reread in the new DOM.
+      authorized.submitBefore=baseline?.documentId===sender.documentId?baseline.result:message.before===''?'':undefined;
+      authorized.submitAt=Date.now();authorized.submitUrl=sender.tab.url;
+      authorized.submitDocumentId=sender.documentId;authorized.submitApplicationId=authorized.matched?.application_id;
+      authorized.submitRunId=authorized.matched?.run_id;
+      await chrome.storage.session.set({autofillTabs});return;
+    }
+    if(authorized.applied||authorized.undone||submissionRevocations.has(tabId)||result?.siteConfirmed||confirmingTabs.has(tabId))return;
     const url=new URL(sender.tab.url),strong=(/^(?:.+\.)?(?:greenhouse\.io|lever\.co)$/.test(url.hostname)&&/\/(confirmation|thanks)(?:[/?#]|$)/i.test(url.pathname))||/^(?:.+\.)?ashbyhq\.com$/.test(url.hostname)&&/\/application\/.+\/submitted(?:[/?#]|$)/i.test(url.pathname);
-    if(!strong&&(!authorized.submitAt||Date.now()-authorized.submitAt>120000))return;
-    if(!message.evidence||message.url!==sender.tab.url || !result || result.matched?.application_id!==authorized.matched?.application_id || new URL(authorized.url).origin!==url.origin)return;
-    const [proof]=await chrome.scripting.executeScript({target:{tabId},func:()=>globalThis.autoApplyContent?.confirmationEvidence()});
-    if(!strong && (!proof.result || proof.result!==message.evidence))return;
-    if(confirmingTabs.has(tabId)||result.siteConfirmed)return;
+    const replacement=authorized.submitDocumentId!==sender.documentId;
+    if(!strong&&(!authorized.submitAt||Date.now()-authorized.submitAt>120000 ||
+       authorized.submitApplicationId!==authorized.matched?.application_id ||
+       authorized.submitRunId!==authorized.matched?.run_id))return;
+    // Only a recent, receipt-free explicit intent on this canonical Workday
+    // posting can cross a document boundary. Origin alone is insufficient.
+    if(!strong && replacement && (authorized.submitBefore!=='' ||
+       !sameWorkdayPosting(authorized.submitUrl,sender.tab.url) || !sameWorkdayPosting(authorized.url,sender.tab.url)))return;
+    if(!message.evidence||message.url!==sender.tab.url || !result ||
+       result.matched?.application_id!==authorized.matched?.application_id || result.matched?.run_id!==authorized.matched?.run_id ||
+       new URL(authorized.url).origin!==url.origin)return;
+    const tab=await chrome.tabs.get(tabId).catch(()=>null);
+    if(!tab || tab.url!==sender.tab.url)return;
+    const [proof]=await readFrames({target:{tabId,documentIds:[sender.documentId]},func:()=>({evidence:globalThis.autoApplyContent?.confirmationEvidence(),errors:globalThis.autoApplyContent?.validationErrors()})});
+    if(!proof || proof.documentId!==sender.documentId || proof.result?.errors?.length ||
+       !strong && (!proof.result?.evidence || proof.result.evidence!==message.evidence || proof.result.evidence===authorized.submitBefore) || staleRun(epoch))return;
+    const latest=await chrome.storage.session.get(['autofillTabs','chromeRunPaused']);
+    const binding=latest.autofillTabs?.[tabId];
+    if(confirmingTabs.has(tabId)||result.siteConfirmed || latest.chromeRunPaused || submissionRevocations.has(tabId) ||
+       !binding || binding.undone || binding.applied || binding.submitAt!==authorized.submitAt ||
+       binding.url!==authorized.url || binding.matched?.application_id!==authorized.matched?.application_id ||
+       binding.matched?.run_id!==authorized.matched?.run_id || staleRun(epoch))return;
     confirmingTabs.add(tabId);
     try{
+      if(!authorized.matched?.application_id){result.siteConfirmed=true;result.submitting=false;result.progress='';result.trackingError='No matching application to track.';await report(result);return;}
+      const pending={id:crypto.randomUUID(),documentId:sender.documentId,bindingUrl:binding.url,payload:{application_id:authorized.matched.application_id,
+        run_id:authorized.matched.run_id,url:message.url,evidence:message.evidence}};
+      const {pendingSubmissions={}}=await chrome.storage.session.get('pendingSubmissions');pendingSubmissions[tabId]=pending;
+      binding.pendingSubmissionId=pending.id;binding.submitDocumentId=sender.documentId;
+      latest.autofillTabs[tabId]=binding;
+      await chrome.storage.session.set({pendingSubmissions,autofillTabs:latest.autofillTabs});
       result.siteConfirmed=true;result.submitting=false;result.progress='';await report(result);
-      if(!authorized.matched?.application_id){result.trackingError='No matching application to track.';await report(result);return;}
-      await api('/ext/applied',{application_id:authorized.matched.application_id,run_id:authorized.matched.run_id,url:message.url,evidence:message.evidence});
-      authorized.applied=true;await chrome.storage.session.set({autofillTabs});
-      if(result){result.applied=true;result.trackingError='';result.progress='';await report(result);}
+      await commitSubmission(tabId,pending);
     }catch(error){result.trackingError='Tracking failed: '+error.message+'. Retry applied tracking.';await report(result);throw error;}finally{confirmingTabs.delete(tabId);}
-  })().then(respond,error=>respond({error:error.message}));return true;
+  })();
+  if(submissionMessage){
+    submissionTasks.set(tabId,task);
+    task.finally(()=>{if(submissionTasks.get(tabId)===task)submissionTasks.delete(tabId);}).catch(()=>{});
+  }
+  task.then(respond,error=>respond({error:error.message}));return true;
 });
 
 // Content scripts can request only bounded skill catalog operations.

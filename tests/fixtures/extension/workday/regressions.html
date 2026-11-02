@@ -1,0 +1,66 @@
+<!doctype html><html><head><title>Synthetic Workday controls</title>
+<style>body{font:16px sans-serif;margin:24px}input,button{margin:8px;padding:6px}[role=option]{padding:8px;cursor:pointer}[data-automation-id=responsiveMonikerPrompt]{border:1px solid #999;width:320px;background:white} [data-automation-id=selectedItem]{display:inline-block;padding:4px}</style>
+</head><body><main id="stage"></main><script>
+let entryClicks=0,applicationClicks=0,accountClicks=0,menuClicks=[],receiptMode='pending',nested=false;
+const degreeLabel='?Bachelor?s or Equivalent First-Degree (ISCED 6: BA, BSc, BEng, LLB, etc.)?';
+function show(view){
+  document.querySelectorAll('[data-popup]').forEach(n=>n.remove());
+  const progress='<h2 data-automation-id="progressBarActiveStep">'+(view==='review'?'Review':'Application Questions')+'</h2>';
+  if(view==='landing')stage.innerHTML='<section data-automation-id="jobPostingPage"><h1>Data Science Intern</h1><a id="entry" data-automation-id="adventureButton" role="button" href="'+location.pathname+'/apply">Apply</a><button data-automation-id="utilityButtonSignIn">Sign in</button></section>';
+  if(view==='landing')entry.onclick=e=>{e.preventDefault();entryClicks++;show('source')};
+  if(view==='source')stage.innerHTML=progress+'<div data-automation-id="formField-source"><label for="source--source">How Did You Hear About Us?</label><div data-automation-id="multiSelectContainer"><div data-automation-id="multiselectInputContainer"><div data-automation-id="monikerSearchBox"><input id="source--source" data-automation-id="searchBox"></div></div><div data-automation-id="selectedItemList" role="listbox"></div></div></div>';
+  if(view==='choices')stage.innerHTML=progress+'<div data-automation-id="formField-identity"><label for="identity">Identity verification</label><button type="button" aria-haspopup="listbox" aria-expanded="false" id="identity">Select One</button></div><div data-automation-id="formField-degree"><label for="education-51--degree">Degree</label><button type="button" name="degree" aria-label="Degree Select One Required" id="education-51--degree">Select One</button></div>';
+  if(view==='skills')stage.innerHTML=progress+'<div data-automation-id="formField-skills"><label for="skills">Skills</label><div data-automation-id="multiSelectContainer"><input id="skills" data-automation-id="searchBox"><div data-automation-id="selectedItemList" role="listbox"></div></div></div>';
+  if(view==='resume')stage.innerHTML=progress+upload('resumeAttachments--attachments','Resume/CV')+upload('coverAttachments--attachments','Cover Letter');
+  if(view==='review')stage.innerHTML=progress+'<div id="feedback"></div><button type="button" id="final" data-automation-id="pageFooterNextButton">Submit</button>';
+  if(view==='review')final.onclick=()=>{applicationClicks++;if(receiptMode==='success')receipt();if(receiptMode==='invalid')feedback.innerHTML='<div role="alert">Required information missing</div>'};
+  if(view==='account')stage.innerHTML='<div data-automation-id="signInContent"><h3>Sign in</h3><form data-automation-id="signInFormo" id="accountForm" onsubmit="event.preventDefault()"><label>Email Address<input id="email" type="email" required autocomplete="username"></label><label>Password<input id="password" type="password" required autocomplete="current-password"></label></form><button type="button" id="primary" data-automation-id="signInSubmitButton" onclick="accountClicks++">Sign in</button></div>';
+  stage.querySelectorAll('input[data-automation-id="searchBox"]').forEach(input=>{
+    input.onclick=()=>openPrompt(input);
+    input.onkeydown=e=>{if(['ArrowDown','Enter'].includes(e.key)){e.preventDefault();openPrompt(input)}};
+  });
+  if(view==='choices'){
+    identity.onclick=()=>openChoices(identity,['Yes','No']);
+    document.getElementById('education-51--degree').onclick=e=>openChoices(e.currentTarget,[degreeLabel,'Master of Science']);
+  }
+  stage.querySelectorAll('input[type=file]').forEach(input=>input.onchange=()=>{
+    const status=input.closest('[data-automation-id="attachments-FileUpload"]').querySelector('[role="status"]');
+    status.textContent=input.files[0]?.name || '';
+  });
+}
+function upload(id,label){return '<div data-automation-id="attachments-FileUpload" aria-labelledby="'+id+'-label"><label id="'+id+'-label">'+label+'</label><div><input type="file" data-automation-id="file-upload-input-ref" style="width:0;height:0;opacity:0"><button type="button" id="'+id+'" data-automation-id="select-files">Select files</button><span role="status"></span></div></div>'}
+function popup(input){
+  let existing=document.querySelector('[data-popup="current"]');if(existing)return existing;
+  const box=document.createElement('div');box.dataset.popup='current';box.dataset.automationId='responsiveMonikerPrompt';
+  box.innerHTML='<div role="listbox" data-automation-id="activeListContainer"></div>';document.body.append(box);return box;
+}
+function row(name,branch=false){
+  const item=document.createElement('div');item.setAttribute('role','option');item.dataset.automationId='menuItem';
+  item.setAttribute('aria-label',name+(branch?'':' not checked'));
+  if(branch)item.setAttribute('aria-haspopup','listbox');
+  item.innerHTML=(branch?'':'<span data-automation-id="checkboxPanel"></span>')+'<span data-automation-id="promptOption"></span>'+(branch?'<span data-automation-id="chevronRight">›</span>':'');
+  item.querySelector('[data-automation-id="promptOption"]').textContent=name;return item;
+}
+function openPrompt(input){
+  const box=popup(input),list=box.firstElementChild;list.replaceChildren();
+  if(input.id==='skills'){
+    const query=input.value,names=query==='C'?['C','C++']:query==='C++'?['C++','C']:['JavaScript'];
+    list.style.cssText='height:60px;overflow:auto';
+    const render=(values,spacer)=>{list.replaceChildren();values.forEach(name=>appendLeaf(input,list,name));if(spacer){const pad=document.createElement('div');pad.style.height='200px';list.append(pad)}};
+    render(names,true);list.onscroll=()=>{if(query==='Java' && list.scrollTop>0)render(['Java'],false)};
+  }else if(nested){const category=row('Job Board',true);category.onclick=()=>{menuClicks.push('Job Board');list.replaceChildren();appendLeaf(input,list,'Other')};list.append(category)}
+  else appendLeaf(input,list,'Other');
+}
+function appendLeaf(input,list,name){const item=row(name);item.onclick=()=>{
+  menuClicks.push(name);const pill=document.createElement('span');pill.dataset.automationId='selectedItem';pill.textContent=name;
+  input.closest('[data-automation-id="multiSelectContainer"]').querySelector('[data-automation-id="selectedItemList"]').append(pill);
+  input.value='';item.setAttribute('aria-checked','true');
+};list.append(item)}
+function openChoices(button,names){const box=popup(button),list=box.firstElementChild;list.replaceChildren();button.setAttribute('aria-expanded','true');
+  names.forEach(name=>{const item=row(name);item.onclick=()=>{button.textContent=name;menuClicks.push(name);button.setAttribute('aria-expanded','false')};list.append(item)})}
+// Deliberately ignore Escape. Only a real outside event dismisses the portal.
+document.addEventListener('mousedown',e=>{if(e.target===document.body)document.querySelector('[data-popup="current"]')?.remove()});
+function staleMenu(){const box=document.createElement('div');box.dataset.popup='stale';box.innerHTML='<div role="listbox" data-automation-id="activeListContainer"><div role="option" data-automation-id="menuItem">Prefer not to answer</div></div>';document.body.append(box)}
+function receipt(text='You have successfully submitted your application'){feedback.innerHTML='<div role="status" data-automation-id="applicationConfirmation"></div>';feedback.firstElementChild.textContent=text}
+show(window.initialView || 'review');
+</script></body></html>
