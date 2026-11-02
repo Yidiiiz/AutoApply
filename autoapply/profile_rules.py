@@ -39,6 +39,53 @@ def _get(profile, path):
     return node
 
 
+def completed_education(label):
+    text = _norm(label)
+    return bool(re.search(r'\b(?:degree|qualifications?|level of education)\b', text)
+                and re.search(r'\b(?:highest|achieved|completed|awarded|earned)\b', text))
+
+
+def preference_boolean(label):
+    """Return an explicit preference path and question polarity, never a default."""
+    text = _norm(label)
+    if (re.search(r'\bprivacy (?:policy|notice)\b', text)
+            and re.search(r'\bread\b', text) and re.search(r'\bunderstand\b', text)
+            and not re.search(r'\b(?:not|disagree|waive|release|certify|accurate)\b', text)):
+        return 'application_preferences.ordinary_policy_acknowledgement', False
+    if re.search(r'\b(?:sms|text messages?|whatsapp)\b', text):
+        # A future right to withdraw is boilerplate, not the requested action.
+        text = re.sub(r'\b(?:i|you) (?:can|may) opt out at any time\b', '', text)
+        if re.search(r'\b(?:consent|receive|contact|opt|agree|subscribe)\b', text):
+            remaining, count = re.subn(
+                r'\b(?:opt out|unsubscribe|(?:do not|don t) (?:contact|receive)|'
+                r'agree not to receive|decline(?: to receive)?)\b', '', text)
+            # Mixed requests and unsupported negation need the user's interpretation.
+            if (count and re.search(r'\b(?:receive|contact|reach|subscribe|opt in)\b', remaining)
+                    or re.search(r'\b(?:not|never|no|cannot)\b', remaining)):
+                return 'application_preferences.recruiting_sms_whatsapp', None
+            negative = bool(count)
+            return 'application_preferences.recruiting_sms_whatsapp', negative
+        return 'application_preferences.recruiting_sms_whatsapp', None
+    return None, None
+
+
+def primary_graduation_matches(label, profile):
+    """A primary program date cannot establish another qualification's date."""
+    text = _norm(label)
+    if not re.search(r'\bgraduat\w*\b', text):
+        return True
+    if re.search(r'\b(?:previous|prior|past|other|another)\b', text):
+        return False
+    primary = _norm(str(_get(profile, 'education.degree') or '') + ' ' +
+                    str(_get(profile, 'education.school') or ''))
+    for qualification in (r'high school|secondary school', r'bachelor\w*|undergraduate',
+                          r'master\w*', r'doctor\w*|phd|ph d', r'associate\w*'):
+        if re.search(r'\b(?:' + qualification + r')\b', text) and not re.search(
+                r'\b(?:' + qualification + r')\b', primary):
+            return False
+    return True
+
+
 def fit(value, options):
     """Fit a profile value to one live option, tolerant of phone codes and abbreviations."""
     if not options:
@@ -143,8 +190,11 @@ def _skill_level(text, options, profile):
 def resolve(label, kind, options, profile):
     """Return a value fitted to the options, or None when no rule applies."""
     text = _norm(label)
-    if not text:
+    if not text or not primary_graduation_matches(label, profile):
         return None
+    if completed_education(label):
+        value = _get(profile, 'education.highest_completed_degree')
+        return fit(value, options) if value else None
     from .concepts import canonical_key
     from .disclosures import employment_restriction
     if employment_restriction(label):

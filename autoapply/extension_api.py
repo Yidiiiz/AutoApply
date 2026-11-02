@@ -82,11 +82,14 @@ def _question(field):
         raise SettingsRejected('Each field needs a label')
     kind, options = field.get('kind', 'text'), field.get('options', [])
     maximum = field.get('max_length')
+    minimum_choices, maximum_choices = field.get('min_selections'), field.get('max_selections')
     if (not isinstance(kind, str) or kind not in KINDS or not isinstance(options, list) or not all(isinstance(v, str) for v in options)
             or type(field.get('required', False)) is not bool
             or maximum is not None and (type(maximum) is not int or maximum < 0)
             or not isinstance(field.get('key', field['label']), str)
-            or not isinstance(field.get('section', ''), str)):
+            or not isinstance(field.get('section', ''), str)
+            or any(v is not None and (type(v) is not int or not 0 <= v <= 500) for v in (minimum_choices, maximum_choices))
+            or minimum_choices is not None and maximum_choices is not None and minimum_choices > maximum_choices):
         raise SettingsRejected('Invalid field kind, options, required, key or max_length')
     if kind == 'checkbox' and len(options) > 1 and field.get('multiple') is True:
         kind = 'multiselect'
@@ -97,7 +100,8 @@ def _question(field):
     if kind == 'text' and normalize(label).strip(' *:') == 'current location':
         label = 'City'
     return Question(field.get('key', field['label']), label, kind,
-                    field.get('required', False), options, maximum)
+                    field.get('required', False), options, maximum,
+                    min_selections=minimum_choices, max_selections=maximum_choices)
 
 
 def _education_date_part(q, field, profile):
@@ -163,10 +167,13 @@ def _repeatable_answer(q, field, profile):
 
 
 def _graduation_answer(q, field, profile):
-    if q.kind not in {'text', 'date', 'select', 'combobox'} or not re.search(
-            r'\bwhen\b.*\bgraduate\b|\b(?:expected |anticipated |projected )?graduation date\b', normalize(q.label)):
+    from .profile_rules import primary_graduation_matches
+    if not primary_graduation_matches(q.label, profile):
         return None
-    if re.search(r'\b(month|year)\b', normalize(q.label)):
+    if q.kind not in {'text', 'number', 'date', 'select', 'radio', 'combobox'} or not re.search(
+            r'\bwhen\b.*\bgraduate\b|\b(?:expected |anticipated |projected )?graduation\b', normalize(q.label)):
+        return None
+    if re.search(r'\bmonth\b', normalize(q.label)):
         return None
     raw = str(profile.get('education', {}).get('graduation_date') or '')
     parsed = parse_profile_date(raw)
@@ -181,9 +188,14 @@ def _graduation_answer(q, field, profile):
     if q.options:
         value = next((v for candidate in candidates
                       if (v := answers.fit_options(candidate, q.options)) is not None), None)
+        if value is None:
+            years = [o for o in q.options if normalize(o) == year or
+                     (band := re.fullmatch(r'(\d{4})\s*(?:-|–|—|to)\s*(\d{4})', o.strip()))
+                     and int(band[1]) <= parsed.year <= int(band[2])]
+            value = years[0] if len(years) == 1 else None
     else:
         hint = str(field.get('placeholder') or '') + ' ' + q.label
-        value = (parsed.isoformat() if q.kind == 'date' else
+        value = (parsed.isoformat() if q.kind == 'date' else year if q.kind == 'number' or re.search(r'\byear\b', normalize(q.label)) else
                  short if re.search(r'mmm[-/ ]yy\b', hint, re.I) else
                  month + '/' + day + '/' + year if re.search(r'\bdd\b', hint, re.I) else
                  month + '/' + year if re.search(r'\bmm[/ -]yyyy\b', hint, re.I) else
@@ -706,55 +718,92 @@ def snapshot(dashboard, payload):
     return dict(ok=True, filename=filename, repair=repair)
 
 
-def _choice_answer(dashboard, q, resolution, profile):
-    """One cached interpretation through the existing writer; choices are never prose."""
+REPAIR_FIELD_LIMIT = 20
+
+
+def _repair_batch(dashboard, pending, revision):
+    """Wait with no Settings mutex or database connection; validate before reuse."""
     from .profile_snapshot import fingerprint
-    descriptor = resolution.descriptor
-    if (descriptor.semantic_key != 'UNKNOWN_FIELD' or not q.options
-            or q.kind not in {'multiselect', 'select', 'radio', 'combobox'}
-            or descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}):
-        return None
-    # Undefined legal, identity and demographic claims must stay with the applicant.
-    if re.search(r'\b(?:agree\w*|restrict\w*|legal|consent|certify|citizen\w*|sponsor\w*|visa|gender|race|ethnic\w*|disab\w*|veteran|sexual|medical)\b', normalize(q.label)):
-        return None
-    facts = {key: profile[key] for key in ('languages', 'skills', 'skill_categories',
-             'education', 'career_interests') if profile.get(key)}
-    preferences = profile.get('application_preferences', {})
-    for key in ('role_preferences', 'internship_cohort', 'career_goal'):
-        if preferences.get(key):
-            facts['application_preferences.' + key] = preferences[key]
-    if not facts:
-        return None
-    cache_key = fingerprint([descriptor.signature, resolution.profile_revision, facts])
-    cache = getattr(dashboard, '_ext_choice_answers', {})
-    if cache_key in cache:
-        return cache[cache_key]
-    answer = None
-    try:
-        result = dashboard.run_writing(dict(task='choice_interpret', profile=facts,
-            question=q.label, options=q.options, job={}, timeout_seconds=8,
-            instruction=('Interpret this choice question only from explicit supplied profile facts. '
-                'Omission is not evidence of a negative fact. Do not infer unlisted abilities. '
-                'Return a JSON object with choices (exact offered strings), '
-                'fact_ids (nonempty supplied profile keys supporting the choices), and needs_input. '
-                'If ambiguous set needs_input true and choices empty. None is exclusive. '
-                'Do not write prose. Choose one unless multiple is true.'),
-            multiple=q.kind == 'multiselect'))
-        proposed = result
-        choices, ids = proposed.get('choices'), proposed.get('fact_ids')
-        if (proposed.get('needs_input') is False and isinstance(choices, list) and choices
-                and isinstance(ids, list) and ids and all(isinstance(k, str) and k in facts for k in ids)):
-            value = choices if q.kind == 'multiselect' else choices[0] if len(choices) == 1 else None
-            answers.validate_answer(q, value)
-            answer = Answer(value, 'grounded_ai:choice', evidence=ids,
-                            provenance={'rule': 'validated-profile-choice'})
-    except Exception:
-        pass  # Unavailable/invalid/ambiguous interpretation remains visible for user input.
-    if len(cache) >= 64:
-        cache.clear()
-    cache[cache_key] = answer
-    dashboard._ext_choice_answers = cache
-    return answer
+    request_fields = [dict(key=q.key, label=q.label, kind=q.kind, required=q.required,
+                           options=q.options, max_length=min(q.max_length if q.max_length is not None else 1000, 1000),
+                           min_selections=q.min_selections, max_selections=q.max_selections,
+                           fact_ids=list(facts)) for _, q, _, facts in pending]
+    facts = {key: value for _, _, _, supplied in pending for key, value in supplied.items()}
+    cache_key = fingerprint([revision, [(d.signature, q.key) for _, q, d, _ in pending], request_fields, facts])
+    with dashboard.settings.mutex:
+        cache = getattr(dashboard, '_ext_answer_repairs', {})
+        cached = cache.get(cache_key)
+    proposals, failure = {}, None
+    if cached and time.monotonic() < cached[0]:
+        proposals, failure = cached[1:]
+    else:
+        try:
+            response = dashboard.run_writing(dict(task='answer_repair', facts=facts,
+                fields=request_fields, job={}, timeout_seconds=8))
+        except Exception as exc:
+            failure = ('provider_invalid' if getattr(exc, 'status', None) == 400
+                       or getattr(exc, 'category', None) == 'MALFORMED_RESPONSE' else 'provider_unavailable')
+        else:
+            try:
+                if not isinstance(response, dict) or set(response) != {'answers'}:
+                    raise ValueError('Invalid batch object')
+                rows = response['answers']
+                expected = {q.key: (q, supplied) for _, q, _, supplied in pending}
+                if not isinstance(rows, list) or len(rows) != len(expected):
+                    raise ValueError('Invalid batch cardinality')
+                for row in rows:
+                    if not isinstance(row, dict) or set(row) != {'key', 'value', 'fact_ids', 'needs_input', 'reason'}:
+                        raise ValueError('Invalid answer object')
+                    key, value, ids = row['key'], row['value'], row['fact_ids']
+                    if not isinstance(key, str) or key not in expected or key in proposals:
+                        raise ValueError('Unexpected or duplicate key')
+                    q, supplied = expected[key]
+                    if (type(row['needs_input']) is not bool or not isinstance(ids, list)
+                            or not all(isinstance(k, str) and k in supplied for k in ids)
+                            or len(ids) != len(set(ids))
+                            or row['reason'] not in {'mapped', 'needs_fact', 'ambiguous', 'unsupported'}):
+                        raise ValueError('Invalid evidence or reason')
+                    if row['needs_input']:
+                        if value is not None or row['reason'] == 'mapped':
+                            raise ValueError('Conflicting abstention')
+                        proposals[key] = (None, 'needs_fact' if row['reason'] != 'unsupported' else 'unsupported_field', ids)
+                        continue
+                    if not ids or row['reason'] != 'mapped':
+                        raise ValueError('Missing evidence')
+                    selected = value if isinstance(value, list) else [value]
+                    if q.options and any(isinstance(v, str) and re.fullmatch(
+                            r'(?:please )?(?:select one|choose an option)[.!…]*', v.strip(), re.I)
+                            for v in selected):
+                        raise ValueError('Placeholder is not an answer')
+                    if q.kind == 'checkbox' and len(q.options) <= 1:
+                        if type(value) is not bool:
+                            raise ValueError('Checkbox needs boolean')
+                    else:
+                        answers.validate_answer(q, value)
+                        if q.kind == 'multiselect':
+                            if not value or len(value) > 20:
+                                raise ValueError('Invalid selection count')
+                        elif (not value.strip() or len(value) > min(q.max_length if q.max_length is not None else 1000, 1000)):
+                            raise ValueError('Invalid text length')
+                    proposals[key] = (value, 'answer_available', ids)
+            except (ValueError, TypeError, KeyError):
+                proposals, failure = {}, 'provider_invalid'
+        with dashboard.settings.mutex:
+            cache = getattr(dashboard, '_ext_answer_repairs', {})
+            if len(cache) >= 64:
+                cache.clear()
+            # Briefly cache failures too, so repeated Analyze cannot spin on a timeout.
+            cache[cache_key] = (time.monotonic() + (15 if failure else 300), proposals, failure)
+            dashboard._ext_answer_repairs = cache
+    with dashboard.settings.mutex, dashboard.connection() as db:
+        current = answers.AnswerResolver(dashboard.config, db)
+        try:
+            current.refresh()
+        except ValueError:
+            return {}, 'stale_data'
+        if current._revision != revision:
+            return {}, 'stale_data'
+    return proposals, failure
 
 
 def resolve_answers(dashboard, payload):
@@ -774,8 +823,9 @@ def resolve_answers(dashboard, payload):
         if 'job_id' in app and len(description) > len(app.get('description') or ''):
             app['description'] = description
         resolver = answers.AnswerResolver(dashboard.config, db)
-        profile = dashboard.config.profile
+        profile = resolver.refresh().facts
         result = []
+        pending = []
         for q, field in zip(questions, fields):
             from .question_keywords import date_part_label, unusable_label, robot_only
             if robot_only(q.label) or robot_only(field.get("data-automation-id")) or robot_only(field.get("name")):
@@ -784,7 +834,7 @@ def resolve_answers(dashboard, payload):
             if (q.kind in {'select', 'radio', 'multiselect'} or
                     q.kind == 'combobox' and field.get('options_observed') is True and not field.get('options_partial')) and not q.options:
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP',
-                                   reason='No offered options are available.'))
+                                   reason='No offered options are available.', reason_code='no_offered_options'))
                 continue
             if unusable_label(q.label):
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
@@ -811,8 +861,9 @@ def resolve_answers(dashboard, payload):
                 continue
             education_part, education_answer = _education_date_part(q, field, profile)
             repeated, repeated_answer = _repeatable_answer(q, field, profile)
-            if date_part_label(q.label) and not education_part and not repeated:
-                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
+            graduation = _graduation_answer(q, field, profile)
+            if date_part_label(q.label) and not education_part and not repeated and graduation is None:
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT', reason_code='needs_fact'))
                 continue
             resolution = resolver.resolve_result(q, app)
             answer = education_answer if education_part else resolution.answer
@@ -824,8 +875,7 @@ def resolve_answers(dashboard, payload):
                 value = answers.format_start_date(profile.get('application_preferences', {}).get('desired_start_date'),
                                                  q.kind, str(field.get('placeholder') or '') + ' ' + q.label)
                 answer = Answer(value, 'profile:application_preferences.desired_start_date') if value is not None else None
-            graduation = _graduation_answer(q, field, profile)
-            if graduation is not None:
+            if graduation is not None and resolution.descriptor.policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}:
                 answer = graduation
             # Remember requests omit required/length. Only verified memory may
             # reuse that descriptor, and the actual field is validated below.
@@ -848,6 +898,8 @@ def resolve_answers(dashboard, payload):
                                 and isinstance(value, str) and re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])(?:-01)?', value)):
                             answer = Answer(value, 'verified_memory')
                             break
+            if resolution.descriptor.policy == 'DO_NOT_ANSWER':
+                answer = None
             if answer:
                 try:
                     if q.kind == 'checkbox' and isinstance(answer.value, bool) and len(q.options) <= 1:
@@ -860,14 +912,54 @@ def resolve_answers(dashboard, payload):
                         raise ValueError('Field cannot accept text')
                 except (ValueError, TypeError):
                     answer = None
-            if answer is None and not repeated and not education_part:
-                answer = _choice_answer(dashboard, q, resolution, resolver.snapshot.facts)
             status = ('RESOLVED' if answer else 'NEEDS_WRITING' if not field.get('section_missing_date') and answers.is_writing_question(q)
                       else 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP')
+            reason_code = 'answer_available' if answer else 'needs_writing' if status == 'NEEDS_WRITING' else 'needs_fact'
+            descriptor = resolution.descriptor
+            if answer is None:
+                if descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'} or descriptor.semantic_key == 'REJECTED_FIELD':
+                    if descriptor.policy == 'DO_NOT_ANSWER':
+                        reason_code, status = 'optional_skip', 'OPTIONAL_SKIP'
+                    elif descriptor.semantic_key == 'REJECTED_FIELD':
+                        reason_code = 'unsupported_field'
+                    else:
+                        reason_code = 'needs_fact'
+                        status = 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'
+                elif not q.required and descriptor.semantic_key.startswith('demographics.'):
+                    reason_code = 'optional_skip'
+                elif q.kind in {'select', 'radio', 'combobox', 'multiselect'} and not q.options:
+                    reason_code = 'no_offered_options'
+                elif not repeated and not education_part and not field.get('section_missing_date'):
+                    facts = answers.repair_facts(q, descriptor, profile)
+                    if facts:
+                        if (len(pending) < REPAIR_FIELD_LIMIT and len(q.label) <= 1000
+                                and len(q.options) <= 100 and all(len(o) <= 300 for o in q.options)
+                                and sum(other.key == q.key for other in questions) == 1):
+                            pending.append((len(result), q, descriptor, facts))
+                        else:
+                            reason_code = 'unsupported_field'
             result.append(dict(key=q.key, value=answer.value if answer else None,
-                               source=answer.source if answer else '', status=status,
+                               source=answer.source if answer else '', status=status, reason_code=reason_code,
+                               **({'evidence': answer.evidence} if answer and answer.evidence else {}),
                                **({'reason': 'No offered location matches saved preferences.'} if answer is None
                                   and re.fullmatch(r'what is your top location preference', normalize(q.label)) else {})))
+        revision = resolver._revision
+    if pending:
+        proposals, failure = _repair_batch(dashboard, pending, revision)
+        for index, q, _, _ in pending:
+            row = result[index]
+            if failure:
+                row['reason_code'] = failure
+                continue
+            value, reason_code, evidence = proposals[q.key]
+            row['reason_code'] = reason_code
+            if value is not None:
+                row.update(value=value, source='grounded_ai:answer_repair', status='RESOLVED', evidence=evidence,
+                           profile_revision=revision[0], facts_revision=revision[1])
+                row.pop('reason', None)
+    for row in result:
+        row.setdefault('reason_code', 'answer_available' if row['status'] in {'RESOLVED', 'FILE'} else
+                       'optional_skip' if row['status'] == 'OPTIONAL_SKIP' else 'unsupported_field')
     if 'job_id' in app and description:
         dashboard.cache_extension_description(app['job_id'], description)
     return dict(answers=result)

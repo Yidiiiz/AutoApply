@@ -227,6 +227,58 @@ def from_row(row):
                     min_selections=row.get('min_selections'), max_selections=row.get('max_selections'))
 
 
+def repair_facts(q, descriptor, profile):
+    """Small per-question evidence whitelist for wording repair, never a profile dump."""
+    from .concepts import REGISTRY, demographic_value
+    from .profile_rules import completed_education, preference_boolean, primary_graduation_matches
+    text = question_text(q.label)
+    if (descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}
+            or descriptor.semantic_key == 'REJECTED_FIELD'
+            or q.kind not in {'text', 'textarea', 'select', 'radio', 'combobox', 'multiselect', 'checkbox'}
+            or is_writing_question(q)
+            or re.search(r'\b(?:password|credential|login|sign in|one time|verification code|captcha|honeypot)\b', text)
+            or not q.required and descriptor.semantic_key.startswith('demographics.')):
+        return {}
+    if not primary_graduation_matches(q.label, profile):
+        return {}
+    path, negative = preference_boolean(q.label)
+    if path and negative is None:
+        return {}
+    if completed_education(q.label):
+        paths = ['education.highest_completed_degree']
+    elif path:
+        paths = [path]
+    elif re.search(r'\bspouse\b', text) and re.search(r'\b(?:military|veteran|armed forces)\b', text):
+        paths = ['demographics.military_spouse']
+    elif re.search(r'\bnational guard\b|\breserves\b', text):
+        paths = ['demographics.national_guard_reserves']
+    elif re.search(r'\bai\b.*\b(?:review|screen|process)\w*\b', text):
+        paths = ['application_preferences.employer_ai_review_opt_out']
+    else:
+        spec = REGISTRY.get(descriptor.semantic_key)
+        if (descriptor.semantic_key.startswith('demographics.')
+                and demographic_value(profile, descriptor.semantic_key) == 'decline'):
+            return {}
+        if spec and spec.profile_path and not spec.special_policy:
+            paths = [spec.profile_path]
+        elif re.search(r'\b(?:legal|immigration|visa status|sponsor\w*|citizen\w*|certif\w*|attest\w*|military|veteran|gender|race|ethnic\w*|disab\w*|consent|privacy|opt out)\b', text):
+            return {}
+        elif re.search(r'\b(?:office|location)\w*\b', text) and re.search(r'\b(?:prefer\w*|top)\b', text):
+            paths = ['locations.ordered_preferences']
+        elif re.search(r'\b(?:graduat\w*)\b', text):
+            paths = ['education.graduation_date']
+        elif re.search(r'\b(?:skills?|technolog\w*|programming|tools?)\b', text):
+            paths = ['skills']
+        elif re.search(r'\blanguages?\b', text):
+            paths = ['languages']
+        else:
+            return {}
+    # Large free-form facts are not suitable for this bounded mapping request.
+    return {path: value for path in paths if (value := fact(profile, path)) is not None
+            and value != '' and value != [] and value != ()
+            and len(json.dumps(value, default=str)) <= 4000}
+
+
 class AnswerResolver:
     def __init__(self, config, db):
         self.config, self.db = config, db
@@ -493,6 +545,46 @@ class AnswerResolver:
             else:
                 return Answer(value, 'verified_memory', provenance={'memory_id': row['id'],
                     'reference': json.loads(row.get('provenance') or '{}')})
+        from .profile_rules import completed_education, preference_boolean, primary_graduation_matches
+        if not primary_graduation_matches(q.label, profile):
+            return None
+        if completed_education(q.label) and mapped_key != REJECTED_FIELD:
+            if policy == 'REQUIRE_USER':
+                return None
+            path = 'education.highest_completed_degree'
+            value = fact(profile, path)
+            value = fit_options(value, q.options) if value else None
+            return Answer(value, 'profile:' + path, evidence=[path]) if value else None
+        preference_path, negative = preference_boolean(q.label)
+        if preference_path and mapped_key != REJECTED_FIELD:
+            supplied = fact(profile, preference_path)
+            if type(supplied) is not bool or negative is None or policy == 'REQUIRE_USER':
+                return None
+            value = not supplied if negative else supplied
+            if q.kind == 'checkbox' and len(q.options) <= 1:
+                return Answer(value, 'profile:' + preference_path, evidence=[preference_path])
+            selected = fit_options('Yes' if value else 'No', q.options)
+            if selected is not None:
+                return Answer(selected, 'profile:' + preference_path, evidence=[preference_path])
+            return None
+        top = re.search(r'\btop (\d+|two|three) (?:office )?locations?\b', question_text(q.label))
+        if top and mapped_key != REJECTED_FIELD:
+            if policy == 'REQUIRE_USER':
+                return None
+            count = {'two': 2, 'three': 3}.get(top[1], int(top[1]) if top[1].isdigit() else 0)
+            if not 1 <= count <= 10 or q.kind not in {'text', 'textarea', 'multiselect'}:
+                return None
+            from .dropdowns import ordered_locations, location_identity, ORDERED_LOCATIONS_SETTING
+            preferences = ordered_locations(profile, self._settings.get(ORDERED_LOCATIONS_SETTING))
+            selected = []
+            for preferred in preferences:
+                matches = [o for o in q.options if location_identity(o) == location_identity(preferred)] if q.options else [preferred]
+                if len(matches) == 1 and matches[0] not in selected:
+                    selected.append(matches[0])
+                if len(selected) == count:
+                    value = selected if q.kind == 'multiselect' else '; '.join(selected)
+                    return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences'])
+            return None
         # Substantive agreement/existence questions may only use exact scoped user memory.
         if mapped_key == 'employment_restrictions':
             return None

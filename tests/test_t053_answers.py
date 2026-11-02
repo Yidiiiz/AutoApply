@@ -119,9 +119,14 @@ def test_ordered_preference_remember_pipeline(http_dashboard, config, expedia_pr
 ])
 def test_unknown_choices_use_grounded_writer_and_validate(http_dashboard, expedia_profile, monkeypatch, proposal, expected):
     requests = []
+    with http_dashboard[1].connection() as db:
+        before = db.answer_revision()
+        saved = db.one('SELECT COUNT(*) AS n FROM known_answers')['n']
     def writer(payload):
         requests.append(payload)
-        return proposal
+        return {'answers': [dict(key='unknown', value=None if proposal['needs_input'] else proposal['choices'],
+                                 fact_ids=proposal['fact_ids'], needs_input=proposal['needs_input'],
+                                 reason='needs_fact' if proposal['needs_input'] else 'mapped')]}
     monkeypatch.setattr(http_dashboard[1], 'run_writing', writer)
     payload = dict(url='https://fixture.test/job', fields=[dict(key='unknown', label='Which of these tools do you use?', kind='checkbox', multiple=True, required=True, options=['Python', 'Rust', 'None of the Above'])])
     for _ in range(2):
@@ -129,10 +134,16 @@ def test_unknown_choices_use_grounded_writer_and_validate(http_dashboard, expedi
         assert status == 200 and data['answers'][0]['value'] == expected
         assert data['answers'][0]['status'] == ('RESOLVED' if expected else 'NEEDS_INPUT')
     assert len(requests) == 1
-    assert requests[0]['task'] == 'choice_interpret'
-    assert requests[0]['options'] == payload['fields'][0]['options']
-    assert list(requests[0]['profile']['languages']) == expedia_profile['languages']
-    assert 'Do not write prose' in requests[0]['instruction']
+    assert requests[0]['task'] == 'answer_repair'
+    assert len(requests[0]['fields']) == 1
+    assert requests[0]['fields'][0]['options'] == payload['fields'][0]['options']
+    assert requests[0]['fields'][0]['fact_ids'] == ['skills']
+    assert set(requests[0]['facts']) == {'skills'}
+    assert list(requests[0]['facts']['skills']) == expedia_profile['skills']
+    assert 'profile' not in requests[0] and requests[0]['job'] == {}
+    with http_dashboard[1].connection() as db:
+        assert db.answer_revision() == before
+        assert db.one('SELECT COUNT(*) AS n FROM known_answers')['n'] == saved
 
 
 def test_unknown_choice_provider_unavailable_stays_pending(http_dashboard, expedia_profile, monkeypatch):
