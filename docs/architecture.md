@@ -51,7 +51,7 @@ One asyncio worker owns browser application processing. Discord handles interact
 | `retry`, `handoff` | Explicit retry categories, preserved manual tabs, diagnostics and resume |
 | `cursor` | Serialized physical input, target geometry, planning, ownership and cancellation |
 
-Schema v2 preserves queue states and adds independent application, security and verification dimensions. A confirmed submission is immutable across later verification failure. The worker owns manual tabs in memory; durable resume requests connect CLI/Discord to the same session. A restart retains the hold but does not claim to recover live form contents. See [SECURITY.md](SECURITY.md) for the state mapping, provider matrix, retry policy and operator workflow.
+Schema v2 preserves queue states and adds independent application, security and verification dimensions. A confirmed submission is immutable across later verification failure. The worker owns manual tabs in memory; durable resume requests connect CLI/Discord to the same session. A restart retains the hold but does not claim to recover live form contents. See [SECURITY.md](../SECURITY.md) for the state mapping, provider matrix, retry policy and operator workflow.
 
 ## Validation and remaining live work
 

@@ -26,6 +26,11 @@ uses 4/8/12/16/24px; controls are 32px, header icons 30px, helper subtabs 28px.
 Focus uses a visible 2px outline. Checkboxes share checked, mixed, focus and
 disabled styles. Few dividers replace nested card outlines.
 
+Ordinary buttons are transparent and borderless, with hover/pressed fills and
+reduced disabled opacity. Primary actions retain a filled accent. Inputs,
+switches, table separators and grouped toggle edges keep purposeful borders.
+Close and run cancellation use accessible X icons and 30-32px hit targets.
+
 The sidebar is a bounded flex column in its actual shadow iframe, up to 400px
 wide. Long company/job names truncate visually with full title/accessibility text;
 gear, minimize and close never shrink. Active-run controls appear only when
@@ -34,6 +39,15 @@ share the persistent bottom row, with an attached unlabeled auto-advance switch 
 Analyze page utility with an accessible automatic-diagnostics switch. Auto-advance retains the per-profile preference and all
 existing validation, cancellation and final-submit guards. Actionable sign-in,
 wait, cancellation, retry, upload and writing errors stay visible.
+
+The header exposes persistent Overlay / Docked controls; Overlay is the default.
+Docked reserves 400px only while open at viewport widths of at least 900px.
+Narrower windows use overlay and show the effective pressed state. A scoped root
+attribute and stylesheet apply the reservation without editing employer inline
+properties or priorities. Closing, minimizing, switching modes and removal
+release it; resize, root replacement and toolbar recovery re-evaluate it. This
+bounded in-page layout does not guarantee fit for every employer fixed-position
+header or viewport-sized child.
 
 Settings replaces the assistant view in place. Back/Escape restores the same tab,
 conversation, draft and helper history. Embedded and fallback settings share
@@ -58,6 +72,17 @@ manual review, applied undo, history, settings and answers remain accessible.
 Reload feedback is shown while busy with an absolute completion time on hover;
 there is no per-second idle timestamp update. Answers and Settings remain lazy.
 No queue backend, cache, request schedule or local skill planner was rewritten.
+
+The Queue Applied heading and row checkboxes share the action-column grid. Job
+titles remain normal links; row backgrounds also activate those links, excluding
+interactive descendants, selected text and selection gestures. Rows without a
+URL have no navigation target. Current Chrome run context stays inline with queue
+controls and truncates with a tooltip. Completed results remain tracked by the
+backend, with a completion toast instead of a Last run section.
+
+T076 screenshots and bounding-box checks use offline synthetic forms and the
+actual unpacked MV3 extension; artifacts are under `.tmp/t076-visuals`. No live
+employer layout was verified.
 
 Local T051 evidence is in .tmp/review/t051/: actual in-page iframes at 360×800,
 400×800 and 360×600; active controls, embedded settings, empty/generated helper,

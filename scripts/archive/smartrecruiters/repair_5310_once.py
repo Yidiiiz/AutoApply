@@ -3,6 +3,10 @@ import asyncio
 import getpass
 import json
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from controlled_once import ROOT, Config, Database, ProcessLock, load_dotenv, run, setup_logging, snapshot
 from autoapply.eligibility_repair import repair_5310
 

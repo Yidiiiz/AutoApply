@@ -131,3 +131,15 @@ T088 binds Workday split month/day/year controls to their graduation question or
 Public posting metadata is bounded and cached by canonical posting identity across locale and application routes. JSON-LD from other jobs is excluded. Explicit foreign-only posting locations suppress stored and URL-derived US fallbacks. Office preferences use compatible US posting locations first, followed by the explicit Any US fallback; job evidence never becomes a global applicant preference. Application labels cannot replace public Workday descriptions. Normal Autofill fills native known facts first, discovers actual remaining choices and reuses Analyze's document/edit-bound repair engine for one grounded batch. Only relevant supplied facts reach that batch; unknown sensitive facts remain unanswered.
 
 Root's attempt-2 actual-MV3 run reported seven failures and one pass. T088 attempt 3 corrects the ordinary fill's undefined repair-token argument to serializable null, retaining document targeting and repair-token guards. Browser fixtures now use the required mapped reason, compare immutable skills facts by value, and exercise public Autofill/Analyze and session storage instead of calling a private ES-module function. Assertions retain actual field writes, filled results, minimal facts and offered options, changed-job cache isolation and foreign JobPosting rejection. Final focused offline verification passed 94 cases, including all 35 scoped T088 cases; compatibility verification passed 288 cases with the existing stalled asyncio mapping case excluded. An offline native/bound-repair argument and document-guard check, JavaScript/fixture syntax and diff checks passed. All eight corrected MV3 cases collect successfully but remain unexecuted in this attempt; root owns final actual-MV3 and T087 browser compatibility verification. No live employer/provider/Discord service or real applicant data was exercised.
+
+Final root verification, November 3, 2026: all 27 actual-MV3 cases passed,
+covering all eight T088 cases and 19 selected T087 compatibility cases. All 324
+focused offline/domain/repair/keyword checks passed. The earlier 71 T087 root
+checks were also accepted before T088. These checks used captured public control
+shapes, local fixtures and a stub provider; live employer behavior and actual
+employer receipts were not verified.
+
+Root's privacy review of the nine changed staged files found no new secret
+patterns, secret assignments or forbidden paths, and no private file was
+committed. Baseline CLI warnings concerned PNG icons, source password-variable
+identifiers and synthetic credential tests; scanner and policy were unchanged.

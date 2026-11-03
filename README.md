@@ -2,6 +2,23 @@
 
 A personal internship application server built with Python, Playwright, SQLite and YAML. It discovers listings, preserves their provenance, fills verified answers and leaves unknown questions for you. Final submission is disabled by default. All runtime data stays in ignored local storage.
 
+## Project folders
+
+Start with the [documentation index](docs/README.md) for dashboard, extension,
+workflow and architecture guides. Migration reports and incident notes are listed
+separately under history.
+
+| Folder | Contents |
+| --- | --- |
+| `autoapply/` | Python application and local dashboard |
+| `extension/` | Unpacked Chrome extension and required manifest assets |
+| `config/`, `templates/` | Example settings and applicant-data schemas |
+| `scripts/` | Current helpers and Windows launch integration |
+| `scripts/archive/` | Historical incident tools with authorization limits |
+| `tests/` | Regression tests and synthetic fixtures |
+| `docs/` | Current guides, historical reports and retained audit evidence |
+| `data/`, `logs/`, `.tmp/` | Ignored local data, logs and temporary artifacts |
+
 ## Semi-auto and VS Code development loop
 
 Follow [the VS Code guide](docs/semi-auto-vscode.md) for the new `semi-auto`
@@ -200,7 +217,7 @@ Use these offline maintenance commands with the worker stopped for a migration o
 .\.venv\Scripts\python.exe -m autoapply listings stats
 ```
 
-The first listing migration backs up the database to ignored private storage and writes `listing_migration_report.json`. Freshness counters are included in application-history statistics and `status`. See [FRESHNESS_MIGRATION.md](FRESHNESS_MIGRATION.md) for the migration audit, validation, date assumptions and source limitations.
+The first listing migration backs up the database to ignored private storage and writes `listing_migration_report.json`. Freshness counters are included in application-history statistics and `status`. See [the listing freshness migration audit](docs/history/listing-freshness-migration.md) for validation, date assumptions and source limitations.
 
 ## Gmail OAuth
 
@@ -312,7 +329,7 @@ Most tests use synthetic data; browser tests use only a local HTTP fixture and d
 
 Troubleshooting: run `doctor` for missing setup, `inspect ID` for recorded stage and reason, `login URL` for expired sessions, and `retry ID` for retry-eligible pre-submit issues. Protected steps use `resume-manual ID` with the original worker and tab still open. Browser installation errors usually mean Chromium was not installed for this environment. A worker-lock error means another worker/login session is using the profile. Source errors remain in `source_revisions`; failed scans do not advance processed revisions.
 
-See [DESIGN.md](DESIGN.md) for implementation boundaries and validation details.
+See [Architecture](docs/architecture.md) for implementation boundaries and validation details.
 
 ## Browser cursor
 
