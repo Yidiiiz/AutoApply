@@ -9,7 +9,8 @@ import re
 import time
 import threading
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
+from datetime import date
 
 from . import answers, cv, descriptions, question_rules
 from .dashboard_settings import SettingsRejected
@@ -104,6 +105,47 @@ def _question(field):
                     min_selections=minimum_choices, max_selections=maximum_choices)
 
 
+def _same_posting(left, right):
+    try:
+        left, right = _url(left), _url(right)
+        return left == right or bool(ats_identity(left)[1] and ats_identity(left)[1] == ats_identity(right)[1])
+    except SettingsRejected:
+        return False
+
+
+def _public_job_context(app, page, url):
+    """Accept bounded posting metadata only for this exact canonical/ATS job."""
+    from .dropdowns import location_identity
+    bound = (page.get('context_source') in {'JobPosting', 'workday_public'}
+             and _same_posting(page.get('posting_url'), url))
+    locations = []
+    explicit_locations = bound and isinstance(page.get('job_locations'), list) and bool(page['job_locations'])
+    if bound:
+        for entry in page.get('job_locations', [])[:20] if isinstance(page.get('job_locations'), list) else []:
+            if not isinstance(entry, dict) or not all(isinstance(entry.get(k, ''), str) for k in ('city', 'region', 'country')):
+                continue
+            if normalize(entry.get('country', '')) not in {'us', 'usa', 'u s', 'united states', 'united states of america'}:
+                continue
+            label = entry.get('city', '') + ', ' + entry.get('region', '')
+            if len(label) <= 200 and location_identity(label) and label not in locations:
+                locations.append(label)
+    stored = app.get('location') or ''
+    if not explicit_locations and not locations and isinstance(stored, str) and location_identity(stored):
+        locations = [stored]
+    if not explicit_locations and not locations:
+        # Workday's public route explicitly encodes US/city/state; prose is not evidence.
+        parts = urlsplit(url)
+        match = re.search(r'/job/US---([^/]+)/', unquote(parts.path), re.I) if parts.hostname.endswith('.myworkdayjobs.com') else None
+        if match:
+            label = re.sub(r'[-, ]+([A-Z]{2})$', r', \1', match[1].replace('-', ' '))
+            if location_identity(label):
+                locations = [label]
+    if locations or bound and page.get('job_locations'):
+        app['public_job_context'] = dict(url=_url(app.get('canonical_url') or url), locations=locations,
+                                        source='public_posting' if bound else 'stored_job_or_public_url')
+    return bound
+
+
 def _education_date_part(q, field, profile):
     label = normalize(q.label)
     part = re.fullmatch(r'(?:education )?(start|end) date (month|year)', label)
@@ -122,7 +164,7 @@ def _education_date_part(q, field, profile):
 
 
 def _repeatable_answer(q, field, profile):
-    """Use explicit facts from the first saved work/education entry."""
+    """Bind repeated facts by company/title anchors, never a different row's location."""
     section, label = normalize(field.get('section', '')), normalize(q.label).strip(' *')
     work = bool(re.search(r'\b(work experience|employment)\b', section))
     education = bool(re.search(r'\beducation\b', section))
@@ -130,7 +172,19 @@ def _repeatable_answer(q, field, profile):
     if not work and not education and not project:
         return False, None
     entries = profile.get('employment' if work else 'projects' if project else 'education_history', [])
-    entry = entries[0] if entries and isinstance(entries[0], dict) else {} if work or project else profile.get('education', {})
+    entries = [e for e in entries if isinstance(e, dict)]
+    if education and not entries and profile.get('education'):
+        entries = [profile['education']]
+    binding = field.get('section_entry')
+    if isinstance(binding, dict) and (work or education):
+        anchors = ('company', 'title') if work else ('school',)
+        supplied = {k: normalize(binding[k]) for k in anchors if isinstance(binding.get(k), str) and binding[k].strip()}
+        matches = [e for e in entries if supplied and all(normalize(e.get(k, '')) == v for k, v in supplied.items())]
+        entry = matches[0] if len(matches) == 1 else {}
+    elif work or project:
+        entry = entries[0] if len(entries) == 1 else {}
+    else:
+        entry = entries[0] if len(entries) == 1 else profile.get('education', {}) if not entries else {}
     names = ({'job title': 'title', 'company': 'company', 'location': 'location',
               'role description': 'description', 'i currently work here': 'current'} if work else
              {'school or university': 'school', 'school': 'school', 'degree': 'degree', 'field of study': 'major'})
@@ -163,7 +217,8 @@ def _repeatable_answer(q, field, profile):
         value = answers.fit_options(str(value), q.options)
         if education and key == 'degree' and value is None and entry.get('major'):
             value = answers.fit_options(str(entry['major']), q.options)
-    return True, Answer(value, 'profile:' + ('employment.0.' if work else 'projects.0.' if project else 'education.') + key) if value is not None else None
+    index = entries.index(entry) if entry in entries else 0
+    return True, Answer(value, 'profile:' + (f'employment.{index}.' if work else f'projects.{index}.' if project else 'education.') + key) if value is not None else None
 
 
 def _graduation_answer(q, field, profile):
@@ -173,13 +228,24 @@ def _graduation_answer(q, field, profile):
     if q.kind not in {'text', 'number', 'date', 'select', 'radio', 'combobox'} or not re.search(
             r'\bwhen\b.*\bgraduate\b|\b(?:expected |anticipated |projected )?graduation\b', normalize(q.label)):
         return None
-    if re.search(r'\bmonth\b', normalize(q.label)):
-        return None
     raw = str(profile.get('education', {}).get('graduation_date') or '')
     parsed = parse_profile_date(raw)
     if not parsed:
         return None
     year, month, day = str(parsed.year), f'{parsed.month:02}', f'{parsed.day:02}'
+    part = re.search(r'\b(month|day|year)\s*\*?$', normalize(q.label)) if field.get('date_context') == 'graduation' else None
+    if part:
+        if part[1] == 'day' and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+            return None
+        if part[1] == 'month' and not re.fullmatch(r'\d{4}-\d{2}(?:-\d{2})?', raw):
+            return None
+        value = {'month': month, 'day': day, 'year': year}[part[1]]
+        if q.options:
+            value = next((v for candidate in ([calendar.month_name[parsed.month], month, str(parsed.month)] if part[1] == 'month' else [value])
+                          if (v := answers.fit_options(candidate, q.options)) is not None), None)
+        return Answer(value, 'profile:education.graduation_date') if value else None
+    if re.search(r'\bmonth\b', normalize(q.label)):
+        return None
     short = calendar.month_abbr[int(month)] + '-' + year[2:]
     candidates = [short, month + '/' + year, month + '/' + day + '/' + year,
                   calendar.month_name[int(month)] + ' ' + year,
@@ -199,7 +265,8 @@ def _graduation_answer(q, field, profile):
                  short if re.search(r'mmm[-/ ]yy\b', hint, re.I) else
                  month + '/' + day + '/' + year if re.search(r'\bdd\b', hint, re.I) else
                  month + '/' + year if re.search(r'\bmm[/ -]yyyy\b', hint, re.I) else
-                 short if normalize(q.label) == 'when are you expected to graduate' else month + '/' + year)
+                 short if normalize(q.label) == 'when are you expected to graduate' else
+                 month + '/' + day + '/' + year if re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw) else month + '/' + year)
     return Answer(value, 'profile:education.graduation_date') if value is not None else None
 
 
@@ -833,11 +900,22 @@ def resolve_answers(dashboard, payload):
     with dashboard.settings.mutex, dashboard.connection() as db:
         app = _application(db, payload)
         _unprotected(app)
-        description = page.get('description', '')[:6000]
+        if payload.get('application_id') is not None and not _same_posting(app['canonical_url'], payload.get('url')):
+            raise SettingsRejected('Application URL does not match the current posting', status=409)
+        bound_context = _public_job_context(app, page, payload['url'])
+        workday = urlsplit(payload['url']).hostname.endswith('.myworkdayjobs.com')
+        description = page.get('description', '')[:6000] if bound_context or not workday else ''
+        if workday and not bound_context and 'job_id' not in app:
+            app['description'] = ''
         if 'job_id' in app and len(description) > len(app.get('description') or ''):
             app['description'] = description
         resolver = answers.AnswerResolver(dashboard.config, db)
         profile = resolver.refresh().facts
+        date_profile = profile
+        original = resolver.snapshot.original_facts or profile
+        fresh_date = original.get('education', {}).get('graduation_date')
+        if fresh_date:
+            date_profile = dict(profile, education=dict(profile.get('education', {}), graduation_date=fresh_date))
         result = []
         pending = []
         for q, field in zip(questions, fields):
@@ -875,7 +953,23 @@ def resolve_answers(dashboard, payload):
                 continue
             education_part, education_answer = _education_date_part(q, field, profile)
             repeated, repeated_answer = _repeatable_answer(q, field, profile)
-            graduation = _graduation_answer(q, field, profile)
+            graduation = _graduation_answer(q, field, date_profile)
+            # Parsing partial profile dates uses day/month 1 internally. Those
+            # parser defaults are not applicant facts for an exact-date question.
+            from .profile_rules import primary_graduation_matches
+            exact_graduation = (primary_graduation_matches(q.label, date_profile)
+                and re.search(r'\bgraduat\w*\b', normalize(q.label))
+                and (q.kind == 'date' or re.search(r'\bdd\b', str(field.get('placeholder') or '') + ' ' + q.label, re.I)))
+            if exact_graduation and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(fresh_date or '')):
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT', reason_code='needs_fact'))
+                continue
+            signed = (field.get('date_context') == 'cc305_signed'
+                      and re.fullmatch(r'cc305 date signed (month|day|year)', normalize(q.label)))
+            if signed:
+                today = date.today()
+                value = {'month': f'{today.month:02}', 'day': f'{today.day:02}', 'year': str(today.year)}[signed[1]]
+                result.append(dict(key=q.key, value=value, source='local_date:cc305_signed', status='RESOLVED'))
+                continue
             if date_part_label(q.label) and not education_part and not repeated and graduation is None:
                 result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT', reason_code='needs_fact'))
                 continue
@@ -894,7 +988,8 @@ def resolve_answers(dashboard, payload):
             # Remember requests omit required/length. Only verified memory may
             # reuse that descriptor, and the actual field is validated below.
             remembered = resolver.resolve_result(replace(q, required=False, max_length=None), app).answer
-            if remembered and remembered.source == 'verified_memory':
+            location_bound, _ = answers.job_location_answer(q, app, profile, [])
+            if remembered and remembered.source == 'verified_memory' and graduation is None and not repeated and not location_bound:
                 answer = remembered
             if field.get('section_missing_date') is True:
                 sections = profile_sections(dashboard, {})
@@ -944,7 +1039,7 @@ def resolve_answers(dashboard, payload):
                 elif q.kind in {'select', 'radio', 'combobox', 'multiselect'} and not q.options:
                     reason_code = 'no_offered_options'
                 elif not repeated and not education_part and not field.get('section_missing_date'):
-                    facts = answers.repair_facts(q, descriptor, profile)
+                    facts = answers.repair_facts(q, descriptor, profile, app)
                     if facts:
                         if (len(pending) < REPAIR_FIELD_LIMIT and len(q.label) <= 2000
                                 and len(q.options) <= 100 and all(len(o) <= 300 for o in q.options)

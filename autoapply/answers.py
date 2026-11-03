@@ -17,9 +17,65 @@ def scope_for(label, app):
     return "global" if concept(label) else f"application:{app['id']}"
 
 
+def bachelor_degree(value):
+    """The same narrow bachelor family used by the native section chooser."""
+    text = normalize(value)
+    return (text in {'bachelor', 'bachelors', 'bachelor s', 'bachelor degree', 'bachelors degree',
+                     'bachelor s degree', 'bs', 'b s', 'bsc', 'b sc', 'bachelor of science'}
+            or bool(re.fullmatch(r'bachelor s? or equivalent first degree isced 6(?: ba bsc beng llb etc)?', text)))
+
+
+def job_location_answer(q, app, profile, preferences):
+    """Posting locations are job evidence, never newly learned applicant preferences."""
+    from .dropdowns import location_identity, location_ordinal
+    label = question_text(q.label)
+    top = re.search(r'\btop (\d+|two|three) (?:preferred )?(?:office )?locations?\b', label)
+    rank = location_ordinal(q.label)
+    office = bool(re.search(r'\b(?:office|location)\w*\b', label) and re.search(r'\bprefer\w*\b', label))
+    context = app.get('public_job_context') or {}
+    if not (top or rank or office and context) or not (context or q.options):
+        return False, None
+    locations = context.get('locations', [])
+    identities = {location_identity(v) for v in locations} - {None}
+    allowed = [o for o in q.options if location_identity(o) and (not context or location_identity(o) in identities)]
+    pool = allowed if q.options else locations
+    ordered = []
+    for preferred in preferences:
+        matches = [v for v in pool if location_identity(v) == location_identity(preferred)]
+        if len(matches) == 1 and matches[0] not in ordered:
+            ordered.append(matches[0])
+    states = profile.get('locations', {}).get('preferred_states') or []
+    from .dropdowns import us_state
+    for state in states:
+        ordered.extend(v for v in pool if v not in ordered and location_identity(v)[1] == us_state(state))
+    if profile.get('locations', {}).get('any_us_fallback') is True:
+        ordered.extend(v for v in pool if v not in ordered)
+        # An unqualified Any on an international menu does not mean Any US.
+        fallback = [o for o in q.options if normalize(o) in {
+            'any us location', 'any u s location', 'any united states location', 'open to any us location',
+            'open to any u s location', 'open to any united states location'}]
+        if len(fallback) == 1 and (not context or identities):
+            ordered.append(fallback[0])
+        elif not q.options and identities:
+            ordered.append('Open to any US location')
+    count = {'two': 2, 'three': 3}.get(top[1], int(top[1]) if top and top[1].isdigit() else 0) if top else 1
+    chosen = ordered[(rank or 1) - 1:(rank or 1)] if not top else ordered[:count]
+    value = chosen if q.kind == 'multiselect' else '; '.join(chosen)
+    return True, (Answer(value, 'job_context:locations', evidence=['job_context.locations', 'locations.ordered_preferences'],
+                         provenance=context) if chosen and (not top or len(chosen) == count) else None)
+
+
 def fit_options(value, options):
     if not options:
         return str(value)
+    if bachelor_degree(value):
+        matches = [option for option in options if bachelor_degree(option)]
+        # Preserve the ordinary full-degree alias preference. An ISCED
+        # equivalent alongside another bachelor program remains ambiguous.
+        preferred = [o for o in matches if normalize(o) in {'bachelor s degree', 'bachelors degree'}]
+        if len(preferred) == 1 and not any('isced' in normalize(o) for o in matches):
+            return preferred[0]
+        return matches[0] if len(matches) == 1 else None
     from .concepts import equivalent_answer
     literal = [option for option in options if option == str(value)]
     if len(literal) == 1:
@@ -40,14 +96,6 @@ def fit_options(value, options):
                 matches.append(option)
         if matches:
             return matches[0] if len(matches) == 1 else None
-    bachelor = {'bachelor', 'bachelors', 'bachelor s', 'bachelor degree', 'bachelors degree',
-                'bachelor s degree', 'bs', 'b s', 'bachelor of science'}
-    if expected in bachelor:
-        matches = [option for option in options if normalize(option) in bachelor]
-        preferred = [option for option in matches if normalize(option) == 'bachelor s degree']
-        if len(preferred) == 1:
-            return preferred[0]
-        return matches[0] if len(matches) == 1 else None
     veteran = re.sub(r'^i am (?:a )?', '', expected)
     if veteran == 'not a veteran':
         plain = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
@@ -227,7 +275,7 @@ def from_row(row):
                     min_selections=row.get('min_selections'), max_selections=row.get('max_selections'))
 
 
-def repair_facts(q, descriptor, profile):
+def repair_facts(q, descriptor, profile, app=None):
     """Small per-question evidence whitelist for wording repair, never a profile dump."""
     from .concepts import REGISTRY, demographic_value
     from .profile_rules import completed_education, preference_boolean, primary_graduation_matches
@@ -267,6 +315,8 @@ def repair_facts(q, descriptor, profile):
             paths = ['locations.ordered_preferences']
         elif re.search(r'\b(?:graduat\w*)\b', text):
             paths = ['education.graduation_date']
+        elif re.search(r'\b(?:degree|program|studying|education)\b', text):
+            paths = ['education.degree', 'education.major', 'education.currently_enrolled']
         elif re.search(r'\b(?:skills?|technolog\w*|programming|tools?)\b', text):
             paths = ['skills']
         elif re.search(r'\blanguages?\b', text):
@@ -274,9 +324,19 @@ def repair_facts(q, descriptor, profile):
         else:
             return {}
     # Large free-form facts are not suitable for this bounded mapping request.
-    return {path: value for path in paths if (value := fact(profile, path)) is not None
+    facts = {path: value for path in paths if (value := fact(profile, path)) is not None
             and value != '' and value != [] and value != ()
             and len(json.dumps(value, default=str)) <= 4000}
+    if 'locations.ordered_preferences' in paths and app and app.get('public_job_context'):
+        if not app['public_job_context'].get('locations'):
+            return {}
+        facts['job_context.locations'] = app['public_job_context']
+        # Only compatible preferences may be used to word this job's office answer.
+        from .dropdowns import location_identity
+        allowed = {location_identity(v) for v in app['public_job_context']['locations']}
+        facts['locations.ordered_preferences'] = [v for v in facts.get('locations.ordered_preferences', [])
+                                                  if location_identity(v) in allowed]
+    return facts
 
 
 class AnswerResolver:
@@ -310,7 +370,7 @@ class AnswerResolver:
         self.refresh()
         descriptor = describe(q, app, self.snapshot.facts)
         # The complete immutable descriptor also distinguishes exact rendered options.
-        key = (descriptor, app.get('description', ''))
+        key = (descriptor, app.get('description', ''), json.dumps(app.get('public_job_context'), sort_keys=True))
         if key not in self._cache:
             self.computations += 1
             canonical = replace(q, scope=descriptor.scope, semantic_key=descriptor.semantic_key)
@@ -450,6 +510,12 @@ class AnswerResolver:
             return None
         if policy == 'DO_NOT_ANSWER':
             return None
+        if policy != 'REQUIRE_USER':
+            from .dropdowns import ordered_locations, ORDERED_LOCATIONS_SETTING
+            handled, located = job_location_answer(q, app, profile, ordered_locations(
+                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)))
+            if handled:
+                return located
         from .question_keywords import export_status_label
         if export_status_label(q.label):
             # A status menu is not a blanket legal acknowledgement. Authorization,
@@ -558,6 +624,10 @@ class AnswerResolver:
         preference_path, negative = preference_boolean(q.label)
         if preference_path and mapped_key != REJECTED_FIELD:
             supplied = fact(profile, preference_path)
+            if preference_path == 'application_preferences.employer_ai_review_opt_out' and type(supplied) is bool and policy != 'REQUIRE_USER':
+                offered = [o for o in q.options if normalize(o) in ({'opt out', 'i opt out'} if supplied else {'opt in', 'i opt in'})]
+                if len(offered) == 1:
+                    return Answer(offered[0], 'profile:' + preference_path, evidence=[preference_path])
             if type(supplied) is not bool or negative is None or policy == 'REQUIRE_USER':
                 return None
             value = not supplied if negative else supplied

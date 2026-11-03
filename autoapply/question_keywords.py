@@ -38,9 +38,9 @@ def unusable_label(label):
 def date_part_label(label):
     """Month/year controls describe a date component, never job availability."""
     text = normalize(label)
-    return bool(re.search(r'\b(?:start|end|from|to|graduation|availability|available)(?: date)? (?:month|year)\b'
-                          r'|\bdate (?:month|year)\b'
-                          r'|\b(?:month|year)(?: of)?(?: the)? (?:start|end|from|to|graduation)(?: date)?\b', text))
+    return bool(re.fullmatch(r'month|day|year', text) or re.search(r'\b(?:start|end|from|to|graduation|availability|available)(?: date)? (?:month|day|year)\b'
+                          r'|\bdate (?:month|day|year)\b'
+                          r'|\b(?:month|day|year)(?: of)?(?: the)? (?:start|end|from|to|graduation)(?: date)?\b', text))
 
 
 def export_status_label(label):

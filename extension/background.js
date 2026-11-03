@@ -138,6 +138,32 @@ async function accountFrames(tabId) {
   if(top.some(frame=>frame.result?.active))return top;
   return readFrames({...probe,target:{tabId,allFrames:true}});
 }
+function postingKey(value) {
+  try {
+    const url=new URL(value),path=url.pathname.replace(/\/apply(?:\/.*)?$/i,'');
+    if(url.hostname.endsWith('.myworkdayjobs.com')) {
+      const match=/\/job\/[^/]+\/[^/]+_([^/]+)$/.exec(path);
+      return match?url.origin+':'+match[1]:null;
+    }
+    return url.origin+path;
+  } catch {return null;}
+}
+async function publicJobContext(page,url) {
+  const key=postingKey(url);if(!key)return {...page,description:''};
+  const {jobContexts={}}=await chrome.storage.session.get('jobContexts');
+  const bound=['JobPosting','workday_public'].includes(page?.context_source) && postingKey(page.posting_url)===key;
+  if(bound) {
+    const previous=jobContexts[key] || {};
+    jobContexts[key]={posting_url:page.posting_url,context_source:page.context_source,
+      title:String(page.title||'').slice(0,300),company:String(page.company||'').slice(0,300),
+      description:String(page.description||previous.description||'').slice(0,6000),
+      job_locations:(page.job_locations?.length?page.job_locations:previous.job_locations||[]).slice(0,20).map(v=>({city:String(v.city||'').slice(0,100),region:String(v.region||'').slice(0,100),country:String(v.country||'').slice(0,100)}))};
+    // Bounded public metadata only, keyed by posting identity across locale/apply routes.
+    const keys=Object.keys(jobContexts);for(const old of keys.slice(0,Math.max(0,keys.length-40)))delete jobContexts[old];
+    await chrome.storage.session.set({jobContexts});
+  }
+  return {...page,...(jobContexts[key]||{}),url};
+}
 async function scan(tabId) {
   const tab = tabId === undefined ? (await chrome.tabs.query({active: true, currentWindow: true}))[0] : await chrome.tabs.get(tabId);
   if (!tab?.id || !/^https?:\/\//.test(tab.url || "")) throw new Error("Open an HTTP or HTTPS application form first.");
@@ -157,14 +183,7 @@ async function scan(tabId) {
     await delay(100);
   }
   if (!frames.length) throw new Error("Form scanner is unavailable. Reload the application page and try again.");
-  const page = {...(frames.find(frame => frame.frameId === 0) || frames[0]).result.page, url: tab.url};
-  const contextKey=tab.url.replace(/\/apply(?:\/.*)?(?=[?#]|$)/i, "").split(/[?#]/)[0];
-  const {jobContexts={}}=await chrome.storage.session.get("jobContexts");
-  const cached=jobContexts[contextKey];
-  if(cached?.description && (!page.description || /\/apply(?:\/|$)/i.test(tab.url)))page.description=cached.description;
-  page.description=(page.description||"").slice(0,6000);
-  jobContexts[contextKey]={description:page.description,url:tab.url};
-  await chrome.storage.session.set({jobContexts});
+  const page = await publicJobContext((frames.find(frame => frame.frameId === 0) || frames[0]).result.page,tab.url);
   const fields = frames.flatMap(frame => frame.result.fields.map(field => ({...field, key: `${frame.frameId}:${field.key}`})));
   if (fields.length > 500) throw new Error("This page has more than 500 fields. Open a smaller form section.");
   return {tabId: tab.id, url: tab.url, page, fields, pageIdentities:Object.fromEntries(frames.map(frame=>[frame.frameId,{identity:frame.result.page_identity,documentId:frame.documentId}])), next_action: frames.find(frame => frame.frameId === 0)?.result.next_action, workday_step: frames.find(frame => frame.frameId === 0)?.result.workday_step, accountMode:accounts.find(f=>f.result?.active)?.result.mode, accountReady:accounts.find(f=>f.result?.active)?.result.actionReady, skills_available: frames.some(frame=>frame.result.skills_available), sign_in: frames.some(frame => frame.result.sign_in), manual_entry: frames.some(frame => frame.result.manual_entry), timings: {scan_ms: frames.reduce((sum, frame) => sum + (frame.result.scan_ms || 0), 0)}};
@@ -178,15 +197,23 @@ async function applicationMatch(url,saved={},application){
   return matched?.application_id!=null?matched:await api('/ext/match',{url});
 }
 
-async function fill(result, values, files = {}) {
+async function fill(result, values, files = {}, repairBindings) {
   if (cancelledTabs.has(result.tabId)) return;
   if ((await chrome.tabs.get(result.tabId)).url !== result.url) throw new Error("Application page changed. Run autofill again.");
   for (const frameId of new Set(values.map(value => Number(value.key.split(":")[0])))) {
     if (cancelledTabs.has(result.tabId)) return;
     const prefix = `${frameId}:`;
     const local = values.filter(value => value.key.startsWith(prefix)).map(value => ({...value, key: value.key.slice(prefix.length)}));
-    const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId, frameIds: [frameId]}, world: "ISOLATED",
-      func: (answers, attachments) => globalThis.autoApplyContent.fill(answers, attachments), args: [local, files]});
+    const binding=repairBindings?.get(frameId),documentId=binding?.documentId || result.pageIdentities?.[frameId]?.documentId;
+    const [frame] = await chrome.scripting.executeScript({target: {tabId: result.tabId,...(documentId?{documentIds:[documentId]}:{frameIds:[frameId]})}, world: "ISOLATED",
+      func: async (answers, attachments,token) => {
+        if(!token)return globalThis.autoApplyContent.fill(answers, attachments);
+        await globalThis.autoApplyContent.repairFill(token,answers,attachments);
+        const done=globalThis.autoApplyContent.repairFinish(token),keys=new Set(answers.map(a=>a.key));
+        const pending=done.fields.filter(f=>keys.has(f.key) && !f.answered);
+        return {filled:done.filled,completed:done.completed,pending,writing:[],skipped:0,errors:[],fill_ms:0};
+      }, args: [local, files,binding?.token ?? null]});
+    if(!frame || documentId && frame.documentId!==documentId)throw Error('Application changed. Run autofill again.');
     const summary = frame.result;
     result.timings.fill_ms = (result.timings.fill_ms || 0) + summary.fill_ms;
     result.summary.filled += summary.filled;
@@ -281,6 +308,7 @@ async function clickNext(result, automatic = false) {
     after.fields.map(field=>field.key).join() !== scanned.fields.map(field=>field.key).join();
 }
 async function matchAndFill(result, prepare = false) {
+    const epoch=runEpoch;
     const sectionAnswers=[];
     if (prepare) {
     const profile = await api('/ext/profile-sections');
@@ -303,47 +331,50 @@ async function matchAndFill(result, prepare = false) {
       return frame.result.fields.map(field=>({...field,key:prefix+field.key}));
     });
     }
-    // Finite choices are evidence for resolution, even when the stored canonical
-    // answer already resolves. Reuse scan/collection observations in this pass.
-    async function collect(fields) {
-      const collected=[];
-      for (const frameId of new Set(fields.map(field => Number(field.key.split(':')[0])))) {
-        const prefix=frameId+':', keys=fields.filter(field=>field.key.startsWith(prefix)).map(field=>field.key.slice(prefix.length));
-        const [frame]=await chrome.scripting.executeScript({target:{tabId:result.tabId,frameIds:[frameId]},
-          func:keys=>globalThis.autoApplyContent.collectOptions(keys),args:[keys]});
-        result.timings.options_ms=(result.timings.options_ms || 0)+frame.result.options_ms;
-        for (const field of frame.result.fields) {
-          const updated={...field,key:prefix+field.key};
-          Object.assign(result.fields.find(item=>item.key===updated.key),updated);collected.push(updated);
-        }
-      }
-      return collected;
-    }
-    await collect(result.fields.filter(field=>!field.section_managed && field.kind==='combobox' &&
-      !field.options_partial && !field.answered && !field.options_observed));
-    if (cancelledTabs.has(result.tabId)) return;
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
-    const fields = result.fields.filter(field=>!field.section_managed).map(field => field.options_partial ? {...field, options: []} : field);
-    const response = await api("/ext/answers", {...context(result), url: result.url, fields});
+    const fields = result.fields.filter(field=>!field.section_managed || !field.answered && (field.date_context || field.section_entry || /degree/i.test(field.label))).map(field => field.options_partial ? {...field, options: []} : field);
+    const response = await api("/ext/answers", {...context(result), url: result.url, fields, allow_ai:false});
     result.answerRevision=[response.profile_revision,response.facts_revision];
     let {answers}=response;
     if (cancelledTabs.has(result.tabId)) return;
-    answers.push(...sectionAnswers);
-    // Remote vocabulary searches retain their profile-first fast path.
-    const unresolved = result.fields.filter(field => field.kind === "combobox" && !field.answered &&
-      !field.options_observed && !answers.some(answer => answer.key === field.key && answer.status === "RESOLVED"));
-    const collected = await collect(unresolved);
-    if (collected.length) {
-      const resolved = await api("/ext/answers", {...context(result), url: result.url, fields: collected});
-      answers = answers.map(answer => resolved.answers.find(item => item.key === answer.key) || answer);
-    }
+    answers.push(...sectionAnswers.filter(answer=>!fields.some(field=>field.key===answer.key)));
+    const deferred=new Set(fields.filter(f=>f.kind==='combobox' && !f.options_partial && !f.options.length && !f.options_observed).map(f=>f.key));
     const files = {};
     if (answers.some(answer => answer.status === "FILE" && answer.value === "resume" && !result.fields.find(field => field.key === answer.key)?.answered)) files.resume = await api("/ext/resume");
-    await fill(result, answers, files);
+    await fill(result, answers.filter(a=>!deferred.has(a.key)), files);
+    if(cancelledTabs.has(result.tabId) || staleRun(epoch))return;
+    // Native known answers settle first; one existing grounded batch handles the
+    // remaining eligible set using actual discovered offers and minimal facts.
+    const eligible=new Set(answers.filter(a=>deferred.has(a.key) || ['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
+    const remaining=[],bindings=new Map();
+    for(const frameId of new Set([...eligible].map(key=>Number(key.split(':')[0])))) {
+      const documentId=result.pageIdentities?.[frameId]?.documentId,token=crypto.randomUUID();
+      if(!documentId)throw Error('Application changed. Run autofill again.');
+      const keys=[...eligible].filter(k=>k.startsWith(frameId+':')).map(k=>k.slice(k.indexOf(':')+1));
+      const [frame]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[documentId]},
+        func:async(token,keys)=>{await globalThis.autoApplyContent.repairStart(token);return globalThis.autoApplyContent.repairOptions(token,keys);},args:[token,keys]});
+      if(!frame || frame.documentId!==documentId)throw Error('Application changed. Run autofill again.');
+      bindings.set(frameId,{documentId,token});
+      for(const field of frame.result) {
+        const updated={...field,key:frameId+':'+field.key};
+        if(!eligible.has(updated.key))continue;
+        Object.assign(result.fields.find(f=>f.key===updated.key)||{},updated);
+        if(updated.kind!=='combobox' || updated.options.length)remaining.push(updated);
+      }
+    }
+    if(remaining.length) {
+      const resolved=await api('/ext/answers',{...context(result),fields:remaining});
+      if(cancelledTabs.has(result.tabId) || staleRun(epoch) || activeResults.get(result.tabId)!==result)return;
+      await fill(result,resolved.answers,files,bindings);
+    }
+    for(const key of deferred)if(!remaining.some(f=>f.key===key)) {
+      const field=result.fields.find(f=>f.key===key);
+      if(field && !field.answered && !result.pending.some(f=>f.key===key))result.pending.push({...field,reason_code:'no_offered_options'});
+    }
 
   // A failed resolved choice still needs its lazy options in the panel.
-  for (const field of result.pending.filter(field => field.kind === 'combobox' && !field.options.length && !field.options_observed && !unresolved.some(item=>item.key===field.key))) {
+  for (const field of result.pending.filter(field => field.kind === 'combobox' && !field.options.length && !field.options_observed && !eligible.has(field.key))) {
     await loadOptions(result, field.key);
   }
 }
@@ -890,6 +921,7 @@ async function action(message) {
           frame.result.diagnostic.fields=prepared.before;
           candidates.push(...prepared.fields.filter(f=>!f.answered).map(f=>({...f,key:`${frame.frameId}:${f.key}`})));
         }
+        page=await publicJobContext(page,tab.url);
         // Establish the same queue attribution as Autofill, after binding the
         // document and before any answer or explicit submission can use it.
         const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
@@ -1213,6 +1245,11 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   stepDrain = setTimeout(drainSteps, 100);
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if(message.type==='public-job-context') {
+    if(sender.frameId!==0 || !sender.tab?.url || postingKey(sender.url)!==postingKey(sender.tab.url))return;
+    publicJobContext(message.page,sender.tab.url).then(()=>respond({ok:true}),()=>respond({ok:false}));
+    return true;
+  }
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
   if(message.type==='sidebar-layout'){
     const bound=Number(new URL(sender.url).searchParams.get('tabId'));

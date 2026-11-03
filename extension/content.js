@@ -309,8 +309,8 @@
       (!r.element.closest('a[href]') || leverResumeProxy(r.element)) &&
       (r.element.tagName!=='BUTTON' || r.element.type==='button' ||
        ['checkbox','radio'].includes(r.field.kind) && noSubmitProxyChoice(r.element)) &&
-      (!isPrompt(r.element) || sourcePrompt(r.element)) && !r.dateElements && !/_date$/.test(sectionField(r.element)) &&
-      (['text','textarea','email','tel','url','number','select','radio','checkbox','combobox'].includes(r.field.kind) ||
+      (!isPrompt(r.element) || sourcePrompt(r.element)) && !r.dateElements && (!/_date$/.test(sectionField(r.element)) || r.field.date_context) &&
+      (['text','textarea','email','tel','url','number','date','select','radio','checkbox','combobox'].includes(r.field.kind) ||
        r.field.kind==='file' && analyzeResume(r.element)))
       .map(r=>({...r.field,answered:occupied(r)}));
   }
@@ -451,6 +451,7 @@
   }
   function choiceContainer(element) {
     if (['current','fluent'].includes(sectionField(element))) return element;
+    const disability=cc305Group(element);if(disability)return disability;
     const jazz=element.closest('.form-group');
     if(jazz?.querySelector('label[id^="resumator-questionnaire-"]'))return jazz;
     return native.closest(element,'[data-automation-id$="-CheckboxGroup"],[role="radiogroup"],fieldset,[data-automation-id^="formField"],[role="group"]');
@@ -504,6 +505,7 @@
     return usableLabel(text(copy)) || 'Unlabelled field';
   }
   function label(element) {
+    const disclosure=cc305Option(element);if(disclosure)return disclosure;
     const lever=leverQuestionLabel(element);
     if(lever!==null)return lever;
     const sources = [Array.from(element.labels || []).map(questionText).join(' '), questionText(element.closest('label')),
@@ -845,10 +847,17 @@
 
   function pageInfo() {
     if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())return {url:location.origin+location.pathname,title:globalThis.autoApplyCredentials.active()?"Account sign-in":"Application scan incomplete",company:"",description:""};
-    let posting;
+    const postings=[];
+    const postingIdentity=value=>{
+      try {
+        const url=new URL(value,location.href),path=url.pathname.replace(/\/apply(?:\/.*)?$/i,'');
+        const id=url.hostname.endsWith('.myworkdayjobs.com') && /\/job\/[^/]+\/[^/]+_([^/]+)$/.exec(path);
+        return id?url.origin+':'+id[1]:url.origin+path;
+      } catch {return null;}
+    };
     function find(value) {
       if (!value || typeof value !== "object") return;
-      if ([value["@type"]].flat().includes("JobPosting")) posting ||= value;
+      if ([value["@type"]].flat().includes("JobPosting")) postings.push(value);
       for (const child of Object.values(value)) if (typeof child === "object") {
         for (const entry of Array.isArray(child) ? child : [child]) find(entry);
       }
@@ -856,14 +865,34 @@
     for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
       try { find(JSON.parse(script.textContent)); } catch { /* Malformed metadata is common. */ }
     }
+    const matches=postings.filter(p=>typeof p.url==='string' && postingIdentity(p.url)===postingIdentity(location.href));
+    const landing=/\/job\//.test(location.pathname) && !/\/apply(?:\/|$)/.test(location.pathname);
+    // A recommendation elsewhere in the JSON-LD graph is a different job.
+    const posting=matches.length===1?matches[0]:!matches.length && postings.length===1 && !postings[0].url && landing?postings[0]:null;
     // Template contents stay inert, including images embedded in job metadata.
     const description = document.createElement("template");
     description.innerHTML = typeof posting?.description === "string" ? posting.description : "";
+    const publicDescription=text(description.content) || text(document.querySelector('[data-automation-id="jobPostingDescription"],.job-description,#job-description,[itemprop="description"]'));
+    const jobLocations=[];
+    for(const entry of [posting?.jobLocation].flat().filter(Boolean)) {
+      const address=entry.address || {}, country=address.addressCountry;
+      jobLocations.push({city:clean(address.addressLocality),region:clean(address.addressRegion),country:clean(typeof country==='string'?country:country?.name)});
+    }
+    // Only the public posting location region, never cities mentioned in form prose.
+    if(!jobLocations.length && /\/job\//.test(location.pathname) && !/\/apply(?:\/|$)/.test(location.pathname)) {
+      for(const node of document.querySelectorAll('[data-automation-id="locations"],[data-automation-id="location"]')) {
+        if(node.closest('form,[role="form"]'))continue;
+        const hit=/^(?:US\s*[-,]\s*)?(.+?),\s*([A-Z]{2})(?:,\s*(US|USA|United States))?$/.exec(text(node));
+        if(hit)jobLocations.push({city:hit[1],region:hit[2],country:'US'});
+      }
+    }
+    const publicPosting=Boolean(posting || publicDescription && /\/job\//.test(location.pathname) && !/\/apply(?:\/|$)/.test(location.pathname));
     return {
       url: location.href,
       title: clean(posting?.title) || document.title,
       company: clean(document.querySelector('meta[property="og:site_name"]')?.content) || clean(posting?.hiringOrganization?.name) || document.title.split(/\s[|–-]\s/).pop(),
-      description: (text(description.content) || text(document.querySelector('[data-automation-id="jobPostingDescription"],.job-description,#job-description,[itemprop="description"]')) || text(document.querySelector("main,article"))).slice(0, 6000)
+      description: (publicDescription || (!location.hostname.endsWith('.myworkdayjobs.com') ? text(document.querySelector('main,article')) : '')).slice(0,6000),
+      ...(publicPosting?{posting_url:typeof posting?.url==='string'?posting.url:location.href.replace(/\/apply(?:\/.*)?$/i,''),context_source:posting?'JobPosting':'workday_public',job_locations:jobLocations.slice(0,20)}:{})
     };
   }
 
@@ -978,7 +1007,7 @@
     const repeated = new Set();
     const keys = new Set();
     for (const element of controls) {
-      if (["checkbox","radio"].includes(choiceKind(element)) && !native.closest(element,'form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]') && !yesNoProxy(element)) continue;
+      if (["checkbox","radio"].includes(choiceKind(element)) && !native.closest(element,'form,fieldset,[data-automation-id^="formField"],[role="group"],[role="radiogroup"]') && !yesNoProxy(element) && !cc305Group(element)) continue;
       if (grouped.has(element) || /captcha|honeypot|honey.?pot|fax|website_confirm/i.test([element.name,element.id,label(element)].join(" "))) continue;
       let kind = element.tagName === "SELECT" ? "select" : element.getAttribute("role") === "combobox" || element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') || element.getAttribute("data-automation-id") === "multiSelectInput" || isPrompt(element) ? "combobox" :
         element.tagName === "TEXTAREA" || element.isContentEditable ? "textarea" : choiceKind(element) || "text";
@@ -987,9 +1016,10 @@
       let fieldLabel = kind === "file" ? fileLabel(element) : label(element);
       const section = sectionHint(element);
       const datePart = element.getAttribute('data-automation-id');
-      if (/^dateSection(Month|Year)(?:-input)?$/.test(datePart || '')) {
+      const dateContext=dateBinding(element);
+      if (/^dateSection(Month|Day|Year)(?:-input)?$/.test(datePart || '')) {
         const heading = dateHeading(element);
-        fieldLabel = heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date') + ' ' + (datePart.includes('Month') ? 'month' : 'year');
+        fieldLabel = (dateContext?.context==='cc305_signed'?'CC305 date signed':heading.replace(/\s*\*$/, '').replace(/^(from|to)$/i, '$1 date')) + ' ' + datePart.match(/Month|Day|Year/)[0].toLowerCase();
       }
       const proxy=yesNoProxy(element);
       let container;
@@ -1008,11 +1038,13 @@
       let options = kind === "select" ? Array.from(element.options).filter(option => !option.disabled && option.value !== "").map(option => clean(option.text)) :
         ["radio", "checkbox"].includes(kind) ? members.map(label) : [];
       if(proxy){kind='radio';options=proxy.choices.map(text);}
+      if(cc305Group(element)){kind='radio';fieldLabel='Disability status';}
       container=questionContainer(container);
       fields.push({key, label: fieldLabel.slice(0,2000), kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
         options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: remoteAutocomplete(element)} : {}),
-        section, placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
+        section, ...(dateContext?{date_context:dateContext.context,date_part:dateContext.part}:{}),
+        ...sectionEntry(element), placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       for(const member of members)controlRoots.set(member,member.getRootNode());
       records.set(key, {element, members, pageUrl:location.href, labelAtScan:label(element),
         choiceQuestionAtScan:['radio','checkbox'].includes(kind) ? choiceQuestion(element) : null, field: fields[fields.length - 1]});
@@ -1130,6 +1162,16 @@
     checkRepair();
     for (const type of ["input", "change", "blur"]) element.dispatchEvent(new Event(type, {bubbles: true, composed: true}));
   }
+  function bachelorDegree(value) {
+    const name=sectionNormal(String(value || ''));
+    return /^(bachelor|bachelors|bachelor s|bachelor degree|bachelors degree|bachelor s degree|bs|b s|bsc|b sc|bachelor of science|bachelor s? or equivalent first degree isced 6(?: ba bsc beng llb etc)?)$/.test(name);
+  }
+  function bachelorChoice(options,getText) {
+    const choices=options.filter(item=>bachelorDegree(getText(item)));
+    const preferred=choices.filter(item=>/^(bachelor s degree|bachelors degree)$/.test(sectionNormal(getText(item))));
+    return preferred.length===1 && !choices.some(item=>/\bisced\b/.test(sectionNormal(getText(item))))?
+      preferred[0]:choices.length===1?choices[0]:undefined;
+  }
   function best(options, value, getText = item => item) {
     if (value === 'highest') {
       const numeric = options.filter(item => /^\s*\d+/.test(getText(item)));
@@ -1137,11 +1179,8 @@
       const rank = item => {const name=normal(getText(item));return /native/.test(name)?5:/fluent|expert/.test(name)?4:/advanced/.test(name)?3:/intermediate/.test(name)?2:/basic|beginner/.test(name)?1:0;};
       return options.filter(item=>rank(item)>0).sort((a,b)=>rank(b)-rank(a))[0];
     }
-    const degree = name => /^(bachelor'?s?( degree)?|bachelor of science|b\.?s\.?)$/.test(normal(name));
-    if (degree(value)) {
-      const choices=options.filter(item=>degree(getText(item)));
-      const preferred=choices.find(item=>normal(getText(item))==="bachelor's degree");
-      if (preferred || choices.length===1) return preferred || choices[0];
+    if (bachelorDegree(value)) {
+      return bachelorChoice(options,getText);
     }
     const exact = options.find(item => clean(getText(item)) === clean(value));
     const folded = options.find(item => normal(getText(item)) === normal(value));
@@ -1167,11 +1206,8 @@
     if (months) return options.find(option => months.includes(normal(getText(option))) ||
       element.tagName === 'SELECT' && months.includes(normal(option.value)));
     if (value === 'highest') return best(options,value,getText);
-    const bachelor=name=>/^(bachelor'?s?( degree)?|bachelor of science|b\.?s\.?)$/.test(normal(name));
-    if (bachelor(value)) {
-      const choices=options.filter(option=>bachelor(getText(option)));
-      const preferred=choices.filter(option=>normal(getText(option))==="bachelor's degree");
-      if (preferred.length===1 || choices.length===1) return preferred[0] || choices[0];
+    if (bachelorDegree(value)) {
+      return bachelorChoice(options,getText);
     }
     const exact = options.filter(option => clean(getText(option)) === clean(value));
     const folded = options.filter(option => normal(getText(option)) === normal(value));
@@ -1360,7 +1396,7 @@
       checkRepair();
       const record = refreshRecord(records.get(answer.key));
       const canFill=native.read(()=>{
-      if(record?.members.some(robotOnly))return false;
+      if(record?.members.some(member=>robotOnly(member) || !answer.force && repairEdited.has(member)))return false;
       if (!record || record.pageUrl && record.pageUrl!==location.href ||
           (record.labelAtScan!==label(record.element) || record.choiceQuestionAtScan!==null && record.choiceQuestionAtScan!==choiceQuestion(record.element)) ||
           !writableRecord(record) || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element) || !record.members.every(member => record.field.kind === "file" ? member.isConnected && !member.disabled && !member.matches(":disabled") : interactiveVisible(member)) || occupied(record) && !answer.force) return false;
@@ -1475,20 +1511,26 @@
             member=>controlChecked(member)===answer.value : member=>controlChecked(member)===values.includes(label(member));
           if (answer.batch_settlement ? !record.members.every(wanted) : !await retainedNative(record,current=>current.members.every(wanted))) {unresolved(false);continue;}
         } else {
-          const value = String(await phoneValue(element, answer.value ?? "", field));
+          let value = String(await phoneValue(element, answer.value ?? "", field));
+          if(field.date_context==='cc305_signed') {
+            const today=new Date();
+            value={month:String(today.getMonth()+1).padStart(2,'0'),day:String(today.getDate()).padStart(2,'0'),year:String(today.getFullYear())}[field.date_part];
+          }
           checkRepair();
           if(!writableRecord(record) || record.labelAtScan!==label(element))continue;
           if (field.max_length !== null && value.length > field.max_length) { unresolved(false); continue; }
           if (element.isContentEditable || !("value" in element)){trace("field","typed",element,{value});element.textContent = value;}
           else {
             element.focus();
-            if (/_date$/.test(sectionField(element))) await typeDate(element,value);
+            if (field.date_context || /_date$/.test(sectionField(element))) await typeDate(element,value);
             else nativeSet(element, "value", value);
           }
           events(element);
           element.blur?.();
           if(!answer.batch_settlement && (field.kind==='tel'||/phone|mobile/i.test(field.label)) && !await settledText(record,value,true)){unresolved(false);continue;}
           if(answer.verify_settled && !await settledText(record,value)){unresolved(false);continue;}
+          if(field.date_context && !answer.batch_settlement && !await retainedNative(record,current=>
+              current.element.value===value || /^\d+$/.test(value) && Number(current.element.value)===Number(value))){unresolved(false);continue;}
           if (/_date$/.test(sectionField(element)) && element.value !== value &&
               (!/^\d+$/.test(value) || Number(element.value) !== Number(value))) { unresolved(false); continue; }
         }
@@ -1525,10 +1567,52 @@
     }
     return [...found].filter(([container,kind],i,all) => !all.some(([other,k]) => k===kind && other!==container && other.contains(container)));
   }
+  function cc305Option(element) {
+    if(!element.matches('input[type="checkbox"],input[type="radio"]'))return '';
+    const values=[...Array.from(element.labels||[]).map(questionText),element.getAttribute('aria-label'),questionText(element.closest('tr'))];
+    return values.map(clean).find(value=>/^(?:Yes, I have a disability, or have had one in the past|No, I do not have a disability and have not had one in the past|I do not want to answer)\.?$/i.test(value)) || '';
+  }
+  function cc305Group(element) {
+    if(!cc305Option(element) || !/^(?:Disability)$|Voluntary Self.Identification of Disability|Form CC.305/i.test(sectionHint(element)))return null;
+    for(let node=element.parentElement;node && !node.matches('form,body');node=node.parentElement) {
+      const choices=Array.from(node.querySelectorAll('input[type="checkbox"],input[type="radio"]'));
+      if(choices.length===3 && choices.every(cc305Option) && new Set(choices.map(cc305Option)).size===3)return node;
+      if(choices.length>3)return null;
+    }
+    return null;
+  }
+  function dateBinding(element) {
+    const part=/^dateSection(Month|Day|Year)(?:-input)?$/.exec(element.getAttribute('data-automation-id') || '');
+    const wrapper=element.closest('[data-automation-id="dateInputWrapper"][role="group"]');
+    if(!part || !wrapper)return null;
+    const identity=[wrapper.id,wrapper.getAttribute('aria-labelledby'),element.id].join(' ');
+    if(/selfIdentifiedDisabilityData--dateSignedOn/.test(identity))return {context:'cc305_signed',part:part[1].toLowerCase()};
+    if(/\b(?:anticipated|expected|projected)?\s*graduation\b/i.test(dateHeading(element)))return {context:'graduation',part:part[1].toLowerCase()};
+    return null;
+  }
+  function sectionEntry(element) {
+    const section=resumeSections().find(([container,kind])=>['experience','education'].includes(kind) && container.contains(element));
+    if(!section)return {};
+    const [container,kind]=section, group=entryGroups(container,kind).find(node=>node.contains(element));
+    if(!group)return {};
+    const anchors=kind==='experience'?['company','title']:['school'], entry={};
+    for(const input of group.querySelectorAll('input,select,[role="combobox"]')) {
+      const key=sectionField(input);
+      if(anchors.includes(key))entry[key]=input.matches('[role="combobox"]')?comboSelection(input):clean(input.value);
+    }
+    return Object.values(entry).some(Boolean)?{section_entry:entry}:{};
+  }
   function dateHeading(element) {
     const field=element.closest('[data-automation-id^="formField"]');
     const wrapper=element.closest('[data-automation-id="dateInputWrapper"]') || field;
-    const heading=text(field?.querySelector('label')) || text(wrapper?.querySelector('label')) || wrapper?.getAttribute('aria-label');
+    const signed=[wrapper?.id,wrapper?.getAttribute('aria-labelledby'),element.id].join(' ');
+    if(/selfIdentifiedDisabilityData--dateSignedOn/.test(signed))return 'CC305 date signed';
+    let heading=text(field?.querySelector('label,[data-automation-id="formLabel"]')) || text(wrapper?.querySelector('label')) || wrapper?.getAttribute('aria-label');
+    if(!heading && wrapper)for(let node=wrapper,depth=0;node && !node.matches('form,body') && depth<4;node=node.parentElement,depth++) {
+      heading=referencedLabel(node,'aria-labelledby') || text(node.querySelector(':scope > label,:scope > [data-automation-id="formLabel"],:scope > [data-automation-id="richText"]'));
+      if(heading && !/^(?:month|day|year|\d+[\/ -]\d+)/i.test(heading))break;
+      heading='';
+    }
     if(heading) return heading;
     const id=field?.getAttribute('data-automation-id') || '';
     return /startDate|firstYearAttended/.test(id)?'From':/endDate|lastYearAttended/.test(id)?'To':label(element);
@@ -1536,8 +1620,8 @@
   function sectionField(element) {
     let value = sectionNormal(label(element)).replace(/ star$/, '');
     const part = element.getAttribute('data-automation-id') || '';
-    if (/dateSection(Month|Year)/.test(part)) {
-      value = sectionNormal(dateHeading(element)) + ' ' + (part.includes('Month') ? 'month' : 'year');
+    if (/dateSection(Month|Day|Year)/.test(part)) {
+      value = sectionNormal(dateHeading(element)) + ' ' + part.match(/Month|Day|Year/)[0].toLowerCase();
     }
     const wrapper = element.closest('[data-automation-id^="formField-"]')?.getAttribute('data-automation-id');
     const known = {jobTitle:'title',companyName:'company',location:'location',currentlyWorkHere:'current',startDate:'start_date',endDate:'end_date',roleDescription:'description',schoolName:'school',school:'school',degree:'degree',fieldOfStudy:'major',gradeAverage:'gpa',firstYearAttended:'start_date',lastYearAttended:'end_date'};
@@ -1950,24 +2034,8 @@
       if(/employee id/.test(heading)) {managed.add(el);continue;}
       if(/^(name|full name)$/.test(heading)) {managed.add(el);if(!clean(el.value)&&name){nativeSet(el,'value',name);events(el);}continue;}
       if(/^language$/.test(heading)) {managed.add(el);if(el.tagName==='SELECT'){const option=Array.from(el.options).find(o=>normal(o.text)==='english');if(option){nativeSet(el,'value',option.value);events(el);}}else if(record.field.kind==='combobox') await fillCombo(el,'English');continue;}
-      if(/^date$/.test(heading) || /^date$/.test(normal(dateHeading(el)).replace(/\s*\*$/,''))) {
-        managed.add(el);
-        const part=el.getAttribute('data-automation-id')||'';
-        const value=/Month/.test(part)?month:/Day/.test(part)?day:/Year/.test(part)?year:el.type==='date'?year+'-'+month+'-'+day:month+'/'+day+'/'+year;
-        if(el.value!==value) {await typeDate(el,value);events(el);el.blur();}
-        if(el.value!==value && Number(el.value)!==Number(value)) errors.push('Self Identify date did not commit');
-      }
     }
-    const choices=Array.from(document.querySelectorAll('input[type="checkbox"],input[type="radio"]')).filter(el=>/^(yes, i have a disability|no, i do not have a disability|i do not want to answer)/i.test(label(el)));
-    for(const el of choices) managed.add(el);
-    const preference=normal(profile.application_preferences?.disability || profile.demographics?.disability);
-    const prefix=/^yes/.test(preference)?'yes,':/^no/.test(preference)?'no,':/decline|do not|prefer not/.test(preference)?'i do not want to answer':'';
-    const target=choices.find(el=>normal(label(el)).startsWith(prefix));
-    if(prefix && target) {
-      for(const el of choices.filter(el=>el!==target && checked(el))) await setCheckbox(el,false);
-      await setCheckbox(target,true);
-      if(!checked(target) || choices.some(el=>el!==target && checked(el))) errors.push('Disability choice did not commit');
-    } else if(choices.length) errors.push('Choose a disability response in your profile');
+    // Dates and the exclusive CC305 disclosure use the shared bound records.
     return errors;
   }
   async function prepareSections(profile) {return traced("section",()=>fillSections(profile));}
@@ -2009,7 +2077,7 @@
           for (const el of elements) {
             managed.add(el);
             // Only complete a partially filled entry when its anchor matches the profile.
-            const degreeReplace=kind==='education' && sectionField(el)==='degree' && Boolean(el.closest('[data-automation-id="formField-degree"]')) && !best([comboSelection(el) || el.value],entry.degree);
+            const degreeReplace=kind==='education' && !repairEdited.has(el) && sectionField(el)==='degree' && Boolean(el.closest('[data-automation-id="formField-degree"]')) && !best([comboSelection(el) || el.value],entry.degree);
              if((occupiedGroup && !matchesEntry) || isOccupied(el) && !degreeReplace){trace('section','skipped',el,{reason:'occupied entry or field'});continue;}
              trace('section','found',el);
             const key=sectionField(el); if(!key && kind!=='languages') continue;
@@ -2540,5 +2608,18 @@
   }
   globalThis.autoApplyContent.syncWritingButtons=scheduleWritingButtons;
   globalThis[singleton]=globalThis.autoApplyContent;
-  if(window===window.top)chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
+  if(window===window.top) {
+    chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});
+    let lastPublicContext='';
+    const capturePosting=()=>{
+      const page=pageInfo();if(!page.context_source)return;
+      const signature=JSON.stringify(page);if(signature===lastPublicContext)return;
+      lastPublicContext=signature;
+      chrome.runtime.sendMessage({type:'public-job-context',page}).catch(()=>{});
+    };
+    let postingTimer;
+    new MutationObserver(()=>{clearTimeout(postingTimer);postingTimer=setTimeout(capturePosting,250);})
+      .observe(document.body,{subtree:true,childList:true,characterData:true});
+    capturePosting();
+  }
 })();

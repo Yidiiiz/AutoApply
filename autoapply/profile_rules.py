@@ -41,6 +41,9 @@ def _get(profile, path):
 
 def completed_education(label):
     text = _norm(label)
+    if (re.search(r'\b(?:credits?|credit hours?|semester hours?)\b', text)
+            and re.search(r'\b(?:how many|number of|total)\b', text)):
+        return False
     return bool(re.search(r'\b(?:degree|qualifications?|level of education)\b', text)
                 and re.search(r'\b(?:highest|achieved|completed|awarded|earned)\b', text))
 
@@ -48,6 +51,16 @@ def completed_education(label):
 def preference_boolean(label):
     """Return an explicit preference path and question polarity, never a default."""
     text = _norm(label)
+    if re.fullmatch(r'(?:are you |are you currently |do you identify as |)(?:a |an |the )?(?:military spouse|spouse of (?:a |an )?(?:military member|veteran))', text):
+        return 'demographics.military_spouse', False
+    if re.fullmatch(r'(?:are you |are you currently |do you serve in |)(?:a )?(?:member of (?:the )?)?(?:national guard(?: or (?:the )?reserves)?|reserves)', text):
+        return 'demographics.national_guard_reserves', False
+    if re.search(r'\b(?:ai|artificial intelligence)\b', text) and re.search(r'\b(?:review|screen|process)\w*\b', text):
+        if re.search(r'\bopt out\b', text) and not re.search(r'\bopt in\b', text):
+            return 'application_preferences.employer_ai_review_opt_out', False
+        if re.search(r'\b(?:opt in|consent|agree|allow)\b', text) and not re.search(r'\b(?:not|never|opt out)\b', text):
+            return 'application_preferences.employer_ai_review_opt_out', True
+        return 'application_preferences.employer_ai_review_opt_out', None
     short_privacy = re.fullmatch(
         r'(?:i )?(?:agree to|acknowledge|acknowledge that i have read) (?:the )?privacy (?:policy|notice)', text)
     if (re.search(r'\bprivacy (?:policy|notice)\b', text)
