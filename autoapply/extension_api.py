@@ -447,6 +447,10 @@ def _analysis_active(field):
     if ('hidden_parent' in field['reasons'] or
             any(not exposed(parent) or parent['opacity'] == 0 for parent in parents)):
         return False
+    file_proxy = field.get('file_proxy')
+    if (field['kind'] == 'file' and field['detected'] and file_proxy and
+            exposed(file_proxy) and file_proxy['opacity'] > 0):
+        return True
     if control.get('display') == 'none' or control.get('visibility') in {'hidden', 'collapse'} or control.get('aria-hidden') == 'true':
         return False
     # Transparent native controls and tiny select-only focus proxies are real
@@ -583,6 +587,10 @@ def _page_analysis(dashboard, payload, host):
             if type(field.get(key)) is not bool:
                 raise SettingsRejected('Invalid analysis field state')
             row[key] = field[key]
+        if 'file_proxy' in field:
+            if row['kind'] != 'file' or row['control'].get('type') != 'file' or not row['detected']:
+                raise SettingsRejected('Invalid analysis file proxy')
+            row['file_proxy'] = _analysis_structure(field['file_proxy'])
         frame_id, identity = field.get('frame_id', 0), field.get('page_identity', '')
         if type(frame_id) is not int or not 0 <= frame_id <= 1000000 or not isinstance(identity, str) or len(identity) > 100 or not re.fullmatch(r'[0-9:]*', identity):
             raise SettingsRejected('Invalid analysis source')
@@ -631,7 +639,7 @@ def _page_analysis(dashboard, payload, host):
                 notes.append('Read-only field; inspect the associated widget before attempting a fill.')
             if 'transparent_proxy' in why:
                 notes.append('Input is transparent; parent geometry and classes are captured for review.')
-            if 'hidden_parent' in why or 'hidden_control' in why:
+            if 'hidden_parent' in why or 'hidden_control' in why and not field.get('file_proxy'):
                 notes.append('Hidden ancestor or mobile fallback; use the visible version of this field.')
             if 'disabled' in why:
                 notes.append('Disabled control; a prerequisite may need completing first.')
@@ -696,7 +704,7 @@ def _page_analysis(dashboard, payload, host):
         before = _page_analysis(dashboard, dict(payload, diagnostic=dict(repair['before'], reason='page_analysis', inspections=diagnostic.get('inspections', []))), host)
         sanitized_repair = dict(filled=repair['filled'], attempts=repair['attempts'], stopped=repair['stopped'],
                                 before=before)
-        if total:
+        if total or repair['filled']:
             summary = f'Filled {repair["filled"]} \u00b7 {unanswered} need attention'
         if repair['stopped'] == 'transport_error':
             summary += ' \u00b7 Dashboard transport unavailable after bounded retries; saved answers can be retried'
@@ -710,9 +718,10 @@ def _page_analysis(dashboard, payload, host):
             continue
         inventory = next((i for i in inspections if i['frame_id'] == field['frame_id']), None)
         ids = {r['id'] for r in inventory['roots']} if inventory else set()
-        if field['root_id'] not in ids or any(shape.get('root_id', field['root_id']) not in ids for shape in [field['control'], *field['ancestors']]):
+        shapes = [field['control'], *field['ancestors'], *([field['file_proxy']] if 'file_proxy' in field else [])]
+        if field['root_id'] not in ids or any(shape.get('root_id', field['root_id']) not in ids for shape in shapes):
             raise SettingsRejected('Unknown analysis root')
-    if not total and inspections:
+    if not total and inspections and not (sanitized_repair and sanitized_repair['filled']):
         messages = {'unsupported_shadow_controls': 'Open shadow controls need scanner support.',
                     'access_blocked': 'Page access or verification requires user attention.',
                     'loading': 'Page is loading; wait for the inputs.',

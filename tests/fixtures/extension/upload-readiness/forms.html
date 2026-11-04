@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic job application</title>
+<style>body{font:16px sans-serif}section,form,[role=group]{padding:12px}button{padding:8px}spl-wrapper,spl-context-provider,spl-input,spl-form-field,spl-dropzone,x-upload{display:block}</style>
+<main id="stage"></main>
+<script>
+// Public control shapes only. No requests, real files, account action or submit.
+window.uploadAttempts=0;window.submissions=0;window.behavior='retain';
+document.addEventListener('submit',e=>{e.preventDefault();submissions++});
+function uploadMarkup(){return `<section role="group" aria-labelledby="Resume/CV-Only-section">
+  <h4 id="Resume/CV-Only-section">Resume/CV Only</h4>
+  <div data-automation-id="formField-">
+    <label id="label68">Upload a file (5MB max)*</label>
+    <div data-automation-id="attachments-FileUpload" aria-labelledby="label68">
+      <div data-automation-id="file-upload-drop-zone">
+        <button id="resumeAttachments--attachments" data-automation-id="select-files" type="button">Select files</button>
+        <input type="file" data-automation-id="file-upload-input-ref" hidden>
+        <span role="status"></span>
+      </div>
+    </div>
+    <p id="elementerror-resumeAttachments--attachments" data-automation-id="inputAlert"></p>
+  </div></section>`;}
+function wire(root){root.querySelectorAll('input[type=file]').forEach(input=>input.onchange=()=>{
+  uploadAttempts++;
+  const group=input.closest('[data-automation-id="attachments-FileUpload"],[data-upload]');
+  const status=group.querySelector('[role=status]'),name=input.files[0]?.name||'';
+  if(behavior==='reset'){const replacement=input.cloneNode();input.replaceWith(replacement);return;}
+  if(behavior==='clear'){input.value='';return;}
+  status.textContent=name;
+  const remove=document.createElement('button');remove.type='button';remove.textContent='Remove file';group.append(remove);
+  if(behavior==='reject')setTimeout(()=>{
+    // Observed Workday error shape, without a role or error class or file noun.
+    root.querySelector('[data-automation-id=inputAlert]').textContent='The attachment was rejected.';
+  },450);
+});}
+function workday(nested=false){
+  stage.innerHTML='<h1>Job application</h1><form id="application"></form><div><button type="button">Remove work experience</button><span>unrelated.pdf</span></div>';
+  let root=document.getElementById('application');
+  if(nested){
+    const decoy=document.createElement('x-upload');root.append(decoy);
+    decoy.attachShadow({mode:'open'}).innerHTML='<h4 id="Resume/CV-Only-section">Cover Letter</h4><label id="label68">Photo</label>';
+    const host=document.createElement('x-upload');root.append(host);root=host.attachShadow({mode:'open'});
+  }
+  root.innerHTML+=uploadMarkup();wire(root);
+}
+function smartShell(){
+  stage.innerHTML='<spl-wrapper></spl-wrapper><spl-toaster></spl-toaster>';
+  const wrapper=stage.querySelector('spl-wrapper').attachShadow({mode:'open'});
+  wrapper.innerHTML='<spl-context-provider></spl-context-provider>';
+  wrapper.querySelector('spl-context-provider').attachShadow({mode:'open'});
+  stage.querySelector('spl-toaster').attachShadow({mode:'open'}).innerHTML='<div role=status></div><div role=alert></div>';
+}
+function mount(){
+  const root=stage.querySelector('spl-wrapper').shadowRoot.querySelector('spl-context-provider').shadowRoot;
+  root.innerHTML='<form><h1>Job application</h1><spl-input></spl-input><spl-form-field></spl-form-field></form>';
+  root.querySelector('spl-input').attachShadow({mode:'open'}).innerHTML='<label>Email<input type=email id=email></label>';
+  const field=root.querySelector('spl-form-field').attachShadow({mode:'open'});
+  field.innerHTML='<spl-dropzone></spl-dropzone>';
+  const drop=field.querySelector('spl-dropzone').attachShadow({mode:'open'});
+  drop.innerHTML='<div data-upload aria-label="Resume/CV"><label>Resume/CV<input type=file hidden></label><button type=button>Upload</button><span role=status></span></div>';
+  wire(drop);
+}
+if(window.fixtureMode==='smart')smartShell();else workday(window.fixtureMode==='nested');
+</script>

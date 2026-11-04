@@ -138,6 +138,10 @@ async function accountFrames(tabId) {
   if(top.some(frame=>frame.result?.active))return top;
   return readFrames({...probe,target:{tabId,allFrames:true}});
 }
+const compactApplicationState=tabId=>readFrames({target:{tabId,allFrames:true},func:()=>{
+  const api=globalThis.autoApplyContent;if(!api)return null;
+  return {diagnostic:{fields:[],busy:false,truncated:false},state:api.runtimeState(),readiness:api.inputReadiness()};
+}});
 function postingKey(value) {
   try {
     const url=new URL(value),path=url.pathname.replace(/\/apply(?:\/.*)?$/i,'');
@@ -256,6 +260,49 @@ async function coverLetter(result, answers) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const formWaits = new Map(), cancelledTabs = new Set(), closedTabs = new Set();
 const formWaitTokens = new Map();
+async function waitForApplicationInputs(tabId, automatic=false) {
+  const tab=await chrome.tabs.get(tabId),epoch=runEpoch,version=sidebarVersions.get(tabId);
+  // Reserve the same minimal record used by passive footer initialization before
+  // probing hydration. That listener may update this owner, but cannot replace it.
+  let owner=activeResults.get(tabId);
+  if(!owner){
+    owner={tabId,url:tab.url,page:{},fields:[],pending:[],writing:[],completed:[],
+      summary:{filled:0,skipped:0,needs_input:[],needs_writing:[],errors:[]}};
+    activeResults.set(tabId,owner);
+  }
+  const probe=async()=>(await compactApplicationState(tabId)).map(frame=>({...frame,result:frame.result?.readiness}));
+  const before=(await probe()).filter(f=>f.result);
+  const ready=frames=>frames.some(f=>f.result?.private || f.result?.controls || f.result?.navigation?.kind && f.result.navigation.kind!=='none');
+  if(ready(before) || !before.some(f=>f.result.initializing))return {waited:false,owner};
+  const validate=async frames=>{
+    const {chromeRunPaused=false}=await chrome.storage.session.get('chromeRunPaused');
+    if(staleRun(epoch) || chromeRunPaused || closedTabs.has(tabId) || cancelledTabs.has(tabId) ||
+       activeResults.get(tabId)!==owner || (await chrome.tabs.get(tabId)).url!==tab.url ||
+       sidebarStates.get(tabId)==='closed' && sidebarVersions.get(tabId)!==version ||
+       automatic && !(await snapshots.preference()).enabled || !before.every(old=>frames.some(f=>
+         f.frameId===old.frameId && f.documentId===old.documentId && f.result?.url===old.result.url && f.result.revision===old.result.revision)))
+      throw Error('Application or answer changed while waiting. Retry when the inputs are ready.');
+  };
+  const status={...owner,tabId,url:tab.url,busy:true,waiting:true,progress:'Waiting for application inputs...'};
+  let frames=before;
+  try {
+    await validate(frames);await report(status);
+    const end=Date.now()+8000;
+    // Each read rediscovers native/open roots. No root cache crosses this await.
+    do {
+      await delay(200);
+      await validate(frames);
+      frames=(await probe()).filter(f=>f.result);
+      await validate(frames);
+      if(ready(frames) || frames.some(f=>f.result.status==='access_blocked'))break;
+    } while(Date.now()<end);
+    const empty=!ready(frames),message=frames.find(f=>f.result.message)?.result.message || 'No application inputs are exposed yet. Retry when the form is ready.';
+    return {waited:true,empty,message,owner,check:async()=>validate((await probe()).filter(f=>f.result))};
+  } finally {
+    if(activeResults.get(tabId)===owner && !closedTabs.has(tabId) && !cancelledTabs.has(tabId))
+      await report({...status,busy:false,waiting:false,progress:'Check the application inputs, then retry if needed.'});
+  }
+}
 function cancelWait(tabId) {
   chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyCredentials?.invalidate()}).catch(()=>{});
   clearTimeout(formWaits.get(tabId)); formWaits.delete(tabId); cancelledTabs.add(tabId); pendingSteps.delete(tabId);
@@ -635,7 +682,9 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     activeResults.set(result.tabId,result);
     await report(result);
     await showSidebar(result.tabId);
+    const readiness=await waitForApplicationInputs(result.tabId);
     let scanned = await scan(tabId);
+    await readiness.check?.();
     if (cancelledTabs.has(scanned.tabId)) return result;
     if (!scanned.sign_in && !scanned.fields.length && scanned.next_action?.kind!=='submit') scanned = await openApplication(scanned);
     if(cancelledTabs.has(scanned.tabId))return result;
@@ -666,10 +715,10 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     }
     if (result.sign_in || !result.fields.length) {
       result.state = "needs_input";
-      result.detail = result.progress = result.sign_in ? await fillAccount(result) : 'Waiting for the application form...';
-      result.waiting = true;
+      result.detail = result.progress = result.sign_in ? await fillAccount(result) : readiness.empty?readiness.message:'Waiting for the application form...';
+      result.waiting = result.sign_in || !readiness.empty;
       result.busy = false;
-      pollForForm(result);
+      if(result.waiting)pollForForm(result);
       const reported=await report(result);
       if(!result.sign_in)snapshots.capture(result);
       return reported;
@@ -848,6 +897,7 @@ async function action(message) {
       const epoch=runEpoch;
       let current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined,
         run_id=current?.url===tab.url?current.matched?.run_id:undefined;
+      const fresh=!current || current.url!==tab.url;
       const transport=error=>/Dashboard is busy|Dashboard is not reachable|Dashboard request failed \(503\)/i.test(error.message || '');
       async function answerRequest(path,payload,frame){
         for(let retry=0;;retry++){
@@ -866,7 +916,10 @@ async function action(message) {
         return {...inspected,...(!automatic || structural?api.pageStructure():{nodes:[],truncated:false}),structural,
           ...(automatic && after?{automaticState:api.runtimeState()}: {})};
       },args:[after,Boolean(message.automatic)]});
+      const readiness=await waitForApplicationInputs(tab.id,Boolean(message.automatic));
+      if(!current)current=readiness.owner;
       const auth=await accountFrames(tab.id);
+      await readiness.check?.();
       if(auth.some(frame=>frame.result?.active)){
         if(message.automatic){scheduleAutoAccount(tab.id);return {ok:true,summary:'Account details require private preview.',findings:[]};}
         if(staleRun(epoch) || cancelledTabs.has(tab.id) || (await chrome.tabs.get(tab.id)).url!==tab.url)throw Error('Application changed. Analyze page again.');
@@ -886,14 +939,11 @@ async function action(message) {
         return {ok:true,tabId:tab.id,url:tab.url,summary:detail,findings:[{label:'Account step',notes:[detail]}],busy:false};
       }
       // Bind compact control metadata first. No DOM serialization precedes fills.
-      const before=await readFrames({target:{tabId:tab.id,allFrames:true},func:()=>{
-        const api=globalThis.autoApplyContent;if(!api)return null;
-        return {diagnostic:{fields:[],busy:false,truncated:false},state:api.runtimeState()};
-      }});
+      const before=await compactApplicationState(tab.id);
+      await readiness.check?.();
       if(current)current.waiting=false;
       const targets=before.filter(f=>f.result);
       if(targets.some(f=>f.result.diagnostic.busy))throw Error('Application is busy. Wait and retry.');
-      const fresh=!current || current.url!==tab.url;
       if(fresh){
         current={tabId:tab.id,url:tab.url,page:{},fields:[],pending:[],writing:[],completed:[],
           pageIdentities:Object.fromEntries(targets.map(f=>[f.frameId,{documentId:f.documentId}])),
@@ -1029,7 +1079,8 @@ async function action(message) {
           fields:[...live.values()],page:{...(top?.page || {}),url:tab.url,...(current.matched?.company?{company:current.matched.company}:{}),...(current.matched?.title?{title:current.matched.title}:{})},
           next_action:top?.next_action,sign_in:false,accountMode:undefined,waiting:false,busy:false,stalePage:false,
           pageIdentities:Object.fromEntries(available.map(frame=>[frame.frameId,{identity:frame.result.identity,documentId:frame.documentId}])),
-          progress:pending.some(f=>/^provider_|^stale_data$/.test(f.reason_code || ''))?'Answer provider unavailable; retry Analyze.':pending.length?'Needs your input: '+pending.map(f=>f.label).slice(0,3).join('; '):`Filled ${filled} answers.`,
+          progress:!fields.length && !filled && inspections.find(i=>i.message)?.message ||
+            (pending.some(f=>/^provider_|^stale_data$/.test(f.reason_code || ''))?'Answer provider unavailable; retry Analyze.':pending.length?'Needs your input: '+pending.map(f=>f.label).slice(0,3).join('; '):`Filled ${filled} answers.`),
           summary:{...current.summary,filled:completed.length,skipped:[...live.values()].filter(f=>f.repair_status==='optional_skip').length,
             needs_input:pending.map(field=>field.label),needs_writing:writing.map(field=>field.label)}};
         await report(updated,unchanged);
@@ -1074,7 +1125,7 @@ async function action(message) {
           run.error='';await saveRun(run,false,epoch);
         }
       }
-      const unavailable=!fields.length && inspections.find(i=>i.message);
+      const unavailable=!fields.length && !filled && inspections.find(i=>i.message);
       let automaticSignature;
       if(message.automatic && saved.ok && stopped==='none'){
         // Cache the inspected post-fill state only while its original repair

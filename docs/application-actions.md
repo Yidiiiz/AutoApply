@@ -143,3 +143,35 @@ Root's privacy review of the nine changed staged files found no new secret
 patterns, secret assignments or forbidden paths, and no private file was
 committed. Baseline CLI warnings concerned PNG icons, source password-variable
 identifiers and synthetic credential tests; scanner and policy were unchanged.
+
+T090 resolves generic upload captions through the nearest visible, single-file
+semantic group and its tree-local accessible title. The captured Workday
+`Resume/CV Only` section therefore supplies resume purpose to Autofill and Analyze.
+Specific attachment purposes, ambiguous sibling uploads, disabled/inert controls
+and occupied user files retain their guards; the backend ambiguity policy is
+unchanged. Analyze shares the existing owned visible-proxy check for labelled
+resume inputs. Upload confirmation stays inside the owned attachment UI, waits
+for retention, observes regional Workday `inputAlert` errors and pending upload
+UI, and withholds completion for rejected/reset controls or unrelated removals.
+
+Analyze, automatic recovery and Autofill reuse compact native state reads to
+recheck initializing applications for at most eight seconds, polling fresh open
+roots every 200 ms. Existing inputs take the immediate path. The captured empty
+SmartRecruiters one-click shell qualifies for this bounded wait; document, URL,
+edit, close, cancellation and pause changes invalidate it. Persistent empty or
+blocked pages retain an honest availability message and allow retry. Account
+privacy, qualified entry actions and explicit final submission remain guarded.
+
+T090 correction reserves a missing Analyze owner before hydration probes and
+adopts that record locally; genuine owner replacement still invalidates the wait.
+Known hidden resume inputs retain their native shape and report their owned
+visible uploader separately, so successful uploads report Filled 1 and failed or
+cleared uploads remain actionable. Verified fill counts survive absent geometry.
+Focused offline verification passed 127 checks across upload readiness, T087
+controls, T088 answers, T086 Analyze and diagnostic API compatibility, including
+20 readiness lifecycle scenarios. JavaScript, fixture/Python syntax and diff
+checks passed. Twelve synthetic MV3 cases cover light/shadow upload replies,
+retention/rejection/reset, late inputs, automatic recovery and invalidation;
+they remain unrun in this attempt and require the root gate. Only synthetic
+fixtures and temporary local backend data were used; no live employer/provider/
+Discord service, actual employer upload or real applicant file was exercised.

@@ -724,14 +724,33 @@
     if (!/\b(resume|cv|cover)\b/i.test(value) && /^(attach|upload|drop|choose|browse|select|drag)\b/i.test(value)) return "";
     return value;
   }
+  function uploadNodes(container, selector) {
+    // Composed ancestry owns descendants; IDREFs still resolve in their own tree.
+    return native.query(selector).filter(node=>{
+      for(let parent=native.parent(node);parent;parent=native.parent(parent))if(parent===container)return true;
+      return false;
+    });
+  }
+  function semanticUploadLabel(element) {
+    for(let group=native.parent(element);group && !group.matches('form,body,html');group=native.parent(group)) {
+      // Never borrow a section title across sibling attachment controls.
+      if(uploadNodes(group,'input[type="file"]').length!==1)return '';
+      if(!group.matches('fieldset,[role="group"],[role="region"],section[aria-label],section[aria-labelledby]'))continue;
+      const title=usableFileLabel(group.getAttribute('aria-label')) ||
+        usableFileLabel(referencedLabel(group,'aria-labelledby')) ||
+        usableFileLabel(text(group.querySelector(':scope > legend')));
+      if(title && visible(group))return title;
+    }
+    return '';
+  }
   function uploadGroupLabel(container, element) {
+    if (uploadNodes(container,'input[type="file"]').length > 1) return "";
     const accessible = usableFileLabel(container.getAttribute("aria-label")) ||
       usableFileLabel(referencedLabel(container, "aria-labelledby")) ||
       usableFileLabel(referencedLabel(container, "aria-describedby"));
     if (accessible) return accessible;
-    if (container.querySelectorAll('input[type="file"]').length > 1) return "";
-    const labels = Array.from(container.querySelectorAll('label,legend,[role="heading"],h1,h2,h3,h4,[class*="label"],[id^="upload-label-"]'))
-      .filter(node => node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const labels = uploadNodes(container,'label,legend,[role="heading"],h1,h2,h3,h4,[class*="label"],[id^="upload-label-"]')
+      .filter(node => node.getRootNode()===element.getRootNode() && node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
       .map(node => usableFileLabel(text(node))).filter(Boolean);
     if (labels.length) return labels[labels.length - 1];
     for (let sibling = container.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
@@ -751,10 +770,9 @@
   function analyzeResume(element) {
     if(!element?.matches('input[type="file"]') || element.disabled || element.readOnly ||
        element.getAttribute('aria-readonly')==='true' ||
-       element.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]') ||
+       native.closest(native.parent(element),'[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"],[disabled]') ||
        !/\b(resume|cv)\b/i.test(fileLabel(element)) || /\bcover\b/i.test(fileLabel(element)))return false;
-    return visible(element) || leverResumeProxy(element) ||
-      element.getAttribute('data-automation-id')==='file-upload-input-ref' && exposedFile(element);
+    return exposedFile(element);
   }
   function leverResumeProxy(element) {
     if(location.hostname!=='jobs.lever.co' || !element.matches('input[type="file"][name="resume"]#resume-upload-input') ||
@@ -769,9 +787,9 @@
   }
   function workdayUploadGroup(element){
     if(element.getAttribute('data-automation-id')!=='file-upload-input-ref')return null;
-    const group=element.closest('[data-automation-id="attachments-FileUpload"],[data-automation-id="fileUpload"],[data-automation-id^="formField"]');
-    if(!group || !visible(group) || group.querySelectorAll('input[type="file"]').length!==1)return null;
-    const buttons=Array.from(group.querySelectorAll('button[data-automation-id="select-files"]')).filter(visible);
+    const group=native.closest(element,'[data-automation-id="attachments-FileUpload"],[data-automation-id="fileUpload"],[data-automation-id^="formField"]');
+    if(!group || !visible(group) || uploadNodes(group,'input[type="file"]').length!==1)return null;
+    const buttons=uploadNodes(group,'button[data-automation-id="select-files"]').filter(visible);
     return buttons.length===1 || group.matches('[data-automation-id^="formField"]') && /\b(resume|cv)\b/i.test(uploadGroupLabel(group,element))?group:null;
   }
   function exposedFile(element) {
@@ -782,17 +800,18 @@
     if(!visible(container) || !/\b(resume|cv|cover)\b/i.test(fileLabel(element)))return false;
     // Workday keeps this input hidden even in the active, visible resume section.
     if(element.getAttribute('data-automation-id')==='file-upload-input-ref')return Boolean(workdayUploadGroup(element));
-    return Array.from(container.querySelectorAll('button,[role="button"],label')).some(node=>visible(node) &&
+    return uploadNodes(container,'button,[role="button"],label').some(node=>visible(node) &&
       /^(attach|upload|browse|choose|select)\b/i.test(text(node))) || Array.from(element.labels||[]).some(visible);
   }
   function fileContainer(element) {
     const workday=workdayUploadGroup(element);if(workday)return workday;
-    let container = element.parentElement;
+    let container = native.parent(element);
     while (container && !container.matches("form,body")) {
       if (uploadGroupLabel(container, element)) return container;
-      container = container.parentElement;
+      container = native.parent(container);
     }
-    return element.parentElement || element;
+    const parent=native.parent(element);
+    return parent && !parent.matches('form,body,html')?parent:element;
   }
   function fileLabel(element) {
     const lever=leverQuestionLabel(element);
@@ -802,23 +821,36 @@
       referencedLabel(element, "aria-describedby")].map(usableFileLabel).find(Boolean);
     const container = fileContainer(element);
     const group = uploadGroupLabel(container, element);
+    const local=direct || group || '';
+    // Specific local attachment purposes take precedence over an outer resume title.
+    const semantic=/\b(resume|cv|cover|transcript|photo|picture|certificate|portfolio)\b/i.test(local)?'':semanticUploadLabel(element);
     const identity = normal([element.id, element.name, element.accept, element.getAttribute("aria-label"),
-      element.getAttribute("aria-labelledby"), element.getAttribute("aria-describedby"), direct, group].join(" ")).replace(/[_-]/g, " ");
+      element.getAttribute("aria-labelledby"), element.getAttribute("aria-describedby"), direct, group, semantic].join(" ")).replace(/[_-]/g, " ");
+    const specific=local || semantic;
+    if(/\b(transcript|photo|picture|certificate|portfolio)\b/i.test(specific) && !/\b(resume|cv|cover)\b/i.test(specific))return specific;
     const purpose = /\bcover\b/.test(identity) ? "Cover Letter" : /\b(resume|cv)\b/.test(identity) ? "Resume/CV" : "";
-    const fieldLabel = direct || group;
+    const fieldLabel = direct || group || (purpose?'':semantic);
     return purpose && !/\b(resume|cv|cover)\b/i.test(fieldLabel || "") ? purpose : fieldLabel || purpose ||
       'File attachment';
   }
   function attachedFile(element) {
-    const container = element.closest('[data-automation-id^="formField"],[data-automation-id="fileUpload"],[class*="upload"],[class*="Upload"]') || fileContainer(element);
-    const shown = Array.from(container.querySelectorAll('*')).filter(visible).map(text);
+    const container = fileContainer(element);
+    if(uploadStates.get(container)?.confirmed===false || uploadError(element,container))return '';
+    const shown = uploadNodes(container,'*').filter(visible).map(text);
     const filename = shown.map(value => value.match(/[^\s<>]+\.(?:pdf|docx?|rtf|txt|odt)\b/i)?.[0]).find(Boolean);
     return filename || (shown.some(value => /successfully uploaded/i.test(value)) ? 'Already attached' : '');
   }
   function filenameShown(element, filename) {
     const container = fileContainer(element);
-    return [container, ...container.querySelectorAll("*")].some(node => visible(node) &&
+    return [container, ...uploadNodes(container,'*')].some(node => visible(node) &&
       Array.from(node.childNodes).some(child => child.nodeType === Node.TEXT_NODE && clean(child.textContent).includes(filename)));
+  }
+  const uploadStates=new WeakMap();
+  function uploadError(element, container) {
+    const field=native.closest(native.parent(container),'[data-automation-id^="formField"]');
+    const region=field && uploadNodes(field,'input[type="file"]').length===1?field:container;
+    return uploadNodes(region,'[role="alert"],[class*="error"],[class*="Error"],[data-automation-id="inputAlert"]')
+      .find(node=>visible(node) && text(node) && (node.matches('[data-automation-id="inputAlert"]') || /upload|file|attach/i.test(text(node))));
   }
   const sectionHeadings = 'h1,h2,h3,h4,h5,h6,[role="heading"],[data-automation-id="sectionTitle"],[class*="section-title"],[class*="section__title"]';
   function sectionToken(node) {
@@ -1139,7 +1171,12 @@
   function occupied({element, members, field}) {
     const proxy=yesNoProxy(element);if(proxy)return Boolean(proxy.value);
     if (["checkbox", "radio"].includes(field.kind)) return members.some(controlChecked);
-    if (field.kind === "file") return Boolean(element.files.length || attachedFile(element));
+    if (field.kind === "file") {
+      const container=fileContainer(element),state=uploadStates.get(container);
+      if(state && (!element.files.length || element.files[0]?.name===state.filename) &&
+         (!state.confirmed || uploadError(element,container)))return false;
+      return Boolean(element.files.length || attachedFile(element));
+    }
     if (field.kind === "combobox") return Boolean(comboSelection(element) || phoneCountrySelection(element) || displayedChoice(element) || !isPrompt(element) && clean(comboInput(element)?.value) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(comboInput(element)?.value)) || !comboInput(element) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(text(element)) && text(element));
     if (field.kind === "select") return Array.from(element.selectedOptions).some(option =>
       !option.disabled && option.value !== "" && !/^(choose|select)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(option.text)));
@@ -1411,7 +1448,7 @@
         else summary.skipped++;
         continue;
       }
-      if (field.kind === "file" && occupied(record) && !(answer.replace_cover_letter && coverFile(element))) {summary.skipped++;continue;}
+      if (field.kind === "file" && (occupied(record) || element.files.length) && !(answer.replace_cover_letter && coverFile(element))) {summary.skipped++;continue;}
       if (["combobox","select","radio"].includes(field.kind) && !field.options.length && occupied(record) && !answer.force) { summary.skipped++; continue; }
       const unresolved = writing => {
         trace("field","verified",element,{verified:false,reason:"not committed or unresolved"});
@@ -1455,21 +1492,39 @@
           const transfer = new DataTransfer();
           transfer.items.add(new File([bytes], file.filename, {type: file.mime}));
           const container = fileContainer(element);
-          const region = workdayUploadGroup(element) || container.parentElement || container;
+          const root=element.getRootNode(),pageUrl=location.href,revision=repairRevision;
+          const removals=new Set(uploadNodes(container,'button,[role="button"],a').filter(node=>/remove|delete/i.test(label(node))));
+          uploadStates.set(container,{filename:file.filename,confirmed:false});
           nativeSet(element, "files", transfer.files);
           events(element);
-          const outcome = await waitFor(() => {
-            const error = Array.from(region.querySelectorAll('[role="alert"],[class*="error"],[class*="Error"]'))
-              .find(node => visible(node) && /upload|file|attach/i.test(text(node)));
-            if (error) return {error: text(error)};
-            const shown = Array.from(region.querySelectorAll('*')).some(node => visible(node) &&
-              (text(node).includes(file.filename) || node.matches('button,[role="button"],a') && /remove/i.test(label(node))));
-            if (shown || element.isConnected && (visible(element) || leverResumeProxy(element)) && element.files[0]?.name === file.filename) return {ok: true};
-          }, 10000);
+          let stableSince=0,errorSince=0,retainedControl;
+          const asynchronous=Boolean(workdayUploadGroup(element) || native.closest(element,'spl-dropzone,[data-upload],[aria-busy]'));
+          const outcome = await waitFor(() => native.read(() => {
+            if(location.href!==pageUrl || repairRevision!==revision || !container.isConnected)return {error:'Application or answer changed.'};
+            checkRepair();
+            const controls=container===element?[element]:uploadNodes(container,'input[type="file"]');
+            const current=controls.length===1?controls[0]:null;
+            if(!current || current.getRootNode()!==root || !writableRecord({...record,element:current,members:[current]}) ||
+               fileLabel(current)!==field.label)return {error:'Upload control changed.'};
+            if(retainedControl!==current){stableSince=0;retainedControl=current;}
+            const error=uploadError(current,container);
+            if(error){stableSince=0;errorSince ||= Date.now();return Date.now()-errorSince>=800?{error:text(error)}:false;}
+            errorSince=0;
+            if(uploadNodes(container,'[aria-busy="true"],[role="progressbar"]').some(visible) ||
+               container.matches('[aria-busy="true"]')){stableSince=0;return false;}
+            const shown=filenameShown(current,file.filename) || uploadNodes(container,'button,[role="button"],a').some(node=>
+              !removals.has(node) && visible(node) && /^(remove|delete)(?: (?:file|attachment|resume|cv))?$/i.test(label(node)));
+            const retained=shown || !asynchronous && (visible(current) || leverResumeProxy(current)) && current.files[0]?.name===file.filename;
+            if(!retained){stableSince=0;return false;}
+            stableSince ||= Date.now();
+            return Date.now()-stableSince>=800?{ok:true,current}:false;
+          }), 10000);
           if (!outcome?.ok) {
             summary.errors.push(outcome?.error ? `Upload failed: ${outcome.error}` : `Upload not yet confirmed: ${file.filename}. Check the page before retrying.`);
             unresolved(false); continue;
           }
+          element=record.element=outcome.current;record.members=[element];
+          uploadStates.set(container,{filename:file.filename,confirmed:true});
         } else if (field.kind === "combobox") {
           let ok = true;
           for (const value of Array.isArray(answer.value) ? answer.value : [answer.value]) {
@@ -2426,12 +2481,16 @@
         menu:{observed:options.length>0,count:Math.min(options.length,10000),roles:observed?.roles || [...new Set(optionNodes.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),containers:menuContainers.map(structureOf),option_shapes:observed?.shapes || optionNodes.slice(0,3).map(structureOf)},
         reasons:[]};
       const outcome=repair?repairSession?.outcomes.get(element):null;
+      // A known resume uploader owns this hidden native input. Keep its actual
+      // shape, and assess the exposed UI through the same guard used for repair.
+      if(kind==='file' && analyzeResume(element) && !interactiveVisible(element))field.file_proxy=shape(fileContainer(element));
       if(outcome)field.repair_status=outcome;
       if(repairSession?.reasons.has(element))field.reason_code=repairSession.reasons.get(element);
       if(!supported)field.reasons.push('unsupported_widget');
       if(element.readOnly || element.getAttribute('aria-readonly')==='true')field.reasons.push(selectOnlyControl(element)?'readonly_proxy':'readonly');
       if(element.disabled || element.matches(':disabled') || element.closest('[aria-disabled="true"],[disabled]'))field.reasons.push('disabled');
-      if(ancestors.some(p=>!p.visible || p.opacity===0 || p['aria-hidden']==='true') || element.closest('[hidden],[inert],[aria-hidden="true"]'))field.reasons.push('hidden_parent');
+      if(ancestors.some(p=>!p.visible || p.opacity===0 || p['aria-hidden']==='true') ||
+         (field.file_proxy?native.closest(native.parent(element),'[hidden],[inert],[aria-hidden="true"]'):element.closest('[hidden],[inert],[aria-hidden="true"]')))field.reasons.push('hidden_parent');
       if(!field.control.visible)field.reasons.push('hidden_control');
       if(Number(getComputedStyle(element).opacity)===0)field.reasons.push('transparent_proxy');
       if(!field.detected)field.reasons.push('omitted_by_scanner');
@@ -2446,17 +2505,33 @@
     if(!repairExecuting && analysisIdentity!==snapshotIdentity()){analysisIdentity=undefined;chrome.runtime.sendMessage({type:'analysis-changed'}).catch(()=>{});}
   },150);}).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['hidden','style','class','aria-label','aria-hidden','disabled','id']});
   let runtimeTimer,runtimeLast='',recognizedApplication=false;
+  function initializingApplication(roots=native.discover()) {
+    // The captured one-click shell is initialized but can have no inputs yet.
+    return location.hostname==='jobs.smartrecruiters.com' &&
+      /^\/oneclick-ui\/company\/[^/]+\/publication\/[a-f\d-]+\/?$/i.test(location.pathname) &&
+      roots.some(r=>r.host==='spl-wrapper') && roots.some(r=>r.host==='spl-context-provider');
+  }
+  function inputReadiness(){return native.read(()=>{
+    if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.incomplete())
+      return {private:true,revision:repairRevision,url:location.href};
+    const roots=native.discover(),inspection=rootInspection(roots),navigation=navigationState();
+    const controls=inputInventory(roots).filter(el=>interactiveVisible(el) || el.type==='file' && exposedFile(el)).length;
+    return {controls,navigation,revision:repairRevision,url:location.href,status:inspection.status,message:inspection.message,
+      initializing:!controls && navigation.kind==='none' && inspection.status!=='access_blocked' &&
+        (inspection.status==='loading' || initializingApplication(roots))};
+  });}
   function runtimeState(...args){return native.read(()=>runtimeStateRead(...args));}
   function runtimeStateRead(){
     if(globalThis.autoApplyCredentials?.active())return {account:true,navigation:{kind:'none'}};
     const controls=inputInventory().filter(el=>interactiveVisible(el) || el.type==='file' && exposedFile(el));
     const navigation=navigationState();
-    let application=navigation.kind==='submit' || controls.some(el=>applicationWritingScope(writingScope(el)));
+    const initializing=initializingApplication();
+    let application=initializing || navigation.kind==='submit' || controls.some(el=>applicationWritingScope(writingScope(el)));
     if(!application && recognizedApplication)application=controls.some(el=>{
       const root=writingScope(el);return root && Array.from(root.querySelectorAll('h1,h2,h3,legend')).some(h=>visible(h) && /job application|application (?:form|questions)|your application/i.test(text(h)));
     });
     if(application)recognizedApplication=true;
-    const shape=JSON.stringify([location.href,workdayState()?.step,controls.map(el=>{
+    const shape=JSON.stringify([location.href,workdayState()?.step,initializing,controls.map(el=>{
       if(!repairNodes.has(el))repairNodes.set(el,++repairNodeId);
       return [repairNodes.get(el),label(el).slice(0,2000),el.type,el.disabled,el.readOnly,el.required,el.getAttribute('aria-required'),
         el.matches('select')?Array.from(el.options,o=>[o.value,o.text,o.disabled]):el.matches('[role="combobox"]') && !occupied({element:el,members:[el],field:{kind:'combobox'}})?comboOptions(el).slice(0,100).map(text):el.getAttribute('aria-controls')];
@@ -2495,13 +2570,15 @@
   };
   function rootInspection(roots) {
     const rootInfo=roots.map(({root,host,parent_id,elements},id)=>({id,host,parent_id,kind:id?'open_shadow':'document',
-      exposed_controls:elements.filter(e=>e.matches(controlSelector)).filter(e=>!excludedControl(e) && !diagnosticExcluded(e) && visible(e)).length}));
+      exposed_controls:elements.filter(e=>e.matches(controlSelector)).filter(e=>!excludedControl(e) && !diagnosticExcluded(e) &&
+        (visible(e) || e.type==='file' && analyzeResume(e))).length}));
     const frames=roots.flatMap(({elements})=>elements.filter(e=>e.matches('iframe')))
       .filter(e=>!diagnosticExcluded(e)).slice(0,20).map(e=>({target:actionTarget(e.getAttribute('src') || 'about:blank'),visible:Boolean(e.getClientRects().length),
         accessible:Boolean(e.contentDocument),ready_state:e.contentDocument?.readyState || 'unavailable'}));
     const light=rootInfo[0].exposed_controls,shadow=rootInfo.slice(1).some(r=>r.exposed_controls);
     const verification=frames.some(f=>/captcha-delivery\.com$/.test(f.target.origin || '')) || /403 forbidden|access denied|verify you are human/i.test(document.title);
-    const loading=document.readyState!=='complete' || Array.from(document.querySelectorAll('[aria-busy="true"],[role="progressbar"]')).some(visible);
+    const loading=document.readyState!=='complete' || native.query('[aria-busy="true"],[role="progressbar"]',roots).some(visible) ||
+      !light && !shadow && initializingApplication(roots);
     const status=light || shadow?'controls_exposed':verification?'access_blocked':loading?'loading':frames.some(f=>f.visible)?'embedded_content_unavailable':'no_exposed_controls';
     const messages={access_blocked:'Public page access is blocked or requires verification. Open the page manually, then Analyze again.',
       loading:'The page is still loading. Wait for the application inputs, then Analyze again.',
@@ -2599,9 +2676,9 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, submissionBaseline:()=>submissionIntent?.before, validationErrors};
+  globalThis.autoApplyContent = {inputReadiness,runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, submissionBaseline:()=>submissionIntent?.before, validationErrors};
   if(globalThis.autoApplyCredentials){
-    for(const key of ['runtimeState','scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','submissionBaseline','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
+    for(const key of ['inputReadiness','runtimeState','scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','submissionBaseline','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
       const original=globalThis.autoApplyContent[key];
       globalThis.autoApplyContent[key]=(...args)=>{const value=original(...args);return value?.then?value.then(globalThis.autoApplyCredentials.redact):globalThis.autoApplyCredentials.redact(value);};
     }
