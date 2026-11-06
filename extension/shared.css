@@ -14,3 +14,6 @@ button,input,textarea,select{font:inherit}button{min-height:32px;padding:0 12px;
 input[type=checkbox]{accent-color:var(--accent)}.moon{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}
 
 button:active:enabled{background:var(--hover);filter:brightness(.85)}button[aria-pressed=true]{background:var(--hover)}
+/* The offline action uses the same quiet controls as pairing settings. */
+.dashboard-launcher button { margin: 4px 0; }
+.dashboard-launcher p { font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }

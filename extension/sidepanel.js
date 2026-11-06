@@ -1,5 +1,6 @@
 import {api} from "./api.js";
 import {initializePairing} from "./pairing.js";
+import {createDashboardStarter} from './dashboard-launcher.js';
 
 const element = id => document.getElementById(id);
 const tabId=Number(new URL(location.href).searchParams.get('tabId'))||undefined;
@@ -50,10 +51,12 @@ const history = () => histories[historyKey()] || {versions: [], index: 0};
 function openHelper(field){source={...field,tabId:result.tabId,url:result.url};element("question").value=field.label;selectTab("chat");selectChatTab("helper");renderAnswer();element("question").focus();}
 function node(tag, text) { const item = document.createElement(tag); item.textContent = text; return item; }
 function button(text, action) { const item = node("button", text); item.type = "button"; item.onclick = action; return item; }
-async function connection() {
-  try { const value = await api("/ext/ping"); if(profileRevision && profileRevision!==value.profile_revision){skillPlanKey=undefined;skillPlan=undefined;}profileRevision=value.profile_revision || ""; element("connection").textContent = ""; element("connection").title = `Connected — ${value.profile_name || value.name}`; element("connection").setAttribute("aria-label", element("connection").title); element("connection").classList.add("connected"); }
-  catch (error) { element("connection").textContent = error.message; element("connection").title = "Connection error"; element("connection").setAttribute("aria-label", error.message); element("connection").classList.remove("connected"); }
-}
+const connectionHome = element('connection').parentElement;
+const dashboardStarter = createDashboardStarter(element('connection'), {onReady(value) {
+  if(profileRevision && profileRevision !== value.profile_revision){skillPlanKey=undefined;skillPlan=undefined;}
+  profileRevision=value.profile_revision || '';
+}});
+const connection = () => dashboardStarter.refresh();
 async function perform(message) {
   const response = await send(message);
   if (response?.error) throw new Error(response.error);
@@ -236,7 +239,7 @@ function render(value) {
   result = value;
   loadChat();
   if(value.skills_available!==undefined) showSkills(value.skills_available);
-  element("error").textContent = value.error || "";
+  element("error").textContent = dashboardStarter.handlesConnectionError(value.error) ? '' : value.error || "";
   element("company").textContent = value.matched?.company || value.page?.company || "Current application";
   element("job").textContent = value.matched?.title || value.page?.title || value.url || "";
   element("company").title = element("company").textContent; element("job").title = element("job").textContent;
@@ -289,7 +292,7 @@ function render(value) {
     element("download").href = downloadURL; element("download").download = file.filename;
   }
 }
-const showError = error => { element("error").textContent = error.message; };
+const showError = error => { element("error").textContent = dashboardStarter.handlesConnectionError(error) ? '' : error.message; };
 async function pageContext(refresh=false) {
   if (refresh || !result?.page) {
     const scanned = await send({type: "page-context"});
@@ -327,7 +330,7 @@ async function write(refine) {
       previous: refine ? previous.answer : ""});
     current.versions.push(answer); current.index = current.versions.length - 1; histories[appKey+":"+key] = current;
     await chrome.storage.session.set({answerHistory: histories}); element("ai-status").textContent = ""; completedAnswers();
-  } catch (error) { element("ai-status").textContent = error.message; }
+  } catch (error) { element("ai-status").textContent = dashboardStarter.handlesConnectionError(error) ? '' : error.message; }
   finally { aiBusy = false; renderAnswer(); }
 }
 function renderMessages() {
@@ -393,15 +396,16 @@ async function chat() {
     }
     if(kind==='draft')lastDraft=reply.reply.length<=12000?reply.reply:undefined;
     messages.push({role: "assistant", text: reply.reply, kind, time:Date.now()});await saveChat();element("chat-status").textContent = reply.warning || "";
-  } catch (error) { element("chat-input").value = text; renderMessages(); element("chat-status").textContent = error.message; }
+  } catch (error) { element("chat-input").value = text; renderMessages(); element("chat-status").textContent = dashboardStarter.handlesConnectionError(error) ? '' : error.message; }
   finally { chatBusy = false; renderMessages(); element("send").disabled = element("clear-chat").disabled = false; }
 }
 let pairingReady;
 element("settings").onclick = () => {
   element('assistant-view').hidden = true; element('settings-view').hidden = false;
-  element('settings-back').focus(); pairingReady ||= initializePairing(element('settings-view')).then(ready => { if(!ready) pairingReady = undefined; });
+  element('status').after(element('connection'), dashboardStarter.row);
+  element('settings-back').focus(); pairingReady ||= initializePairing(element('settings-view'), {launcher:false, onConnectionError:dashboardStarter.handlesConnectionError}).then(ready => { if(!ready) pairingReady = undefined; });
 };
-function closeSettings() { element('settings-view').hidden = true; element('assistant-view').hidden = false; element('settings').focus(); }
+function closeSettings() { connectionHome.append(element('connection'), dashboardStarter.row); element('settings-view').hidden = true; element('assistant-view').hidden = false; element('settings').focus(); }
 element('settings-back').onclick = closeSettings;
 element('settings-view').onkeydown = event => { if(event.key === 'Escape') { event.preventDefault(); closeSettings(); } };
 element("autofill").onclick = async () => {
@@ -426,7 +430,6 @@ chrome.runtime.onMessage.addListener(message => { if (message.type === "autofill
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && tabId && changes.tabResults) render(changes.tabResults.newValue?.[tabId]);
   if (area === "session" && !tabId && changes.lastResult) render(changes.lastResult.newValue);
-  if (area === "local" && (changes.server || changes.key)) connection();
 });
 const initial=await chrome.storage.session.get(["lastResult","tabResults"]);
 try{chatURL=(tabId?await chrome.tabs.get(tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0])?.url;}catch{}
@@ -462,7 +465,7 @@ element('next-page').onclick=async event=>{
   const final=!result?.sign_in && result?.next_action?.kind==='submit';
   element('next-page').disabled=true;
   try{await perform({type:final?'manual-submit':'next-page',tabId:result?.tabId,expected:result?.next_action});}
-  catch(error){showError(error);render(result);element('error').textContent=error.message;}
+  catch(error){render(result);showError(error);}
 };
 element('retry-tracking').onclick=()=>perform({type:'retry-submission-tracking'}).catch(showError);
 element('cancel-form-wait').onclick=()=>perform({type:'cancel-form-wait'}).catch(showError);

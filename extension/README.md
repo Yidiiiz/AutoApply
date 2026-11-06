@@ -1,5 +1,21 @@
 # AutoApply Chrome extension
 
+On Windows, the sidebar and Extension options offer **☾ Start dashboard** while
+the local dashboard is offline. Install the narrowly scoped native launcher once
+with this repository's `.venv` and your extension ID, then reload the extension:
+
+```powershell
+.\.venv\Scripts\python.exe -m autoapply.dashboard_launcher install --extension-id <extension-id>
+```
+
+Copy the ID from `chrome://extensions` and replace `<extension-id>`. See the
+[launcher guide](../docs/dashboard-launcher.md) for setup, recovery and uninstall.
+The `nativeMessaging` permission enables only this explicit local start action.
+Connection checks continue through slow startup and clear the offline message
+when ready; pairing errors remain separate. No form action is replayed.
+A stopped dashboard can be started again as soon as the offline action appears,
+including in the same Chrome session; a live startup is reused.
+
 1. Open `chrome://extensions` in Chrome and enable **Developer mode**.
 2. Choose **Load unpacked** and select this repository's `extension/` directory.
 3. Open the extension's **Details → Extension options** (or **Pairing settings** in the in-page sidebar).

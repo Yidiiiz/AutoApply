@@ -4,6 +4,7 @@
 
 - [Dashboard](dashboard.md): local setup, queue, answers and settings.
 - [Chrome extension](../extension/README.md): installation, pairing and form controls.
+- [Dashboard launcher](dashboard-launcher.md): Windows setup and the extension's offline Start dashboard action.
 - [Application actions](application-actions.md): filling, review, submission tracking and validation limits.
 - [Credentials](credentials.md): storage and supported account workflows.
 - [Architecture](architecture.md): data flow, modules and implementation boundaries.

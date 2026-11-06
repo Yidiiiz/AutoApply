@@ -1,5 +1,13 @@
 import {api} from "./api.js";
 import {snapshotCollector} from "./snapshots.js";
+import {dashboardStartHandler} from './dashboard-launcher.js';
+
+const startDashboard = dashboardStartHandler();
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if(message?.type !== 'start-dashboard')return;
+  startDashboard(message, sender).then(respond, () => respond({status:'error', error:'start_failed'}));
+  return true;
+});
 
 // Explicit intents invalidate restores before any asynchronous tab/storage read.
 const sidebarVersions=new Map();
