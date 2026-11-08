@@ -6,6 +6,7 @@
 - [Chrome extension](../extension/README.md): installation, pairing and form controls.
 - [Dashboard launcher](dashboard-launcher.md): Windows setup and the extension's offline Start dashboard action.
 - [Application actions](application-actions.md): filling, review, submission tracking and validation limits.
+- [Answer recovery](answer-recovery.md): grounded unfamiliar answers, verified filling, bounded retries and defect evidence.
 - [Credentials](credentials.md): storage and supported account workflows.
 - [Architecture](architecture.md): data flow, modules and implementation boundaries.
 - [UI design](ui-design.md): shared palette, controls and layout behavior.

@@ -163,7 +163,7 @@ def equivalent_answer(value):
     # qualifications can change the meaning of an apparent decline.
     comparison = re.sub(r'\s*\((?:United States(?: of America)?|U\.?S\.?A?\.?)\)\s*$', '', value, flags=re.I)
     text = re.sub(r'[^a-z0-9]+', ' ', comparison.casefold()).strip()
-    if re.fullmatch(r'not declared|(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|self identify|disclose|share)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|self identify)', text):
+    if re.fullmatch(r'not declared|(?:i )?decline(?: to (?:self identify|answer|disclose))?|(?:i )?(?:do not|don t) wish to (?:answer|(?:self )?identify|disclose|share)|(?:i )?(?:prefer|choose) not to (?:say|answer|disclose|(?:self )?identify)', text):
         return 'decline'
     return text if text in {'yes', 'no'} else value
 

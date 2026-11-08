@@ -401,7 +401,9 @@ async function matchAndFill(result, prepare = false) {
     if(cancelledTabs.has(result.tabId) || staleRun(epoch))return;
     // Native known answers settle first; one existing grounded batch handles the
     // remaining eligible set using actual discovered offers and minimal facts.
-    const eligible=new Set(answers.filter(a=>deferred.has(a.key) || ['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
+    const eligible=new Set(answers.filter(a=>deferred.has(a.key) || a.reason_code==='reasoning_pending' ||
+      !['RESOLVED','FILE'].includes(a.status) && !['optional_skip','policy_requires_user','unsupported_field','unusable_label','needs_writing'].includes(a.reason_code) &&
+      ['combobox','select','radio','checkbox'].includes(fields.find(f=>f.key===a.key)?.kind)).map(a=>a.key));
     const remaining=[],bindings=new Map();
     for(const frameId of new Set([...eligible].map(key=>Number(key.split(':')[0])))) {
       const documentId=result.pageIdentities?.[frameId]?.documentId,token=crypto.randomUUID();
@@ -419,6 +421,7 @@ async function matchAndFill(result, prepare = false) {
       }
     }
     if(remaining.length) {
+      await progress(result,'Reasoning about remaining answers...');
       const resolved=await api('/ext/answers',{...context(result),fields:remaining});
       if(cancelledTabs.has(result.tabId) || staleRun(epoch) || activeResults.get(result.tabId)!==result)return;
       await fill(result,resolved.answers,files,bindings);
@@ -816,6 +819,17 @@ function validChatAction(action,context){
 }
 let skillsRunning=false;
 async function action(message) {
+  if(message.type==='answer-context-changed'){
+    if(!Array.isArray(message.revision) || message.revision.length!==2 || typeof message.revision[0]!=='string' || !Number.isInteger(message.revision[1]))return {};
+    const targets=message.tabId?[message.tabId]:[...activeResults.keys()];
+    for(const tabId of targets){
+      const result=activeResults.get(tabId);
+      if(!result?.answerRevision || JSON.stringify(result.answerRevision)===JSON.stringify(message.revision))continue;
+      result.answerRevision=message.revision;
+      automaticSeen.delete(tabId);clearAutomaticRetry(tabId);queueAutomaticAnalysis(tabId);
+    }
+    await saveAutomaticRecovery();return {ok:true};
+  }
   if(analysisTasks.size && ['autofill','autofill-skills','chat-replace','fill-answer','cover-letter','next-page','manual-submit','page-context','load-options'].includes(message.type))
     throw Error('Application is busy analyzing. Wait and retry.');
   if(message.type==='skill-selection') {
@@ -1006,7 +1020,9 @@ async function action(message) {
           const unobserved=new Set(candidates.filter(f=>f.kind==='combobox' && !f.options?.length && !f.options_observed).map(f=>f.key));
           const deferred=new Set((fast.answers || []).filter(a=>a.status==='RESOLVED' && unobserved.has(a.key)).map(a=>a.key));
           await apply({...fast,answers:(fast.answers || []).filter(a=>!deferred.has(a.key))});
-          const eligible=new Set((fast.answers || []).filter(a=>deferred.has(a.key) || ['reasoning_pending','no_offered_options'].includes(a.reason_code)).map(a=>a.key));
+          const eligible=new Set((fast.answers || []).filter(a=>deferred.has(a.key) || a.reason_code==='reasoning_pending' ||
+            !['RESOLVED','FILE'].includes(a.status) && !['optional_skip','policy_requires_user','unsupported_field','unusable_label','needs_writing'].includes(a.reason_code) &&
+            ['combobox','select','radio','checkbox'].includes(candidates.find(f=>f.key===a.key)?.kind)).map(a=>a.key));
           const remaining=[];
           if(eligible.size)for(const frame of started){
             // Only unresolved, eligible menus may be opened, once per revision.
@@ -1060,10 +1076,14 @@ async function action(message) {
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
       const context=new URL(tab.url);context.search='';context.hash='';context.username='';context.password='';
       const attention=fields.filter(f=>!f.answered && f.repair_status!=='verified' && f.repair_status!=='optional_skip');
-      const liveSummary=`Filled ${filled}; ${attention.length} need your input`;
+      const retryable=stopped==='transport_error' || attention.some(f=>['provider_unavailable','stale_data','no_offered_options'].includes(f.reason_code)) || inspections.some(i=>i.status==='loading');
+      const answerStatus=f=>f.reason_code==='policy_requires_user'?'Your answer is required by your saved preference.':
+        f.reason_code==='no_offered_options'?'Waiting for offered choices.':/^provider_|^stale_data$/.test(f.reason_code || '')?'Answer recovery unavailable.':
+        f.repair_status==='user_edited'?'Your edit is protected.':f.reason_code==='needs_fact'?'Needs an actual saved fact.':'Review this control.';
+      const liveSummary=`Filled ${filled}; ${attention.length} unresolved`;
       const reviewOnly=!fields.length && repaired.find(f=>f.frameId===0)?.result.next_action?.kind==='submit';
       const saved=reviewOnly || message.automatic && !available.some(f=>f.result.structural)?
-        {ok:true,summary:liveSummary,findings:attention.map(f=>({label:f.label,notes:[f.reason_code?.startsWith('provider_')?'Answer provider unavailable; retry Analyze.':'Needs your input.']}))}:
+        {ok:true,summary:liveSummary,findings:attention.map(f=>({label:f.label,notes:[answerStatus(f)]}))}:
         await api('/ext/snapshot',{host:context.hostname,context_url:context.href,nodes,truncated,diagnostic,automatic:Boolean(message.automatic)});
       if(!await unchanged())throw Error('Application changed. Analyze page again.');
       if(saved.ok && current?.url===tab.url){
@@ -1088,7 +1108,7 @@ async function action(message) {
           next_action:top?.next_action,sign_in:false,accountMode:undefined,waiting:false,busy:false,stalePage:false,
           pageIdentities:Object.fromEntries(available.map(frame=>[frame.frameId,{identity:frame.result.identity,documentId:frame.documentId}])),
           progress:!fields.length && !filled && inspections.find(i=>i.message)?.message ||
-            (pending.some(f=>/^provider_|^stale_data$/.test(f.reason_code || ''))?'Answer provider unavailable; retry Analyze.':pending.length?'Needs your input: '+pending.map(f=>f.label).slice(0,3).join('; '):`Filled ${filled} answers.`),
+            (saved.repair?.id?`Worker queued: ${saved.repair.message || saved.repair.id}`:pending.length?answerStatus(pending[0]):`Filled ${filled} answers.`),
           summary:{...current.summary,filled:completed.length,skipped:[...live.values()].filter(f=>f.repair_status==='optional_skip').length,
             needs_input:pending.map(field=>field.label),needs_writing:writing.map(field=>field.label)}};
         await report(updated,unchanged);
@@ -1134,16 +1154,19 @@ async function action(message) {
         }
       }
       const unavailable=!fields.length && !filled && inspections.find(i=>i.message);
-      let automaticSignature;
+      let automaticSignature,recoverySignature;
       if(message.automatic && saved.ok && stopped==='none'){
         // Cache the inspected post-fill state only while its original repair
         // capability still binds this document, edit revision and step. A late
         // replacement step must retain its queued signal instead of being seen.
         for(const frame of started)await bound(frame,'repairCheck');
-        if(await unchanged())automaticSignature=automaticAnalysisSignature(available.filter(f=>f.result.automaticState?.application)
+        if(await unchanged())recoverySignature=automaticAnalysisSignature(available.filter(f=>f.result.automaticState?.application)
           .map(f=>({...f,result:f.result.automaticState})));
+        if(!retryable)automaticSignature=recoverySignature;
       }
       return {...saved,...(unavailable?{summary:unavailable.message,findings:[{label:'Page availability',notes:[unavailable.message]}]}:{}),tabId:tab.id,url:tab.url,application_id:current?.url===tab.url?current.matched?.application_id:undefined,busy:diagnostic.busy,
+        automaticRetry:retryable,
+        ...(recoverySignature?{recoverySignature}:{}),
         ...(automaticSignature?{automaticSignature}: {})};
     })();
     analysisTasks.set(tab.id,task);
@@ -1324,7 +1347,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference", "answer-context-changed"].includes(message.type)) return;
   if(message.type==='page-snapshot'){
     const bound=Number(new URL(sender.url).searchParams.get('tabId'));
     if(bound && message.tabId!==bound){respond({error:'Application binding changed. Reopen the sidebar.'});return;}
@@ -1651,6 +1674,16 @@ runTick();
 // Automatic recovery shares page-snapshot's guarded live repair. Signals carry
 // no field values; the worker rebinds document and shape before doing work.
 const automaticPending=new Map(),automaticSeen=new Map(),automaticRunning=new Set();
+const automaticRetryTimers=new Map();
+const automaticReady=chrome.storage.session.get('automaticRecovery').then(({automaticRecovery=[]})=>{
+  for(const [tabId,state] of automaticRecovery){automaticSeen.set(tabId,state);if(!state.settled && state.retryAt)scheduleAutomaticRetry(tabId,state.retryAt);}
+});
+const saveAutomaticRecovery=()=>chrome.storage.session.set({automaticRecovery:[...automaticSeen].slice(-64)});
+function clearAutomaticRetry(tabId){clearTimeout(automaticRetryTimers.get(tabId));automaticRetryTimers.delete(tabId);}
+function scheduleAutomaticRetry(tabId,at){
+  clearAutomaticRetry(tabId);
+  automaticRetryTimers.set(tabId,setTimeout(()=>{automaticRetryTimers.delete(tabId);queueAutomaticAnalysis(tabId);},Math.max(100,at-Date.now())));
+}
 const automaticAnalysisSignature=frames=>JSON.stringify([...frames].sort((a,b)=>a.frameId-b.frameId).map(f=>[f.documentId,f.result.shape]));
 let automaticDrain,automaticDraining=false;
 function queueAutomaticAnalysis(tabId){
@@ -1664,7 +1697,7 @@ function drainAutomaticAnalysis(){
 async function runAutomaticAnalysis(){
   if(running || autofillTasks || skillsRunning || analysisBlockers || batchBusy || manualActionTabs.size || analysisTasks.size)return;
   if(automaticDraining)return;automaticDraining=true;
-  try{for(const tabId of automaticPending.keys()){
+  try{await automaticReady;for(const tabId of automaticPending.keys()){
     const old=activeResults.get(tabId);
     if(pendingSteps.has(tabId) || writingTasks.has(tabId) || old?.busy || old?.coverBusy || old?.skillsBusy)continue;
     automaticPending.delete(tabId);
@@ -1679,26 +1712,44 @@ async function runAutomaticAnalysis(){
       if(!valid.length)continue;
       const signature=automaticAnalysisSignature(valid);
       const cached=automaticSeen.get(tabId),revision=JSON.stringify(old?.answerRevision);
-      if(cached?.signature===signature && cached.revision===revision)continue;
-      automaticSeen.set(tabId,{signature,revision});
+      const same=cached?.signature===signature && cached.revision===revision;
+      if(same && cached.settled)continue;
+      if(same && cached.retryAt>Date.now()){scheduleAutomaticRetry(tabId,cached.retryAt);continue;}
+      const attempts=(same?cached.attempts || 0:0)+1;
       automaticRunning.add(tabId);
       try{
+        if(old){old.recoveryPending=true;old.progress='Matching unanswered questions...';await report(old);}
         const analyzed=await action({type:'page-snapshot',tabId,automatic:true});
-        if(analyzed.automaticSignature)automaticSeen.set(tabId,{signature:analyzed.automaticSignature,
-          revision:JSON.stringify(activeResults.get(tabId)?.answerRevision)});
+        const retry=analyzed.automaticRetry && attempts<3;
+        const state={signature:analyzed.recoverySignature || analyzed.automaticSignature || signature,
+          revision:JSON.stringify(activeResults.get(tabId)?.answerRevision),attempts,
+          settled:!retry,retryAt:retry?Date.now()+16000:0};
+        automaticSeen.set(tabId,state);await saveAutomaticRecovery();
+        const current=activeResults.get(tabId);
+        if(current){current.recoveryPending=retry;if(retry)current.progress='Retrying answer recovery shortly...';await report(current);}
+        if(retry)scheduleAutomaticRetry(tabId,state.retryAt);
+      }catch(error){
+        const retry=attempts<3 && !/changed|stopped|disabled|closed|paired/i.test(error.message || '');
+        const state={signature,revision,attempts,settled:!retry,retryAt:retry?Date.now()+16000:0};
+        automaticSeen.set(tabId,state);await saveAutomaticRecovery();
+        const current=activeResults.get(tabId);
+        if(current){current.recoveryPending=retry;current.progress=retry?'Retrying answer recovery shortly...':'Answer recovery stopped. Review the page.';await report(current);}
+        if(retry)scheduleAutomaticRetry(tabId,state.retryAt);
       }finally{automaticRunning.delete(tabId);}
     }catch{/* A new shape, user action or profile refresh can rearm recovery. */}
   }}finally{automaticDraining=false;}
 }
-chrome.tabs.onRemoved.addListener(tabId=>{automaticPending.delete(tabId);automaticSeen.delete(tabId);});
-chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){automaticPending.delete(tabId);automaticSeen.delete(tabId);}});
+chrome.tabs.onRemoved.addListener(tabId=>{automaticPending.delete(tabId);automaticSeen.delete(tabId);clearAutomaticRetry(tabId);void saveAutomaticRecovery();});
+chrome.tabs.onUpdated.addListener((tabId,change)=>{if(change.url || change.status==='loading'){automaticPending.delete(tabId);automaticSeen.delete(tabId);clearAutomaticRetry(tabId);void saveAutomaticRecovery();}});
 chrome.storage.onChanged.addListener((changes,area)=>{
   if(area!=='local' || !changes.autoSendStructure)return;
   if(changes.autoSendStructure.newValue===false){
     automaticPending.clear();
+    for(const tabId of automaticRetryTimers.keys())clearAutomaticRetry(tabId);
     for(const tabId of automaticRunning)chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>globalThis.autoApplyContent?.cancelRepair()}).catch(()=>{});
   }else{
     automaticSeen.clear();
+    void saveAutomaticRecovery();
     chrome.tabs.query({}).then(tabs=>tabs.filter(t=>/^https?:/.test(t.url || '')).forEach(t=>queueAutomaticAnalysis(t.id))).catch(()=>{});
   }
 });

@@ -3806,14 +3806,17 @@ def test_t063_delayed_answer_stale_document_step_and_user_edit(loaded_extension,
     expect(panel.locator('#send-structure')).to_be_enabled(timeout=15000)
     worker.evaluate('async()=>{for(let i=0;i<100;i++)await new Promise(r=>setTimeout(r,10))}')
     expect(page.locator('#full')).to_be_empty()
-    expect(page.locator('#email')).to_be_empty()
-    expect(page.locator('#consent')).not_to_be_checked()
-    expect(page.locator('#country')).to_have_value('')
     assert page.evaluate('actions') == []
     if change == 'edit':
-        expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
-        expect(panel.locator('#analysis-summary')).to_contain_text('Repair stopped')
+        # T092 protects the edited field and continues independent controls.
+        expect(page.locator('#email')).to_have_value('student@example.test')
+        expect(page.locator('#consent')).to_be_checked()
+        expect(page.locator('#country')).to_have_value('us')
+        expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')
     else:
+        expect(page.locator('#email')).to_be_empty()
+        expect(page.locator('#consent')).not_to_be_checked()
+        expect(page.locator('#country')).to_have_value('')
         assert not any(path=='/ext/snapshot' for path,_,_ in requests)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)

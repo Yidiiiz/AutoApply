@@ -329,7 +329,10 @@ def profile_sections(dashboard, payload):
 
 def ping(dashboard, payload):
     identity = dashboard.config.profile.get('identity', {})
-    return dict(ok=True, name='AutoApply', profile_revision=dashboard.config.profile_snapshot().revision, profile_name=' '.join(
+    with dashboard.connection() as db:
+        facts_revision = db.answer_revision()
+    return dict(ok=True, name='AutoApply', facts_revision=facts_revision,
+                profile_revision=dashboard.config.profile_snapshot().revision, profile_name=' '.join(
         str(identity.get(k) or '') for k in ('first_name', 'last_name')).strip())
 
 
@@ -609,7 +612,8 @@ def _page_analysis(dashboard, payload, host):
         if reason_code is not None:
             if reason_code not in {'answer_available', 'needs_fact', 'needs_writing', 'optional_skip',
                                    'unsupported_field', 'no_offered_options', 'reasoning_pending',
-                                   'provider_invalid', 'provider_unavailable', 'stale_data'}:
+                                   'provider_invalid', 'provider_unavailable', 'stale_data',
+                                   'policy_requires_user', 'unusable_label', 'verification_failed'}:
                 raise SettingsRejected('Invalid answer reason')
             row['reason_code'] = reason_code
         row['active'] = _analysis_active(row)
@@ -680,7 +684,9 @@ def _page_analysis(dashboard, payload, host):
             if field.get('reason_code') == 'needs_fact' and field['detected']:
                 status, notes = 'needs_user_fact', ['Needs your input: no usable saved fact was found.']
             elif field.get('reason_code') in {'provider_invalid', 'provider_unavailable', 'stale_data'}:
-                status, notes = 'answer_check_unavailable', ['Answer provider unavailable or profile changed; retry Analyze.']
+                status, notes = 'answer_check_unavailable', ['Answer recovery unavailable or profile changed; automatic recovery can retry.']
+            elif field.get('reason_code') == 'policy_requires_user':
+                status, notes = 'needs_user_fact', ['Your saved preference requires your answer.']
             if field.get('repair_status') == 'verification_failed':
                 status = 'verification_failed'
                 notes = ['The offered answer did not remain selected after retry. Review this control on the page.']
@@ -809,6 +815,55 @@ REPAIR_FIELD_LIMIT = 20
 
 
 def _repair_batch(dashboard, pending, revision):
+    """Coalesce concurrent requests without holding settings or a reader open."""
+    from threading import Event
+    from .profile_snapshot import fingerprint
+    key = fingerprint([revision, [(q.key, d.signature, facts) for _, q, d, facts in pending]])
+    with dashboard.settings.mutex:
+        flights = getattr(dashboard, '_ext_repair_flights', {})
+        dashboard._ext_repair_flights = flights
+        existing = flights.get(key)
+        ready = existing or Event()
+        flights[key] = ready
+    if existing and not ready.wait(12):
+        return {}, 'provider_unavailable'
+    try:
+        # A scan may rebind a logical question to a new control key, or lazy
+        # options may change the rest of the batch. Neither invalidates this
+        # field's grounded answer/abstention. Exact offers still bind reuse.
+        field_keys = {q.key: 'field:' + fingerprint([revision, d.signature, q.label, q.options, facts])
+                      for _, q, d, facts in pending}
+        with dashboard.settings.mutex:
+            cache = getattr(dashboard, '_ext_answer_repairs', {})
+            reused = {q.key: cache[field_keys[q.key]][1] for _, q, _, _ in pending
+                      if field_keys[q.key] in cache and time.monotonic() < cache[field_keys[q.key]][0]}
+        missing = [item for item in pending if item[1].key not in reused]
+        proposed, failure = _repair_batch_compute(dashboard, missing, revision) if missing else ({}, None)
+        if failure:
+            return {}, failure
+        with dashboard.settings.mutex, dashboard.connection() as db:
+            current = answers.AnswerResolver(dashboard.config, db)
+            try:
+                current.refresh()
+            except ValueError:
+                return {}, 'stale_data'
+            if current._revision != revision:
+                return {}, 'stale_data'
+            cache = getattr(dashboard, '_ext_answer_repairs', {})
+            if len(cache) + len(proposed) > 128:
+                cache.clear()
+            for key, value in proposed.items():
+                cache[field_keys[key]] = (time.monotonic() + 300, value)
+            dashboard._ext_answer_repairs = cache
+        return dict(reused, **proposed), None
+    finally:
+        if not existing:
+            with dashboard.settings.mutex:
+                flights.pop(key, None)
+                ready.set()
+
+
+def _repair_batch_compute(dashboard, pending, revision):
     """Wait with no Settings mutex or database connection; validate before reuse."""
     from .profile_snapshot import fingerprint
     request_fields = [dict(key=q.key, label=q.label, kind=q.kind, required=q.required,
@@ -853,7 +908,7 @@ def _repair_batch(dashboard, pending, revision):
                     if row['needs_input']:
                         if value is not None or row['reason'] == 'mapped':
                             raise ValueError('Conflicting abstention')
-                        proposals[key] = (None, 'needs_fact' if row['reason'] != 'unsupported' else 'unsupported_field', ids)
+                        proposals[key] = (None, 'needs_fact', ids)
                         continue
                     if not ids or row['reason'] != 'mapped':
                         raise ValueError('Missing evidence')
@@ -932,13 +987,8 @@ def resolve_answers(dashboard, payload):
             if robot_only(q.label) or robot_only(field.get("data-automation-id")) or robot_only(field.get("name")):
                 result.append(dict(key=q.key, value=None, source="", status="OPTIONAL_SKIP"))
                 continue
-            if (q.kind in {'select', 'radio', 'multiselect'} or
-                    q.kind == 'combobox' and field.get('options_observed') is True and not field.get('options_partial')) and not q.options:
-                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP',
-                                   reason='No offered options are available.', reason_code='no_offered_options'))
-                continue
             if unusable_label(q.label):
-                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT'))
+                result.append(dict(key=q.key, value=None, source='', status='NEEDS_INPUT', reason_code='unusable_label'))
                 continue
             if secondary_address(q.label):
                 result.append(dict(key=q.key, value='', source='policy:empty_address_line_2', status='OPTIONAL_SKIP'))
@@ -1041,7 +1091,7 @@ def resolve_answers(dashboard, payload):
                     elif descriptor.semantic_key == 'REJECTED_FIELD':
                         reason_code = 'unsupported_field'
                     else:
-                        reason_code = 'needs_fact'
+                        reason_code = 'policy_requires_user'
                         status = 'NEEDS_INPUT' if q.required else 'OPTIONAL_SKIP'
                 elif not q.required and descriptor.semantic_key.startswith('demographics.'):
                     reason_code = 'optional_skip'
@@ -1049,7 +1099,9 @@ def resolve_answers(dashboard, payload):
                     reason_code = 'no_offered_options'
                 elif not repeated and not education_part and not field.get('section_missing_date'):
                     facts = answers.repair_facts(q, descriptor, profile, app)
-                    if facts:
+                    if facts is not None:
+                        facts.update(resolver.repair_memory_facts(q, app, descriptor))
+                    if facts or facts is not None and descriptor.semantic_key == 'UNKNOWN_FIELD':
                         if (len(pending) < REPAIR_FIELD_LIMIT and len(q.label) <= 2000
                                 and len(q.options) <= 100 and all(len(o) <= 300 for o in q.options)
                                 and sum(other.key == q.key for other in questions) == 1):

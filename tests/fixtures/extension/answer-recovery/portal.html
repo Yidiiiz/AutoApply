@@ -1,0 +1,23 @@
+<!doctype html><html><head><title>Synthetic finite input menu</title></head><body>
+<form onsubmit="event.preventDefault();actions.push('submit')"><h1>Job application</h1>
+<label>Email<input type="email" id="email"></label>
+<div><p id="question">Are you legally authorized to work in the United States?</p>
+<input id="authorization" role="combobox" type="text" aria-haspopup="listbox"
+  aria-controls="portal-menu" aria-expanded="false"></div>
+<button type="submit">Submit application</button></form>
+<!-- An owned popup outside the form, matching the sanitized observed shape. -->
+<div id="portal-menu" role="listbox" hidden></div>
+<script>
+let actions=[],revert=false;
+const control=document.querySelector('#authorization'),menu=document.querySelector('#portal-menu');
+function openMenu(){
+  control.setAttribute('aria-expanded','true');menu.hidden=false;
+  menu.innerHTML='<input type="hidden" aria-label="Popup mirror"><button type="button" role="option">Yes</button><button type="button" role="option">No</button>';
+  for(const option of menu.querySelectorAll('[role="option"]'))option.onclick=()=>{
+    control.value=option.textContent;control.setAttribute('aria-expanded','false');menu.hidden=true;
+    if(revert)setTimeout(()=>control.value='No',150);
+  };
+}
+control.onclick=openMenu;
+control.onkeydown=e=>{if(e.key==='ArrowDown')openMenu();if(e.key==='Escape'){menu.hidden=true;control.setAttribute('aria-expanded','false')}};
+</script></body></html>

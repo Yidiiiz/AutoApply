@@ -55,6 +55,8 @@ const connectionHome = element('connection').parentElement;
 const dashboardStarter = createDashboardStarter(element('connection'), {onReady(value) {
   if(profileRevision && profileRevision !== value.profile_revision){skillPlanKey=undefined;skillPlan=undefined;}
   profileRevision=value.profile_revision || '';
+  if(value.profile_revision && value.facts_revision!==undefined)
+    send({type:'answer-context-changed',revision:[value.profile_revision,value.facts_revision]}).catch(()=>{});
 }});
 const connection = () => dashboardStarter.refresh();
 async function perform(message) {
@@ -84,7 +86,7 @@ function managedSkillSearch(field) { return /^type to add skills\s*[.:?]?$/i.tes
 function prompts() {
   element("needs-input").replaceChildren();
   const pending=(result?.pending || []).filter(field=>!managedSkillSearch(field));
-  element("needs-input-heading").hidden=!pending.length;
+  element("needs-input-heading").hidden=!pending.length || result?.recoveryPending || result?.busy;
   for (const field of pending) {
     const row = node("div", ""); row.className = "prompt";
     const actions = node("div", ""); actions.className = "prompt-actions";
@@ -236,7 +238,10 @@ function renderFillButton(value) {
 }
 function render(value) {
   if (!value || tabId && value.tabId !== tabId) return;
+  const newlyVerified=(value.completed || []).some(answer=>answer.source!=='you' &&
+    !(result?.completed || []).some(old=>old.key===answer.key && JSON.stringify(old.value)===JSON.stringify(answer.value)));
   result = value;
+  if(newlyVerified)selectTab('answers');
   loadChat();
   if(value.skills_available!==undefined) showSkills(value.skills_available);
   element("error").textContent = dashboardStarter.handlesConnectionError(value.error) ? '' : value.error || "";

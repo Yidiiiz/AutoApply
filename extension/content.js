@@ -150,7 +150,7 @@
     }
     const state = mode === 'toggle' ? sidebarHost.dataset.state === 'open' ? 'closed' : 'open' : mode;
     sidebarHost.dataset.state=state;
-    if(state==='closed'){chatEpoch++;repairRevision++;}
+    if(state==='closed'){chatEpoch++;repairRevision++;repairCancellation++;}
     sidebarHost.style.setProperty('display',state==='closed'?'none':'block','important');
     sidebarHost.style.setProperty('width',state==='minimized'?'0':'min(400px,100vw)','important');
     sidebarHost.shadowRoot.querySelector('.panel').hidden=state!=='open';
@@ -241,7 +241,7 @@
 
   // Shared document-bound repair capability for explicit and permitted recovery.
   // Values stay in this isolated document, never in the structural report.
-  let repairSession, repairExecuting=false, repairSynthetic=false, repairRevision=0;
+  let repairSession, repairExecuting=false, repairSynthetic=false, repairRevision=0,repairCancellation=0;
   const repairEdited=new WeakSet();
   const repairNodes=new WeakMap();let repairNodeId=0;
   for(const event of ['beforeinput','input','change','keydown']) document.addEventListener(event,e=>{
@@ -263,20 +263,20 @@
     if(control){repairEdited.add(control);repairRevision++;}
   },true);
   function repairShape(...args){return native.read(()=>repairShapeRead(...args));}
-  function repairShapeRead(){
-    return JSON.stringify([location.href,workdayState()?.step,Array.from(native.query('form,h1,h2,h3,'+controlSelector))
-      .filter(el=>!diagnosticExcluded(el)).map(el=>{
+  function repairShapeRead(nodes){
+    return JSON.stringify([location.href,workdayState()?.step,Array.from(nodes || native.query('form,h1,h2,h3,'+controlSelector))
+      .filter(el=>!diagnosticExcluded(el) && !native.closest(el,'[role="listbox"],[role="menu"]')).map(el=>{
         if(!repairNodes.has(el))repairNodes.set(el,++repairNodeId);
-        return [repairNodes.get(el),el.tagName,el.id,el.getAttribute('name'),el.getAttribute('type'),
-          el.matches('h1,h2,h3')?questionText(el):label(el),el.disabled,el.readOnly,el.required,
-          el.matches('select')?Array.from(el.options,o=>[o.value,o.text,o.disabled]):el.getAttribute('aria-controls')];
+        return [repairNodes.get(el),el.isConnected,el.tagName,el.id,el.getAttribute('name'),el.getAttribute('type'),
+          el.matches('h1,h2,h3')?questionText(el):''];
       })]);
   }
   function assertRepair(token=repairSession?.token){
-    if(!repairSession || token!==repairSession.token || repairSession.shape!==repairShape() ||
-       repairSession.revision!==repairRevision)throw Error('Application or answer changed. Analyze page again.');
+    if(!repairSession || token!==repairSession.token || repairSession.shape!==repairShape(repairSession.nodes) ||
+       repairSession.cancellation!==repairCancellation)throw Error('Application or answer changed. Analyze page again.');
   }
-  function checkRepair(){if(repairExecuting)assertRepair();}
+  function editedRecord(record){return record?.members.some(e=>repairEdited.has(e));}
+  function checkRepair(){if(repairExecuting){assertRepair();if(editedRecord(repairSession.current))throw Error('Field answer changed.');}}
   function repairDispatch(operation){
     // Native input/change events from a scripted click can themselves be trusted.
     const previous=repairSynthetic;repairSynthetic=true;
@@ -289,7 +289,8 @@
   async function repairStart(token){
     if(extensionFilling || skillsState.busy)throw Error('Application is busy. Wait and retry.');
     analysisIdentity=undefined;
-    repairSession={token,shape:repairShape(),revision:repairRevision,verified:new Map(),outcomes:new Map(),reasons:new Map(),menus:new Map()};
+    const nodes=native.read(()=>Array.from(native.query('form,h1,h2,h3')).filter(el=>!diagnosticExcluded(el) && !native.closest(el,'[role="listbox"],[role="menu"]')));
+    repairSession={token,nodes,shape:repairShape(nodes),revision:repairRevision,cancellation:repairCancellation,verified:new Map(),outcomes:new Map(),reasons:new Map(),menus:new Map()};
     return repairOperation(token,async()=>{
       const result=await scan({repair:true});assertRepair(token);
       const fields=repairFields();
@@ -304,7 +305,7 @@
   }
   function repairFields(){
     if(signInPage())return [];
-    return Array.from(records.values()).filter(r=>!r.members.some(e=>repairEdited.has(e)) &&
+    return Array.from(records.values()).filter(r=>!editedRecord(r) && r.members.every(e=>e.isConnected) &&
       !diagnosticExcluded(r.element) && writableRecord(r) && !isSkillsField(r.element) &&
       (!r.element.closest('a[href]') || leverResumeProxy(r.element)) &&
       (r.element.tagName!=='BUTTON' || r.element.type==='button' ||
@@ -323,26 +324,35 @@
   }
   async function repairFill(token,answers,files={}){
     return repairOperation(token,async()=>{
+      if(answers.length && answers.every(a=>editedRecord(records.get(a.key))))throw Error('Application answer changed.');
       const allowed=new Set(repairFields().filter(f=>!f.answered).map(f=>f.key));
       for(const answer of answers){
         assertRepair(token);
         if(!allowed.has(answer.key))continue;
         const record=records.get(answer.key);
+        if(editedRecord(record))continue;
         repairSession.outcomes.set(record.element,answer.status==='OPTIONAL_SKIP' && answer.reason_code==='optional_skip'?'optional_skip':'unresolved');
         repairSession.reasons.set(record.element,answer.reason_code || 'needs_fact');
         const resume=answer.status==='FILE' && answer.value==='resume' && record.field.kind==='file' &&
           analyzeResume(record.element);
         if(answer.status!=='RESOLVED' && !resume)continue;
-        if(['combobox','select','radio'].includes(record.field.kind) &&
-          !(Array.isArray(answer.value)?answer.value:[answer.value]).every(value=>record.field.options.includes(value))){
+        const offers=record.field.kind==='select'?Array.from(record.element.options).filter(o=>!o.disabled && o.value!=='').map(o=>clean(o.text)):
+          ['checkbox','radio'].includes(record.field.kind)?record.members.map(label):record.field.options;
+        if((['combobox','select','radio'].includes(record.field.kind) || record.field.kind==='checkbox' && Array.isArray(answer.value)) &&
+          !(Array.isArray(answer.value)?answer.value:[answer.value]).every(value=>offers.includes(value))){
           repairSession.outcomes.set(record.element,'verification_failed');continue;
         }
         // Only the explicit saved resume association can upload during Analyze.
         // No force, cover letters, writing, or section preparation.
-        const result=await fillFields([{key:answer.key,status:resume?'FILE':'RESOLVED',value:answer.value,source:answer.source,batch_settlement:true}],resume?{resume:files.resume}:{});
+        repairSession.current=record;
+        let result;
+        try{result=await fillFields([{key:answer.key,status:resume?'FILE':'RESOLVED',value:answer.value,source:answer.source,batch_settlement:true}],resume?{resume:files.resume}:{});}
+        catch(error){if(!editedRecord(record))throw error;}
+        finally{repairSession.current=undefined;}
         if(['combobox','file'].includes(record.field.kind))await pause(400);
         assertRepair(token);refreshRecord(record);
-        const done=result.completed[0];
+        if(editedRecord(record)){repairSession.outcomes.set(record.element,'user_edited');continue;}
+        const done=result?.completed[0];
         if(done && (occupied(record) || record.field.kind==='checkbox' && answer.value===false) &&
            JSON.stringify(valueOf(record))===JSON.stringify(done.value)){
           repairSession.verified.set(answer.key,{record,value:done.value,completed:done});
@@ -355,18 +365,21 @@
       assertRepair(token);
       for(const [key,entry] of repairSession.verified){
         refreshRecord(entry.record);
-        if(!entry.record.element.isConnected || JSON.stringify(valueOf(entry.record))!==JSON.stringify(entry.value)){
-          repairSession.verified.delete(key);repairSession.outcomes.set(entry.record.element,'verification_failed');
+        if(editedRecord(entry.record) || !entry.record.element.isConnected || JSON.stringify(valueOf(entry.record))!==JSON.stringify(entry.value)){
+          repairSession.verified.delete(key);repairSession.outcomes.set(entry.record.element,editedRecord(entry.record)?'user_edited':'verification_failed');
         }
       }
       return {ok:true};
     });
   }
   function repairFinish(token){
-    if(repairSession?.token!==token || repairSession.shape!==repairShape())throw Error('Application changed. Analyze page again.');
+    assertRepair(token);
     const completed=[];
     for(const {record,value,completed:answer} of repairSession.verified.values()){
-      const retained=record.element.isConnected && JSON.stringify(valueOf(record))===JSON.stringify(value);
+      refreshRecord(record);
+      const retained=!editedRecord(record) && record.element.isConnected && record.labelAtScan===label(record.element) &&
+        (record.choiceQuestionAtScan===null || record.choiceQuestionAtScan===choiceQuestion(record.element)) &&
+        JSON.stringify(valueOf(record))===JSON.stringify(value);
       repairSession.outcomes.set(record.element,retained?'verified':'verification_failed');
       if(retained)completed.push({...answer});
     }
@@ -378,9 +391,10 @@
     // Ordinary result data stays separate from the sanitized structural capture.
     // Reuse these records; scanning again could reopen menus or replace keys.
     return {filled,completed,page:pageInfo(),next_action:navigationState(),fields:Array.from(records.values(),record=>({...record.field,
-      answered:occupied(record)||completed.some(answer=>answer.key===record.field.key),
+      answered:repairSession.outcomes.get(record.element)!=='verification_failed' &&
+        (occupied(record)||completed.some(answer=>answer.key===record.field.key)),
       reason_code:repairSession.reasons.get(record.element),repair_status:repairSession.outcomes.get(record.element)})),
-      stopped:repairSession.revision!==repairRevision?'user_edit':'none'};
+      stopped:'none'};
   }
 
   function visible(element) {
@@ -419,7 +433,7 @@
     if (selectOnlyControl(element)) return true;
     if (visible(element)) return true;
     if (!element.matches('input[type="checkbox"],input[type="radio"]') ||
-        !element.isConnected || element.disabled || element.readOnly || element.matches(':disabled') ||
+        !element.isConnected || element.disabled || element.matches(':disabled') ||
         element.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]') ||
         element.getAttribute('aria-readonly')==='true') return false;
     const rect=element.getBoundingClientRect(), style=getComputedStyle(element);
@@ -427,7 +441,9 @@
         !visible(element.parentElement)) return false;
     // Only the native input may be transparent. A visible associated visual is required.
     return [...Array.from(element.labels || []), element.closest('label'),
-      element.parentElement.querySelector('[data-automation-id="checkbox"],[role="checkbox"]')]
+      element.parentElement.querySelector('[data-automation-id="checkbox"],[role="checkbox"]'),
+      element.parentElement.querySelectorAll('input[type="radio"],input[type="checkbox"]').length===1 &&
+        !element.parentElement.querySelector('button,a[href]') && questionText(element.parentElement)?element.parentElement:null]
       .some(node=>node && visible(node) && (questionText(node) || node.getBoundingClientRect().width>1));
   }
   function selectOnlyControl(element) {
@@ -557,6 +573,24 @@
     let container = members[0].parentElement;
     while (container && !members.every(member => container.contains(member))) container = container.parentElement;
     return container;
+  }
+
+  function nearbyQuestion(element) {
+    // Find the closest question without borrowing text across another control.
+    for(let node=element,depth=0;node && !node.matches('form,body,html') && depth<6;node=node.parentElement,depth++){
+      const named=referencedLabel(node,'aria-labelledby') || node.getAttribute('aria-label');
+      if(named && usableLabel(named) && !/^(?:yes|no|application questions)$/i.test(clean(named)))return usableLabel(named);
+      for(let sibling=node.previousElementSibling;sibling;sibling=sibling.previousElementSibling){
+        if(sibling.matches(controlSelector) || sibling.querySelector(controlSelector))break;
+        const value=usableLabel(questionText(sibling));
+        if(visible(sibling) && value && !/^(?:yes|no|application questions)$/i.test(value))return value;
+      }
+    }
+    return '';
+  }
+  function recoveredChoiceLabel(element,container,fallback) {
+    const grouped=choiceQuestion(element) || groupLabel(container,fallback);
+    return /^(?:application questions|unlabelled field|yes|no)$/i.test(clean(grouped)) || grouped===fallback ? nearbyQuestion(container || element) || grouped : grouped;
   }
 
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -706,13 +740,22 @@
     trace("search","typed",element,{value});
     return true;
   }
+  function comboBackingInput(container) {
+    // Popup search/mirror inputs are not the control's submitted selection.
+    return Array.from(container.querySelectorAll('input[type="hidden"]')).find(input=>
+      !input.closest('[role="listbox"],[role="menu"],[role="option"],.react-select__menu'));
+  }
   function comboSelection(element) {
     const container = comboContainer(element);
-    const hidden=clean(container.querySelector('input[type="hidden"]')?.value);
+    const hidden=clean(comboBackingInput(container)?.value);
+    const accessible=clean(element.getAttribute('aria-valuetext'));
     return text(container.querySelector('[class*="singleValue"],[class*="single-value"]')) ||
+      (accessible && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(accessible)?accessible:'') ||
       (hidden && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(hidden) ? hidden : '') ||
       text(container.querySelector('[data-automation-id="selectedItem"],[data-automation-id="selectedItemLabel"]')) ||
-      (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') && !/^(select|choose)(\s*one)?(?:\.{3}|…)?$/i.test(text(element)) ? text(element) : "");
+      (element.matches('button:is([aria-haspopup="listbox"],[id$="--degree"])') && !/^(select|choose)(\s*one)?(?:\.{3}|…)?$/i.test(text(element)) ? text(element) : "") ||
+      (element.matches('input[role="combobox"]') && element.getAttribute('aria-expanded')==='false' &&
+        !remoteAutocomplete(element) && !/^(select|choose|search)(?:\s*one)?(?:\.{3}|…)?$/i.test(clean(element.value)) ? clean(element.value) : '');
   }
   function referencedLabel(element, attribute) {
     return (element.getAttribute(attribute) || "").split(/\s+/)
@@ -994,7 +1037,8 @@
     return record.members.every(el=>!robotOnly(el) && !el.disabled && !el.matches(':disabled,[aria-disabled="true"]') &&
       !native.closest(el,'[inert],[aria-hidden="true"],[aria-disabled="true"]') &&
       !native.closest(record.field.kind==='file'?native.parent(el):el,'[hidden]') &&
-      (!(el.readOnly || el.getAttribute('aria-readonly')==='true') || selectOnlyControl(el)) &&
+      (!(el.readOnly || el.getAttribute('aria-readonly')==='true') || selectOnlyControl(el) ||
+        el.matches('input[type="radio"],input[type="checkbox"]') && el.getAttribute('aria-readonly')!=='true' && interactiveVisible(el)) &&
       (record.field.kind==='file'?exposedFile(el):interactiveVisible(el)));
   }
   function excludedControl(element){
@@ -1061,7 +1105,7 @@
           (kind === "checkbox" ? choiceContainer(other)===container : element.name ? other.name===element.name : choiceContainer(other)===container));
         if (!members.length) members = [element];
         if (!container && members.length > 1) container = commonContainer(members);
-        if (members.length > 1 || kind === "radio") fieldLabel = choiceQuestion(element) || groupLabel(container, fieldLabel);
+        fieldLabel = recoveredChoiceLabel(element,container,fieldLabel);
         members.forEach(member => grouped.add(member));
       }
       if (!element.dataset.autoapplyKey || keys.has(element.dataset.autoapplyKey)) element.dataset.autoapplyKey = `aa-${++nextKey}`;
@@ -1114,7 +1158,8 @@
         rememberChoices(record);
       } finally { closeCombo(record.element); }
     }
-    const retained = Array.from(records.values(), record => ({...record.field, answered:occupied(record)}));
+    const retained = Array.from(records.values(), record => ({...record.field,
+      answered:(repairSession?.outcomes.get(record.element)!=='verification_failed' || editedRecord(record)) && occupied(record)}));
     previousStep = workdayState();
     return {page: pageInfo(), fields: retained, page_identity: snapshotIdentity(), next_action: navigationState(), workday_step: previousStep?.step, skills_available: skillInputs().length > 0, sign_in: signInPage(), manual_entry: Boolean(manualEntry()), scan_ms: Math.round(performance.now() - started)};
   }
@@ -1125,7 +1170,7 @@
       checkRepair();
       const record = records.get(key);
       if (!record || !writableRecord(record) || record.field.kind !== "combobox" || occupied(record)) continue;
-      if (record.field.options_observed) { fields.push({...record.field}); continue; }
+      if (record.field.options_observed && record.field.options.length) { fields.push({...record.field}); continue; }
       try {
         await openCombo(record.element);
         const options=await settledComboOptions(record.element, 3000);
@@ -1352,13 +1397,13 @@
           const singleValue = text(container.querySelector('[class*="singleValue"],[class*="single-value"]'));
           const closed = element.getAttribute("aria-expanded") === "false";
           if (selectOnlyControl(element)) {
-            const hidden = container.querySelector('input[type="hidden"]');
+            const hidden = comboBackingInput(container);
             if (!closed || normal(singleValue) !== normal(selected) || hidden &&
                 (!clean(hidden.value) || submittedValue != null && hidden.value !== submittedValue)) {stableSince=0;return false;}
             if (!stableSince) stableSince=Date.now();
             return Date.now()-stableSince>=300;
           }
-          const hidden=container.querySelector('input[type="hidden"]');
+          const hidden=comboBackingInput(container);
           const retained=(matchesSelected || closed && normal(singleValue)===normal(selected)) && (!hidden || clean(hidden.value));
           if (!retained) {stableSince=0;return false;}
           if (!stableSince) stableSince=Date.now();
@@ -1453,7 +1498,7 @@
       const unresolved = writing => {
         trace("field","verified",element,{verified:false,reason:"not committed or unresolved"});
         summary[writing ? "needs_writing" : "needs_input"].push(field.label);
-        summary[writing ? "writing" : "pending"].push({...field,...(answer.reason ? {reason:answer.reason} : {})});
+        summary[writing ? "writing" : "pending"].push({...field,reason_code:answer.reason_code || (answer.status==='RESOLVED'?'verification_failed':'needs_fact'),...(answer.reason ? {reason:answer.reason} : {})});
         if (field.required) mark(record, "#999999");
       };
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
@@ -1492,7 +1537,7 @@
           const transfer = new DataTransfer();
           transfer.items.add(new File([bytes], file.filename, {type: file.mime}));
           const container = fileContainer(element);
-          const root=element.getRootNode(),pageUrl=location.href,revision=repairRevision;
+          const root=element.getRootNode(),pageUrl=location.href,cancellation=repairCancellation;
           const removals=new Set(uploadNodes(container,'button,[role="button"],a').filter(node=>/remove|delete/i.test(label(node))));
           uploadStates.set(container,{filename:file.filename,confirmed:false});
           nativeSet(element, "files", transfer.files);
@@ -1500,7 +1545,7 @@
           let stableSince=0,errorSince=0,retainedControl;
           const asynchronous=Boolean(workdayUploadGroup(element) || native.closest(element,'spl-dropzone,[data-upload],[aria-busy]'));
           const outcome = await waitFor(() => native.read(() => {
-            if(location.href!==pageUrl || repairRevision!==revision || !container.isConnected)return {error:'Application or answer changed.'};
+            if(location.href!==pageUrl || repairCancellation!==cancellation || editedRecord(record) || !container.isConnected)return {error:'Application or answer changed.'};
             checkRepair();
             const controls=container===element?[element]:uploadNodes(container,'input[type="file"]');
             const current=controls.length===1?controls[0]:null;
@@ -2461,7 +2506,7 @@
       let members=['radio','checkbox'].includes(kind)?inputInventory(roots).filter(other=>choiceKind(other)===kind && sameChoiceScope(element,other) && (kind==='radio' && element.name?other.name===element.name:choiceContainer(other)===container && (container || other===element))):[element];
       if(!members.length)members=[element];
       members.forEach(member=>grouped.add(member));
-      const fieldLabel=kind==='file'?fileLabel(element):members.length>1?choiceQuestion(element)||groupLabel(container,label(element)):label(element);
+      const fieldLabel=kind==='file'?fileLabel(element):['radio','checkbox'].includes(kind)?recoveredChoiceLabel(element,container,label(element)):label(element);
       const shape=node=>({...structureOf(node),root_id:rootIds.get(node.getRootNode())});
       const ancestors=[];for(let parent=native.parent(element);parent && !parent.matches('body,html') && ancestors.length<4;parent=native.parent(parent))ancestors.push(shape(parent));
       const exposed=ancestors.some(parent=>parent.visible && parent.opacity>0 && parent.visibility==='visible');
@@ -2481,13 +2526,14 @@
         menu:{observed:options.length>0,count:Math.min(options.length,10000),roles:observed?.roles || [...new Set(optionNodes.map(o=>o.getAttribute('role') || 'none'))].slice(0,10),containers:menuContainers.map(structureOf),option_shapes:observed?.shapes || optionNodes.slice(0,3).map(structureOf)},
         reasons:[]};
       const outcome=repair?repairSession?.outcomes.get(element):null;
+      if(outcome==='verification_failed')field.answered=false;
       // A known resume uploader owns this hidden native input. Keep its actual
       // shape, and assess the exposed UI through the same guard used for repair.
       if(kind==='file' && analyzeResume(element) && !interactiveVisible(element))field.file_proxy=shape(fileContainer(element));
       if(outcome)field.repair_status=outcome;
       if(repairSession?.reasons.has(element))field.reason_code=repairSession.reasons.get(element);
       if(!supported)field.reasons.push('unsupported_widget');
-      if(element.readOnly || element.getAttribute('aria-readonly')==='true')field.reasons.push(selectOnlyControl(element)?'readonly_proxy':'readonly');
+      if(element.readOnly || element.getAttribute('aria-readonly')==='true')field.reasons.push(selectOnlyControl(element) || ['radio','checkbox'].includes(kind) && interactiveVisible(element)?'readonly_proxy':'readonly');
       if(element.disabled || element.matches(':disabled') || element.closest('[aria-disabled="true"],[disabled]'))field.reasons.push('disabled');
       if(ancestors.some(p=>!p.visible || p.opacity===0 || p['aria-hidden']==='true') ||
          (field.file_proxy?native.closest(native.parent(element),'[hidden],[inert],[aria-hidden="true"]'):element.closest('[hidden],[inert],[aria-hidden="true"]')))field.reasons.push('hidden_parent');
@@ -2676,7 +2722,7 @@
     if(!summary.completed.some(f=>f.key===action.key && String(f.value)===(artifact?action.file.filename:action.text)))throw Error('Replacement did not remain in the field. Review the page; your draft is preserved.');
     return {ok:true};
   }
-  globalThis.autoApplyContent = {inputReadiness,runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, submissionBaseline:()=>submissionIntent?.before, validationErrors};
+  globalThis.autoApplyContent = {inputReadiness,runtimeState,repairCheck:token=>{assertRepair(token);return true;},cancelRepair:()=>{repairRevision++;repairCancellation++;},repairStart,repairOptions,repairFill,repairFinish,repairContext:()=>({identity:snapshotIdentity(),revision:repairRevision}),inspectPage,analysisContext:()=>snapshotIdentity(),chatContext,chatReplace,beginTrace,endTrace,trace,skillsPage:pageInfo, skillsAvailable:()=>skillInputs().length > 0, autofillSkills, skillsStatus:()=>skillsState, cancelSkills:()=>{skillsCancelled=true;}, pageStructure, unresolvedStructure, scan, collectOptions, fill, prepareSections, enterApplication, sidebar, sidebarLayout, nextPage, navigationState, manualSubmit, confirmationEvidence, submissionBaseline:()=>submissionIntent?.before, validationErrors};
   if(globalThis.autoApplyCredentials){
     for(const key of ['inputReadiness','runtimeState','scan','inspectPage','pageStructure','unresolvedStructure','chatContext','fill','prepareSections','skillsPage','confirmationEvidence','submissionBaseline','validationErrors','navigationState','collectOptions','repairStart','repairOptions','repairFill','repairFinish','repairContext']){
       const original=globalThis.autoApplyContent[key];

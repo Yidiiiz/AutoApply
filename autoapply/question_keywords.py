@@ -27,7 +27,7 @@ def unusable_label(label):
         return False  # Public profile-link brands, not camelCase identifiers.
     text = normalize(raw)
     boilerplate = set('select one required optional please choose a an option search type here value enter selection answer item'.split())
-    if not text or set(text.split()) <= boilerplate:
+    if not text or text in {'application question', 'unlabelled field'} or set(text.split()) <= boilerplate:
         return True
     return bool(re.fullmatch(r'[\w.-]+', raw) and (
         re.search(r'[_\d]|[a-z][A-Z]', raw)
