@@ -365,16 +365,18 @@ def test_graceful_close_exports_pending_observations(db, application):
 @pytest.mark.asyncio
 async def test_upload_evidence_batch_has_one_export_and_no_transaction_during_await(config, db, application, monkeypatch):
     tracker = SimpleNamespace(events=[{'kind': 'upload_event', 'n': n} for n in range(10)], result={'ready': True})
-    page = SimpleNamespace(_autoapply_uploads=tracker)
+    page = Mock(_autoapply_uploads=tracker, _autoapply_document_snapshots={})
     async def wait(*args, **kwargs):
         assert not db.conn.in_transaction
         return True
     engine = Engine(config, db)
+    engine.browser.observations[page] = {}
     monkeypatch.setattr(engine.browser, 'uploads_ready', wait)
     sync, stats = count_work(db, monkeypatch)
     assert await engine.check_uploads(1, page, [])
     assert sync.call_count == stats.call_count == 1
     assert not tracker.events
+    assert engine.browser.observation(page)['upload_result'] == tracker.result
     assert len([e for e in read_json(db.history.paths['1'] / 'events.json') if e['kind'].startswith('upload_') or e['kind'] == 'UPLOAD_READINESS']) == 11
 
 

@@ -1,0 +1,21 @@
+<!doctype html><html><head><title>Synthetic Workday account</title></head><body>
+<form data-automation-id="signInFormo" onsubmit="event.preventDefault(); accountClicks++; ordered.push(consent.checked); if(transition)showApplication()">
+<label>Email<input id="email" type="email" autocomplete="username" required></label>
+<label>Password<input id="password" type="password" autocomplete="new-password" required></label>
+<label id="confirmLabel">Confirm password<input id="confirm" type="password" required></label>
+<div style="display:flex"><div style="width:18px;height:18px"><input id="consent" type="checkbox" style="opacity:0;width:24px;height:24px" aria-checked="false" data-automation-id="createAccountCheckbox" onchange="this.setAttribute('aria-checked',String(this.checked))"></div><label for="consent">I consent to the above.</label></div>
+<label>Marketing newsletter<input id="marketing" type="checkbox"></label>
+<button type="button" data-automation-id="createAccountExpandButton">Create account</button>
+<button type="submit" data-automation-id="createAccountSubmitButton">Create account</button>
+<a href="#" data-automation-id="signInLink">Sign in</a><a href="#" data-automation-id="forgotPasswordLink">Forgot password</a>
+</form><button type="button" data-automation-id="utilityButtonSignIn">Sign in</button>
+<script>
+let accountClicks=0, applicationClicks=0,ordered=[],transition=false;
+function showApplication(){document.querySelector('form').outerHTML='<form><h1>Job application</h1><label>Full name<input id="full" required></label><button type="submit" onclick="event.preventDefault();applicationClicks++">Submit application</button></form>'}
+function login(){document.querySelector('#confirmLabel').remove();const b=document.querySelector('[type=submit]');b.textContent='Sign in';b.dataset.automationId='signInSubmitButton'}
+function traps(){document.querySelector('form').outerHTML=`<form><h1>Job application</h1><label>Website<input name="website" id="website"></label>
+<label>Enter website. This input is for robots only, do not enter if you're human.<input id="trap" name="website" data-automation-id="beecatcher"></label>
+<label style="display:none">Robot only<input id="occupiedTrap" data-honeypot value="MANUAL_TRAP"></label>
+<label>Full name<input id="full" required></label><label hidden>Full name<input id="hidden"></label><div inert><label>Full name<input id="inert"></label></div>
+<label>Full name<input id="readonly" readonly></label><button type="submit" onclick="event.preventDefault();applicationClicks++">Submit application</button></form>`}
+</script></body></html>

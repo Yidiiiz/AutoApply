@@ -1,0 +1,12 @@
+<!doctype html><html><body><form>
+<div data-automation-id="formField-phoneType"><span data-automation-id="formLabel">Phone Device Type* Required</span><button type="button" aria-haspopup="listbox" aria-label="Select One Required" aria-required="true">Select One</button></div>
+<fieldset aria-label="Select One Required"><legend>Previously employed?* Required</legend><label>Yes<input type="radio" name="prior" value="yes"></label><label>No<input type="radio" name="prior" value="no"></label></fieldset>
+<div data-automation-id="formField-essay"><div data-automation-id="richText">Tell us why* Required</div><span>Select One Required</span><textarea id="essay" aria-label="Select One Required">SECRET_VALUE</textarea></div>
+<label>Phone Type<select id="phone-type"><option value="">Select One</option><option>Home</option><option>Cell</option></select></label>
+<label>Address line2<input id="address"></label><label>Suite<input id="suite"></label><label>Address 2<input required></label>
+<div data-automation-id="formField-major"><div data-automation-id="richText">Your major* Required</div><span>Select One Required</span><input id="major" aria-label="secondaryQuestionnaire__abcdef0123456789"></div>
+<label>Large written response<input id="large" size="60"></label>
+<label>Nested written response<textarea id="nested">SECRET_VALUE</textarea></label>
+<input type="password" value="SECRET_VALUE"><input type="file" value="SECRET_FILE">
+<button id="next" type="button">Save and Continue</button><button type="button" id="submit">Submit Application</button>
+</form><script>var nextClicks=0,submitClicks=0;next.onclick=()=>{nextClicks++;next.remove()};submit.onclick=()=>submitClicks++;</script></body></html>

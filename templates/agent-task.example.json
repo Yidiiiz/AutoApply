@@ -1,0 +1,11 @@
+{
+  "task_id": "T001",
+  "attempt": 1,
+  "objective": "Add a small documentation note explaining how to inspect the semi-auto batch result",
+  "context": "User-run subscription smoke test. Keep runtime unchanged; no employer or Discord activity.",
+  "scope_paths": ["docs/semi-auto-vscode.md"],
+  "acceptance_criteria": ["The guide identifies data/private/semi-auto-result.json and distinguishes a checkpoint from a live form"],
+  "check_ids": ["diff"],
+  "constraints": ["Preserve all existing edits", "Do not access or change applicant data", "Do not stage, commit, push, launch live workers, or create other agents"],
+  "previous_report_id": null
+}

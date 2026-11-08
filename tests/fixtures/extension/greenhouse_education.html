@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Local education container regression</title>
+<style>body{font:16px sans-serif}.select__control{border:1px solid #999;padding:5px;margin:5px}label{display:block}[role=option]{padding:5px;cursor:pointer}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}</style>
+</head><body><main><form>
+<h5>Application questions</h5>
+<fieldset class="phone-input"><legend class="visually-hidden">Phone</legend><label for="phone">Phone number</label><input id="phone" type="tel"></fieldset>
+<h6 hidden>Hidden heading</h6>
+<div class="education--container"><div class="education--form">
+<div class="select" data-id="school--0" data-label="School" data-options='["Fixture University"]'></div>
+<div class="select" data-id="degree--0" data-label="Degree" data-options='["Bachelor&apos;s Degree"]'></div>
+<div class="select" data-id="discipline--0" data-label="Discipline" data-options='["Computer Science"]'></div>
+<div class="education--half-width-container"><div class="education--date-container">
+<div class="select" data-id="start-month--0" data-label="Start date month" data-click-only="true" data-options='["January","February","March","April","May","June","July","August","September","October","November","December"]'></div>
+<div class="select"><label for="start-year--0">Start date year</label><input id="start-year--0" required></div>
+</div></div>
+<div class="education--half-width-container"><div class="education--date-container">
+<div class="select" data-id="end-month--0" data-label="End date month" data-click-only="true" data-options='["January","February","March","April","May","June","July","August","September","October","November","December"]'></div>
+<div class="select"><label for="end-year--0">End date year</label><input id="end-year--0" required></div>
+</div></div>
+</div></div>
+<label for="other">Other question</label><input id="other">
+<button id="submit" type="submit">Submit application</button></form></main>
+<script>
+window.monthMenuClicks = {}; window.submissions = 0; window.submitClicks = 0; window.uploadEvents = []; window.schoolSearches = [];
+document.querySelector('form').onsubmit = event => {event.preventDefault(); submissions++;};
+document.querySelector('#submit').onclick = () => submitClicks++;
+for (const root of document.querySelectorAll('.select[data-id]')) {
+  const {id, label, options, selected} = root.dataset;
+  root.innerHTML = `<label for="${id}">${label}</label><div class="select__control"><div class="select__value-container"><span class="select__single-value"></span><div><input id="${id}" role="combobox" aria-expanded="false" aria-controls="${id}-list" aria-required="true" autocomplete="off"></div></div></div><input type="hidden" name="${id}">`;
+  const input = root.querySelector('[role=combobox]');
+  const single = root.querySelector('.select__single-value');
+  const hidden = root.querySelector('[type=hidden]');
+  single.textContent = hidden.value = selected || '';
+  let timer;
+  function close() {
+    clearTimeout(timer);
+    document.getElementById(`${id}-list`)?.remove();
+    input.setAttribute('aria-expanded', 'false');
+  }
+  function open() {
+    close();
+    input.setAttribute('aria-expanded', 'true');
+    const list = document.createElement('div');
+    list.id = `${id}-list`; list.setAttribute('role', 'listbox');
+    (root.dataset.portal ? document.body : root).append(list);
+    if (root.dataset.async) {
+      schoolSearches.push(input.value);
+      list.innerHTML = '<div role="option">Loading...</div>';
+    }
+    timer = setTimeout(() => {
+      list.replaceChildren();
+      const noResults = root.dataset.async && (!input.value || root.dataset.prefixOnly && input.value.split(/\s+/).length > 3);
+      const term = root.dataset.async ? input.value.split(/\s+/).slice(0, 3).join(' ') : input.value;
+      const values = noResults ? [] : JSON.parse(root.dataset.options).filter(value => value.toLowerCase().includes(term.toLowerCase()));
+      if (!values.length) list.innerHTML = '<div role="option">No options</div>';
+      for (const value of values) {
+        const option = document.createElement('div');
+        option.setAttribute('role', 'option'); option.textContent = value;
+        option.onmousedown = event => event.preventDefault();
+        option.onclick = () => {
+          if (!root.dataset.noCommit) single.textContent = hidden.value = value;
+          input.value = ''; close();
+        };
+        list.append(option);
+      }
+    }, root.dataset.async ? 1500 : 60);
+  }
+  input.onkeydown = event => {if (event.key === 'ArrowDown' && !root.dataset.clickOnly) open(); if (event.key === 'Escape') close();};
+  input.oninput = () => {if (!root.dataset.clickOnly) open();};
+  const control = root.querySelector('.select__control');
+  if (root.dataset.clickOnly) control.onclick = event => {
+    if (event.target.closest('[role=option]')) return;
+    monthMenuClicks[id] = (monthMenuClicks[id] || 0) + 1;
+    input.focus(); open();
+  };
+  else control.onmousedown = () => {input.focus(); open();};
+}
+for (const input of document.querySelectorAll('[type=file]')) {
+  for (const type of ['input', 'change']) input.addEventListener(type, () => {
+    uploadEvents.push([input.id, type]);
+    setTimeout(() => input.parentElement.querySelector('.filename').textContent = input.files[0]?.name || '', 70);
+  });
+}
+</script></body></html>

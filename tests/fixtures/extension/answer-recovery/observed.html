@@ -1,0 +1,49 @@
+<!doctype html><html><head><title>Synthetic structural recovery</title><style>
+label{display:block;margin:8px} input,button{min-height:24px}
+.selector{display:flex;align-items:center;min-height:28px}
+.selector input{opacity:0;width:22px;height:22px} [hidden]{display:none!important}
+</style></head><body>
+<!-- Synthetic controls derived from T092's public structure, never applicant data. -->
+<form id="application" onsubmit="event.preventDefault();actions.push('submit')">
+<h1>Job application</h1><h2>Application questions</h2>
+<label>Full name<input id="name"></label><label>Email<input id="email" type="email"></label>
+<div class="question"><p>Which implementation ecosystem is familiar to you?</p>
+<button id="ecosystem" type="button" role="combobox" aria-haspopup="listbox" aria-controls="ecosystem-menu" aria-expanded="false">Select one</button>
+<div id="ecosystem-menu" role="listbox" hidden></div></div>
+<div class="question"><p>Where did you discover this opportunity?</p><div role="radiogroup" aria-required="true" id="source-group">
+<label class="selector"><input type="radio" readonly required name="source" value="Glassdoor">Glassdoor</label>
+<label class="selector"><input type="radio" readonly required name="source" value="HireEZ">HireEZ</label>
+<label class="selector"><input type="radio" readonly required name="source" value="Indeed">Indeed</label>
+<label class="selector"><input type="radio" readonly required name="source" value="Moseeker">Moseeker</label>
+<label class="selector"><input type="radio" readonly required name="source" value="RiseSmart">RiseSmart</label>
+<label class="selector"><input type="radio" readonly required name="source" value="Zhiphin">Zhiphin</label>
+</div></div>
+<div class="question"><p>Race/Ethnicity: Please select any/all groups that you identify with</p><div role="group" aria-required="true" id="race-group">
+<label class="selector"><input type="checkbox">American Indian or Alaskan Native</label>
+<label class="selector"><input type="checkbox">Asian</label>
+<label class="selector"><input type="checkbox">Black or African American</label>
+<label class="selector"><input type="checkbox">Hispanic or Latino</label>
+<label class="selector"><input type="checkbox">Native Hawaiian or Other Pacific Islander</label>
+<label class="selector"><input type="checkbox">White (Not of Hispanic Origin)</label>
+<label class="selector"><input type="checkbox">Do not wish to identify</label>
+</div></div>
+<div class="question"><p>Do you or your spouse have a business interest in a competitor?</p>
+<select id="conflict" required><option value="">Select one</option><option>Yes</option><option>No</option></select></div>
+<button type="submit">Submit application</button></form>
+<script>
+let actions=[],opens=0,optionDelay=100,available=true;
+const trigger=document.querySelector('#ecosystem'),menu=document.querySelector('#ecosystem-menu');
+trigger.onclick=()=>{
+  opens++;trigger.setAttribute('aria-expanded','true');menu.hidden=false;
+  // A widget's own asynchronous menu/mirror mutation must not cancel the page.
+  setTimeout(()=>{
+    if(!available)return;
+    menu.innerHTML='<input type="hidden" aria-label="Option mirror"><div role="option">Python (programming)</div><div role="option">Rust</div>';
+    for(const option of menu.querySelectorAll('[role=option]'))option.onclick=()=>{
+      trigger.textContent=option.textContent;trigger.setAttribute('aria-valuetext',option.textContent);
+      trigger.setAttribute('aria-expanded','false');menu.hidden=true;
+    };
+  },optionDelay);
+};
+trigger.onkeydown=e=>{if(e.key==='Escape'){menu.hidden=true;trigger.setAttribute('aria-expanded','false')}};
+</script></body></html>

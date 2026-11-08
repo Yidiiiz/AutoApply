@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import re
@@ -25,7 +26,18 @@ def links(value):
     return re.findall(r"\[[^\]]*\]\((https?://[^\s)]+)\)", value) + [a["href"] for a in BeautifulSoup(value, "html.parser").find_all("a", href=True)]
 
 
-def parse_repository(text, source, reference=None, max_results=None):
+def context_key(source, query='', document='', section='', page=''):
+    return json.dumps([source, query, document, section, page], separators=(',', ':'))
+
+
+def record_contexts(db, observations):
+    for key, fingerprint, members in observations:
+        db.execute('INSERT OR REPLACE INTO discovery_contexts VALUES (?,?,?,?)',
+                   (key, fingerprint, datetime.now().astimezone().date().isoformat(), json.dumps(members)))
+
+
+def parse_repository(text, source, reference=None, max_results=None, *, document='',
+                     cache=None, observations=None):
     """Parse header-driven HTML and Markdown tables without executing repo code."""
     reference = reference or datetime.now(timezone.utc)
     tables = []
@@ -40,8 +52,8 @@ def parse_repository(text, source, reference=None, max_results=None):
         elif current:
             tables.append(current)
             current = []
-    result, seen = [], set()
-    for table in tables:
+    result, consumed = [], 0
+    for table_number, table in enumerate(tables):
         if not table:
             continue
         headers = [normalize(clean(cell)) for cell in table[0]]
@@ -52,6 +64,21 @@ def parse_repository(text, source, reference=None, max_results=None):
                    "date": next((i for i,h in enumerate(headers) if h in {"date", "age", "posted", "date posted", "posted on", "posting date"}), None)}
         if any(indices[key] is None for key in ["company", "title", "location", "application"]):
             continue
+        key = context_key(source, document=document, section=str(table_number))
+        fingerprint = hashlib.sha256(json.dumps([table, max_results, consumed]).encode()).hexdigest()
+        prior = (cache or {}).get(key)
+        if (prior and prior['fingerprint'] == fingerprint
+                and prior['checked_day'] == datetime.now().astimezone().date().isoformat()):
+            members = json.loads(prior['members'])
+            if observations is not None:
+                observations.append((key, fingerprint, members))
+            consumed += sum(len(v) if isinstance(v, list) else 1 for v in members.values())
+            if max_results is not None and consumed >= max_results:
+                return result
+            continue
+        members = {}
+        if observations is not None:
+            observations.append((key, fingerprint, members))
         last_company = ""
         for row in table[1:]:
             if len(row) < len(headers):
@@ -75,15 +102,19 @@ def parse_repository(text, source, reference=None, max_results=None):
                 identity = canonical_url(url)
             except ValueError:
                 continue
-            if identity in seen:
+            # Membership belongs to this document/table, even when another
+            # table or source already contains the same canonical job URL.
+            row_hash = hashlib.sha256(json.dumps(row).encode()).hexdigest()
+            if row_hash in members.get(identity, []):
                 continue
-            seen.add(identity)
+            members.setdefault(identity, []).append(row_hash)
             evidence = extract_posting_date(explicit=clean(get("date")), reference=reference)
             result.append(Listing(company, title, location, url, source, identity, evidence.posted_at,
                                   f"{clean(get('date'))}; source revision {reference.isoformat()}", closed=closed,
                                   posted_at_source='repository.posted', posted_at_confidence=evidence.confidence,
                                   original_posted_at=evidence.original_posted_at))
-            if max_results is not None and len(result) >= max_results:
+            consumed += 1
+            if max_results is not None and consumed >= max_results:
                 log.info('[PAGINATION] Repository result cap reached: %s', max_results)
                 return result
     return result
@@ -118,8 +149,15 @@ class GitHubRepositorySource:
         if not self.path.exists():
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.git("clone", "--bare", "--depth", "1", "--branch", branch, self.url, str(self.path), local=False)
-        self.git("fetch", "--depth", "1", "origin", "refs/heads/" + branch)
-        revision = self.git("rev-parse", "FETCH_HEAD").strip()
+        remote_head = re.search(r'^([0-9a-f]{40,64})\s+HEAD$', remote, re.M)
+        try:
+            local_revision = self.git('rev-parse', 'FETCH_HEAD').strip()
+        except RuntimeError:
+            local_revision = None
+        if not remote_head or remote_head[1] != local_revision:
+            self.git("fetch", "--depth", "1", "origin", "refs/heads/" + branch)
+            local_revision = self.git("rev-parse", "FETCH_HEAD").strip()
+        revision = local_revision
         reference = datetime.fromisoformat(self.git("show", "-s", "--format=%cI", revision).strip())
         return revision, branch, reference
 
@@ -128,38 +166,60 @@ class GitHubRepositorySource:
         paths = [path for path in files if re.fullmatch(r"README(?:[-_]Off[-_]Season)?\.md", path, re.I)]
         paths.sort(key=lambda path: (path.lower() != 'readme.md', path))
         result = []
+        self.documents_scanned = 0
         for path in paths:
+            self.documents_scanned += 1
             # Each configured table document is a query; cap it independently so
             # an off-season archive cannot consume the main README's allowance.
-            result.extend(parse_repository(self.git("show", revision + ":" + path), self.url, reference, self.max_results))
-        if not result:
+            observed = []
+            result.extend(parse_repository(self.git("show", revision + ":" + path), self.url, reference, self.max_results,
+                          document=path, cache=getattr(self, 'cache', {}),
+                          observations=observed))
+            if not observed:
+                raise RuntimeError('Repository document has no recognized listing tables')
+            if hasattr(self, 'observations'):
+                self.observations.extend(observed)
+        if not result and not any(m for _, _, m in getattr(self, 'observations', [])):
             raise RuntimeError("No listing rows parsed; source may have changed its format")
         return result
 
 
-async def scan_github(config, db, force=False):
+async def scan_github(config, db, force=False, *, quick=False, stopped=lambda: False):
     import asyncio
     counts = {"sources": 0, "new": 0, "errors": 0, "pages_scanned": 0}
     for entry in config["github_sources"]:
+        if stopped():
+            counts['errors'] += 1
+            break
+        if not entry.get('enabled', True):
+            continue
         url = entry["url"]
         previous = db.one("SELECT * FROM source_revisions WHERE source=?", (url,))
-        if not force and previous and previous["checked_at"]:
+        if not force and not quick and previous and not previous['error'] and previous["checked_at"]:
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(previous["checked_at"])).total_seconds()
             if elapsed < config["polling"]["github_minutes"] * 60:
                 continue
         counts["sources"] += 1
         try:
             source = GitHubRepositorySource(config, url)
+            source.cache = {} if force else {r['context_key']: r for r in db.rows(
+                "SELECT * FROM discovery_contexts WHERE json_extract(context_key,'$[0]')=?", (source.url,))}
+            source.observations = []
             revision, branch, reference = await asyncio.to_thread(source.update)
-            if force or not previous or previous["revision"] != revision:
+            if stopped():
+                raise InterruptedError('Discovery stopped')
+            if force or not previous or previous['error'] or previous["revision"] != revision:
                 listings = await asyncio.to_thread(source.discover, revision, reference)
-                counts["pages_scanned"] += 1
+                counts["pages_scanned"] += source.documents_scanned
                 with db.ingest_batch():
                     for listing in listings:
+                        if stopped():
+                            raise InterruptedError('Discovery stopped')
                         _, created = db.ingest(listing, config)
                         counts["new"] += created
                         for metric,value in db.last_ingest_result.items():
                             counts[metric] = counts.get(metric,0) + value
+                    record_contexts(db, source.observations)
             db.execute("INSERT OR REPLACE INTO source_revisions VALUES (?,?,?,?,NULL)", (url, revision, branch, now()))
         except Exception as exc:
             counts["errors"] += 1
@@ -193,8 +253,10 @@ class BrowserJobSource:
         self.name, self.config, self.browser, self.db = name, config, browser, db
         self.pages_scanned = 0
         self.stop_reason = 'no next page'
+        self.errors = 0
+        self.observations = []
 
-    async def discover(self):
+    async def discover(self, *, full=False, stopped=lambda: False):
         from .browser import page_condition
         result = []
         settings = self.config[self.name]
@@ -207,7 +269,10 @@ class BrowserJobSource:
                 url = recency_url(self.name, search_url, self.config['jobs']['max_listing_age_days'])
                 visited, scanned, seen = set(), 0, set()
                 for page_number in range(limits['max_pages_per_query']):
+                    if stopped():
+                        raise InterruptedError('Discovery stopped')
                     if url in visited:
+                        self.errors += 1
                         self.stop_reason = 'pagination cycle'
                         break
                     visited.add(url)
@@ -216,13 +281,20 @@ class BrowserJobSource:
                         condition,evidence = await page_condition(page)
                     self.pages_scanned += 1
                     if condition:
+                        self.errors += 1
                         self.db.notify('source-auth:'+self.name, {'message': f'{self.name}: {condition}: {evidence}. Restore the source session or inspect its layout.'})
                         self.stop_reason = 'source unavailable'
                         break
                     pattern = r'/jobs/view/\d+' if self.name == 'linkedin' else r'/(?:stu/)?jobs/\d+'
                     soup = BeautifulSoup(await page.content(),'html.parser')
-                    batch = []
-                    for link in soup.find_all('a',href=re.compile(pattern)):
+                    batch, page_members = [], {}
+                    cards = soup.find_all('a', href=re.compile(pattern))
+                    if not cards and not re.search(r'no (?:matching )?(?:jobs|results|postings)(?: found)?|0 jobs found',
+                                                   soup.get_text(' ', strip=True), re.I):
+                        self.errors += 1
+                        self.stop_reason = 'unrecognized source layout'
+                        break
+                    for link in cards:
                         if scanned >= limits['max_results_per_query']:
                             break
                         card = link.find_parent('li') or link.find_parent('article') or link.parent
@@ -231,6 +303,7 @@ class BrowserJobSource:
                             continue
                         job_url = urljoin(page.url,link['href'])
                         identity = canonical_url(job_url)
+                        page_members[identity] = hashlib.sha256(str(card).encode()).hexdigest()
                         if identity in seen:
                             continue
                         seen.add(identity)
@@ -246,10 +319,14 @@ class BrowserJobSource:
                             posted_at_source=posting.source,posted_at_confidence=posting.confidence,
                             original_posted_at=posting.original_posted_at))
                     result.extend(batch)
-                    if stale_boundary(batch,newest_first_guaranteed=self.newest_first_guaranteed,
-                                      days=self.config['jobs']['max_listing_age_days']):
+                    # Neither adapter proves ordering. Known/pinned/old rows
+                    # never stop traversal, in either quick or daily mode.
+                    key = context_key(self.name, search_url, section='cards', page=url)
+                    self.observations.append((key, hashlib.sha256(str(soup).encode()).hexdigest(), page_members))
+                    if (not full and self.newest_first_guaranteed
+                            and stale_boundary(batch, newest_first_guaranteed=True,
+                                               days=self.config['jobs']['max_listing_age_days'])):
                         self.stop_reason = 'stale boundary'
-                        log.info('[PAGINATION] Reached stale boundary; stopping source pagination')
                         break
                     if scanned >= limits['max_results_per_query']:
                         self.stop_reason = 'result cap'
@@ -260,7 +337,10 @@ class BrowserJobSource:
                         self.stop_reason = 'no next page'
                         break
                     next_url = urljoin(page.url,next_link['href'])
-                    if urlsplit(next_url).netloc != urlsplit(search_url).netloc:
+                    next_parts = urlsplit(next_url)
+                    if (next_parts.scheme != 'https' or next_parts.username or next_parts.password
+                            or next_parts.netloc != urlsplit(search_url).netloc):
+                        self.errors += 1
                         self.stop_reason = 'invalid next-page host'
                         break
                     url = recency_url(self.name,next_url,self.config['jobs']['max_listing_age_days'])

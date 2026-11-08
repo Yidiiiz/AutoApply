@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><title>Offline hydration application</title></head><body>
+<main><h1>Job application</h1><form><label>First name<input id="name"></label>
+<button type="submit">Submit application</button></form></main>
+<script>
+// Synthetic rendering operations only; this is not an employer page capture.
+window.rememberSidebar = () => {
+  window.savedSidebar = document.querySelector('#autoapply-sidebar');
+  window.savedFrame = savedSidebar.shadowRoot.querySelector('iframe');
+  savedSidebar.shadowRoot.querySelector('.collapsed').style.top = '123px';
+};
+window.sameSidebar = () => document.querySelector('#autoapply-sidebar') === savedSidebar &&
+  savedSidebar.shadowRoot.querySelector('iframe') === savedFrame &&
+  savedSidebar.shadowRoot.querySelector('.collapsed').style.top === '123px';
+window.hydrateRoot = () => {
+  const root = document.createElement('html');
+  root.innerHTML = '<head><title>Hydrated application</title></head><body><main><h1>Job application</h1><form><label>First name<input id="name"></label><button type="submit">Submit application</button></form></main></body>';
+  document.documentElement.replaceWith(root);
+};
+</script></body></html>

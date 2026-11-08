@@ -1,0 +1,31 @@
+<!doctype html><html><head><meta charset="utf-8"><style>label{display:block} section{border:1px solid;padding:8px} [role=option]{padding:5px}input{min-height:20px}</style></head><body><form>
+<section id="work" data-automation-id="workExperienceSection"><h2>Work Experience</h2><div class="entries"></div><button type="button">Add Work Experience</button></section>
+<section id="education"><h2>Education</h2><div class="entries"></div><a href="#">Add another</a></section>
+<section id="projects"><h2>Technical projects</h2><div class="entries"></div><button type="button">+</button></section>
+<section id="project-text"><h2>Relevant experience</h2><label>Projects<textarea maxlength="240"></textarea></label></section>
+<section><h2>Skills</h2><label>Skills<textarea id="skill-text"></textarea></label></section>
+<section><h2>Skills</h2><div data-automation-id="multiSelectContainer"><label for="skill-widget">Type to Add Skills</label><div id="tags"></div><input id="skill-widget" role="combobox" data-automation-id="multiSelectInput" aria-controls="skill-options"><div id="skill-options" role="listbox"></div></div></section>
+<section><h2>Websites</h2><div class="entries"></div><button type="button">Add</button></section>
+<div class="phone-input"><label for="phone">Phone</label><div class="phone-input__country"><div class="select"><label id="country-label" for="country" class="label select__label">Country</label><div class="select__control"><div class="select__value-container"><div class="select__placeholder" id="react-select-country-placeholder"></div><input class="select__input" id="country" role="combobox" aria-expanded="false" aria-haspopup="true" aria-required="false" aria-controls="country-options" value=""></div><button type="button" class="icon-button icon-button--sm" aria-label="Toggle flyout">⌄</button></div><div id="country-options" role="listbox"></div></div></div><input id="phone" type="text"></div>
+<button type="button" id="next">Next</button><button type="submit" id="submit">Submit</button></form><script>
+window.clicks={next:0,submit:0,submissions:0};document.querySelector('form').onsubmit=e=>{e.preventDefault();clicks.submissions++};next.onclick=()=>clicks.next++;submit.onclick=()=>clicks.submit++;
+let serial=0;
+function field(name,type='text',required=false,value=''){const id='f'+(++serial);return '<label for="'+id+'">'+name+'</label><input id="'+id+'" type="'+type+'" '+(required?'required ':'')+'value="'+value+'">'}
+function dates(name){return '<div data-automation-id="dateInputWrapper" aria-label="'+name+'"><label>'+name+'</label><input role="spinbutton" aria-label="'+name+' month" data-automation-id="dateSectionMonth" required type="number"><input role="spinbutton" aria-label="'+name+' year" data-automation-id="dateSectionYear" required type="number"></div>'}
+function add(section){const group=document.createElement('div');group.className='entry';
+if(section.id==='work')group.innerHTML=field('Job Title','text',true)+field('Company','text',true)+field('Location')+field('I currently work here','checkbox')+dates('From')+'<div class="end">'+dates('To')+'</div><label>Role Description<textarea></textarea></label>';
+else if(section.id==='education')group.innerHTML=field('School','text',true)+field('Degree')+field('Discipline')+field('Start date month','number',true)+field('Start date year','number',true)+field('End date month','number')+field('End date year','number');
+else if(section.id==='projects')group.innerHTML=field('Project name')+field('Organization')+field('Start date','date',true)+field('End date','date')+field('URL','url')+field('Technologies')+'<label>Description<textarea maxlength="90"></textarea></label>';
+else group.innerHTML=field('URL','url');
+section.querySelector('.entries').append(group);const current=group.querySelector('[type=checkbox]');if(current)current.onchange=()=>group.querySelector('.end').hidden=current.checked;}
+for(const section of document.querySelectorAll('section')){const button=section.querySelector('button,a');if(button){button.onclick=e=>{e.preventDefault();setTimeout(()=>add(section),30)};add(section)}}
+const widget=document.querySelector('#skill-widget');widget.oninput=()=>{const list=document.querySelector('#skill-options');list.replaceChildren();for(const skill of ['Python','JavaScript'].filter(s=>s.toLowerCase()===widget.value.toLowerCase())){const option=document.createElement('div');option.role='option';option.textContent=skill;option.onclick=()=>{const tag=document.createElement('span');tag.dataset.automationId='selectedItem';tag.textContent=skill;tags.append(tag);widget.value='';list.replaceChildren()};list.append(option)}};
+const country=document.querySelector('#country'), countryOptions=document.querySelector('#country-options');
+const countries=['United States +1','Afghanistan +93','United Arab Emirates +971','United Kingdom +44',...Array.from({length:240},(_,i)=>'Fixture Country '+i+' +99')];
+function closeCountry(){country.setAttribute('aria-expanded','false');countryOptions.replaceChildren()}
+function renderCountries(){countryOptions.replaceChildren();for(const name of countries.filter(s=>s.toLowerCase().includes(country.value.toLowerCase()))){const option=document.createElement('div');option.role='option';option.textContent=name;option.onclick=()=>{let selected=document.querySelector('.select__single-value');if(!selected){selected=document.createElement('div');selected.className='select__single-value';document.querySelector('.select__value-container').prepend(selected)}selected.textContent=name.match(/\+\d+$/)[0];document.querySelector('.select__placeholder')?.remove();country.value='';closeCountry()};countryOptions.append(option)}}
+// This picker ignores focus, ArrowDown and mousedown; only a click opens it.
+document.querySelector('.select__control').onclick=()=>{if(country.getAttribute('aria-expanded')==='true')closeCountry();else{country.setAttribute('aria-expanded','true');renderCountries()}};
+country.oninput=()=>{if(country.getAttribute('aria-expanded')==='true')renderCountries()};
+country.onkeydown=e=>{if(e.key==='Escape')closeCountry()};
+</script></body></html>

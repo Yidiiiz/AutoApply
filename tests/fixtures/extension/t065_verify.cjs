@@ -1,0 +1,172 @@
+// T065 offline integration: node tests/fixtures/extension/t065_verify.cjs
+// Uses Node built-in WebSocket, a temporary Chrome profile and local HTTP stubs.
+// The Workday landing context is representative, not captured from a live site.
+const fs=require('node:fs'),path=require('node:path'),http=require('node:http'),{spawn}=require('node:child_process');
+const root=process.cwd(),out=path.join(root,'.tmp/review/t065'),profile=path.join(root,'.tmp/t065-direct-profile-'+Date.now());fs.mkdirSync(profile,{recursive:true});fs.mkdirSync(out,{recursive:true});
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let browser,socket,server;const results=[],requests=[];
+(async()=>{
+ let items=[],runNumber=0,failTracking=false,failResult=false,holdAnswers=false;const slowResponses=[],answerResponses=[];
+ const form=`<main><h1>Job application</h1><form onsubmit="event.preventDefault();submissions++;document.querySelector('main').innerHTML='<h1>Application submitted</h1>'"><label>Full name<input id=name required></label><button id=submit type=submit>Submit application</button></form></main><script>window.submissions=0;</script>`;
+ const landing=`<main data-automation-id="jobPostingPage"><h1>Software Intern</h1><button type=button data-automation-id="adventureButton" onclick="entryClicks++;this.remove();document.querySelector('main').insertAdjacentHTML('beforeend','<p>Loading application?</p>')">Continue application</button><button type=button onclick="wrong++">Continue</button><button type=button onclick="wrong++">Save and Continue</button></main><script>window.entryClicks=0;window.wrong=0;window.submissions=0;</script>`;
+ const {spawnSync}=require('node:child_process');
+ const dashboard=spawnSync(path.join(root,'.venv/Scripts/python.exe'),['-c','from autoapply.dashboard_ui import PAGE;print(PAGE)'],{encoding:'utf8'}).stdout;
+ server=http.createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const payload=raw?JSON.parse(raw):{};requests.push({method:req.method,url:req.url,payload});
+  const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Access-Control-Allow-Origin':req.headers.origin||'*','Access-Control-Allow-Headers':'Content-Type,X-AutoApply-Key','Access-Control-Allow-Methods':'GET,POST,OPTIONS'});res.end(JSON.stringify(value));};
+  if(req.method==='OPTIONS')return send({});
+  const current=()=>items.find(i=>i.state==='opened');
+  if(req.url==='/ext/run/status'||req.url==='/api/ext-run')return send({items,poll_age_seconds:0});
+  if(req.url==='/ext/run/next'){if(current())return send({wait:true});const item=items.find(i=>i.state==='pending');if(!item)return send({done:true});item.state='opened';return send({...item,index:items.indexOf(item)+1,total:items.length});}
+  if(req.url==='/ext/run/result'){if(failResult){failResult=false;return send({error:'fixture unavailable'},503);}const item=items.find(i=>i.application_id===payload.application_id&&i.run_id===payload.run_id);if(!item||item.state!=='opened'&&!(item.state==='skipped'&&payload.state==='skipped'))return send({error:'Application is not open in this run'},409);Object.assign(item,{state:payload.state==='skipped'?'skipped':'opened',phase:payload.state,detail:payload.detail});return send({ok:true});}
+  if(req.url==='/ext/run/skip'||req.url==='/ext/run/cancel'){for(const item of items)if(['pending','opened'].includes(item.state)&&(req.url.endsWith('cancel')||item.application_id===payload.application_id))item.state='skipped';return send({items});}
+  if(req.url==='/ext/ping')return send({ok:true,profile_name:'Fixture',auto_advance:false});
+  if(req.url==='/ext/answers'){if(holdAnswers){answerResponses.push(()=>send({answers:payload.fields.map(f=>({...f,status:f.answered?'SKIP':'RESOLVED',value:'Fixture Student'}))}));return;}return send({answers:payload.fields.map(f=>({...f,status:f.answered?'SKIP':'RESOLVED',value:'Fixture Student'}))});}
+  if(req.url==='/ext/applied'){if(failTracking)return send({error:'fixture tracking failure'},503);const item=items.find(i=>i.application_id===payload.application_id&&i.run_id===payload.run_id&&i.state==='opened');if(!item)return send({error:'stale'},409);item.state='submitted';return send({ok:true});}
+  if(req.url==='/ext/profile-sections')return send({experience:[],projects:[],education:[],skills:[],links:{}});
+  if(req.url.startsWith('/ext/'))return send({ok:true,aliases:{}});
+  if(req.url.startsWith('/api/')){if(req.url==='/api/priority')return send({rows:[]});if(req.url==='/api/manual'||req.url==='/api/failed'||req.url==='/api/applied')return send({applications:[]});return send({});}
+  if(req.method!=='GET')return send({error:'Only local stub APIs accept writes'},405);
+  const html=req.url==='/dashboard'?dashboard:req.url.startsWith('/landing')?landing:req.url==='/signin'?'<main><h1>Sign in to Workday</h1><form><label>Email<input id=email type=email></label><label>Password<input id=password type=password></label><button>Sign in</button></form></main>':form;
+  const respond=()=>{res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end(html);};if(req.url==='/slow'){slowResponses.push(respond);return;}respond();
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port;
+ const browserRoot=path.join(process.env.LOCALAPPDATA,'ms-playwright');const chrome=fs.readdirSync(browserRoot).filter(n=>n.startsWith('chromium-')).sort().reverse().map(n=>path.join(browserRoot,n,'chrome-win64/chrome.exe')).find(p=>fs.existsSync(p));if(!chrome)throw Error('Full local Chromium not found');
+ browser=spawn(chrome,['--headless=new','--no-sandbox','--disable-background-networking','--disable-component-update','--no-first-run','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost','--remote-debugging-port=0','--user-data-dir='+profile,'--disable-extensions-except='+path.join(root,'extension'),'--load-extension='+path.join(root,'extension'),'about:blank'],{windowsHide:true,stdio:'ignore'});browser.unref();
+ fs.writeFileSync(path.join(out,'direct-browser.json'),JSON.stringify({pid:browser.pid,profile}));
+ let portText;for(let n=0;n<450;n++){try{portText=fs.readFileSync(path.join(profile,'DevToolsActivePort'),'utf8');break;}catch{}await sleep(200);}if(!portText)throw Error('Chrome CDP startup timeout');
+ const [port,endpoint]=portText.trim().split(/\r?\n/);socket=new WebSocket('ws://127.0.0.1:'+port+endpoint);await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j;});
+ let seq=0;const pending=new Map();let pausedHandler;
+ socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id){const p=pending.get(m.id);if(p){pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result);}}else if(m.method==='Fetch.requestPaused'&&pausedHandler)pausedHandler(m).catch(error=>console.error(error.message));};
+ function call(method,params={},sessionId){return new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout '+method));},12000);pending.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});}
+ const attach=async targetId=>{const {sessionId}=await call('Target.attachToTarget',{targetId,flatten:true});await call('Runtime.runIfWaitingForDebugger',{},sessionId);return sessionId;};
+ const evaluate=async(expression,sessionId)=>{const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},sessionId);if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
+ const check=(condition,name)=>{if(!condition)throw Error(name);results.push(name);console.log('PASS '+name);};
+ const wait=async(fn,name)=>{for(let n=0;n<120;n++){if(await fn()){check(true,name);return;}await sleep(100);}throw Error('Timeout '+name);};
+ let targets;await wait(async()=>{targets=(await call('Target.getTargets')).targetInfos;return targets.some(t=>t.type==='service_worker'&&t.url.endsWith('/background.js'));},'Actual unpacked MV3 worker initialized');
+ await sleep(750);
+ targets=(await call('Target.getTargets')).targetInfos;
+ let workerTarget,wid;for(const candidate of targets.filter(t=>t.type==='service_worker'&&t.url.endsWith('/background.js'))){const candidateSession=await attach(candidate.targetId);const name=await evaluate('globalThis.chrome?.runtime?.getManifest?.().name',candidateSession);if(name==='AutoApply'){workerTarget=candidate;wid=candidateSession;break;}}if(!wid)throw Error('AutoApply worker not found');const extensionId=new URL(workerTarget.url).hostname;
+ await call('Runtime.enable',{},wid);
+ let w=expression=>evaluate(expression,wid);
+ await call('Runtime.runIfWaitingForDebugger',{},wid);
+
+
+ await wait(()=>w('typeof chrome!=="undefined"&&!!chrome.storage?.session&&typeof autoApplyRunTick==="function"'),'MV3 module and storage ready');
+ await w(`chrome.storage.session.set({chromeRunPaused:true,chromeRun:{paused:true}})`);
+ await w(`chrome.storage.local.set({server:${JSON.stringify(base)},key:'fixture-key'})`);
+ const {targetId:panelTarget}=await call('Target.createTarget',{url:'chrome-extension://'+extensionId+'/sidepanel.html'});const panel=await attach(panelTarget);
+ const control=async(type,extras={})=>evaluate(`chrome.runtime.sendMessage(${JSON.stringify({type,...extras})})`,panel);
+ const appTabs=async()=>JSON.parse(await w(`chrome.tabs.query({}).then(t=>JSON.stringify(t.filter(t=>(t.pendingUrl||t.url)?.startsWith(${JSON.stringify(base)})&&!(t.pendingUrl||t.url).includes('/dashboard')).map(t=>({...t,url:t.pendingUrl||t.url}))))`));
+ const start=async(first='landing',background=false)=>{runNumber++;items=[1,2,3].map(application_id=>({application_id,run_id:'run-'+runNumber,state:'pending',company:'Fixture',title:'Application '+application_id,url:base+'/'+(application_id===1?first:'form'+application_id)}));await w(`(async()=>{await chrome.storage.session.set({chromeRunPaused:false,chromeRun:{}});${background?'globalThis.fixtureRun=autoApplyRunTick();return true':'await autoApplyRunTick()'}})()`);};
+ const tick=()=>w('autoApplyRunTick()');
+ await start();await wait(async()=>{const r=await w('chrome.storage.session.get("chromeRun")');return r.chromeRun?.phase==='needs_input';},'Continue application entry waits for SPA form');
+ let tabs=await appTabs();check(tabs.length===1&&items[0].state==='opened'&&items[1].state==='pending','Only first of three jobs opened during entry loading');
+ const firstId=tabs[0].id;let app=(await call('Target.getTargets')).targetInfos.find(t=>t.url===tabs[0].url),aid=await attach(app.targetId);
+ check(await evaluate('entryClicks===1&&wrong===0',aid),'Exact Workday Continue application clicked; generic Continue untouched');
+ let claims=requests.filter(r=>r.url==='/ext/run/next').length;
+ for(let i=0;i<3;i++)await tick();
+ check((await appTabs()).length===1&&requests.filter(r=>r.url==='/ext/run/next').length===claims,'Three alarm ticks do not claim a second job');
+ await evaluate(`document.querySelector('main').outerHTML=${JSON.stringify(form.split('<script>')[0])}`,aid);
+ await wait(()=>evaluate('document.querySelector("#name")?.value==="Fixture Student"',aid),'Delayed SPA form is filled while first claim stays open');
+ await wait(async()=>{const r=await w('chrome.storage.session.get("tabResults")');return !r.tabResults?.[firstId]?.busy;},'Delayed fill settles');
+ await evaluate('document.querySelector("#name").value="User edit"',aid);for(let i=0;i<3;i++)await tick();
+ check(await evaluate('document.querySelector("#name").value==="User edit"&&submissions===0',aid),'Review ticks preserve user edits and never submit');
+ // Stop the actual service worker and wake it through the extension page.
+ await call('Target.closeTarget',{targetId:workerTarget.targetId});await sleep(150);
+ await control('run-status-refresh');
+ await wait(async()=>{const t=(await call('Target.getTargets')).targetInfos.find(t=>t.url==='chrome-extension://'+extensionId+'/background.js');if(!t)return false;workerTarget=t;wid=await attach(t.targetId);return true;},'MV3 worker restarted');
+ await wait(()=>w('typeof autoApplyRunTick==="function"'),'Restarted module ready');
+ await tick();check((await appTabs()).length===1&&await evaluate('document.querySelector("#name").value==="User edit"',aid),'Worker restart preserves current tab and edited review');
+ // Session binding loss reconciles the server claim without opening a duplicate.
+ await w('chrome.storage.session.remove("chromeRun")');await tick();check((await appTabs()).length===1,'Session claim reconciliation avoids duplicate tab');
+ failResult=true;await w(`chrome.tabs.remove(${firstId})`);await sleep(100);await tick();
+ check(items[0].state==='opened'&&items[1].state==='pending','Failed close delivery holds server claim');
+ await tick();await tick();check(items[0].state==='skipped'&&items[1].state==='opened'&&items[2].state==='pending','Close retry releases exactly first then opens exactly second');
+ tabs=await appTabs();check(tabs.length===1&&tabs[0].url.endsWith('/form2'),'Actual Chrome tab count and URL show second only');
+ for(let i=0;i<3;i++)await tick();check(items[2].state==='pending','Second review holds third pending');
+ await control('run-skip');await tick();check(items[1].state==='skipped'&&items[2].state==='opened','Explicit Skip releases second exactly once');
+ tabs=await appTabs();const third=tabs.find(t=>t.url.endsWith('/form3'));app=(await call('Target.getTargets')).targetInfos.find(t=>t.url===third.url);aid=await attach(app.targetId);
+ await wait(()=>evaluate('document.querySelector("#name")?.value==="Fixture Student"',aid),'Third form filled without automatic submission');
+ failTracking=true;
+ const point=await evaluate('(()=>{const r=document.querySelector("#submit").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()',aid);
+ await call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point},aid);await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point},aid);
+ await wait(()=>Promise.resolve(requests.some(r=>r.url==='/ext/applied')),'Trusted local manual submission produces confirmation tracking');
+ await tick();check(items[2].state==='opened','Tracking failure holds confirmed application for retry');
+ failTracking=false;await control('retry-submission-tracking',{tabId:third.id});await tick();check(items[2].state==='submitted','Successful confirmed tracking releases current claim');
+ check(requests.filter(r=>r.url==='/ext/applied').every(r=>r.payload.application_id===3&&r.payload.run_id==='run-1'),'Only confirmed third application tracked with run identity');
+ // Cancel and pause during a delayed entry never permit a late next claim.
+ for(const t of await appTabs())await w(`chrome.tabs.remove(${t.id})`);
+ await start();await control('run-pause',{paused:true});let count=requests.filter(r=>r.url==='/ext/run/next').length;for(let i=0;i<3;i++)await tick();check(requests.filter(r=>r.url==='/ext/run/next').length===count,'Pause blocks late claims');
+ await control('run-cancel');for(let i=0;i<3;i++)await tick();check(items.every(i=>i.state==='skipped')&&(await appTabs()).length<=1,'Cancel delayed entry leaves no next tab');
+ // Guarded entry must reject submit-form buttons and active Workday steps.
+ tabs=await appTabs();if(tabs.length){app=(await call('Target.getTargets')).targetInfos.find(t=>t.url===tabs[0].url);aid=await attach(app.targetId);await evaluate(`document.body.innerHTML='<main data-automation-id="jobPostingPage"><form><button type="submit">Continue application</button></form></main>'`,aid);const guard=await w(`chrome.scripting.executeScript({target:{tabId:${tabs[0].id}},func:()=>autoApplyContent.enterApplication()})`);check(!guard[0].result,'Continue application never invokes a form submit');await evaluate(`document.body.innerHTML='<main data-automation-id=jobPostingPage><div data-automation-id=progressBar><span data-automation-id=progressBarActiveStep>Review</span></div><button type=button>Continue application</button></main>'`,aid);check(!(await w(`chrome.scripting.executeScript({target:{tabId:${tabs[0].id}},func:()=>autoApplyContent.enterApplication()})`))[0].result,'Continue application is blocked during active Workday review');}
+ // Real document loading, delayed sign-in and late answer callbacks.
+ const closeApps=async()=>{for(const t of await appTabs())await w(`chrome.tabs.remove(${t.id})`);await sleep(100);};
+ await closeApps();await start('slow',true);await wait(async()=>slowResponses.length===1&&(await appTabs()).length===1,'First actual Chrome tab remains loading');
+ count=requests.filter(r=>r.url==='/ext/run/next').length;for(let i=0;i<3;i++)await tick();check(items[1].state==='pending'&&requests.filter(r=>r.url==='/ext/run/next').length===count,'Alarms during actual document load open no second tab');
+ await control('run-pause',{paused:true});slowResponses.splice(0).forEach(respond=>respond());await sleep(700);for(let i=0;i<3;i++)await tick();check(items[0].state==='opened'&&items[1].state==='pending'&&(await appTabs()).length===1,'Pause during document load prevents late advancement');
+ await control('run-cancel');await closeApps();await start('slow',true);await wait(async()=>slowResponses.length===1,'Cancel scenario owns one loading response');await control('run-cancel');slowResponses.splice(0).forEach(respond=>respond());await sleep(700);for(let i=0;i<3;i++)await tick();check(items.every(i=>i.state==='skipped')&&(await appTabs()).length===1,'Cancel during document load cannot resurrect current or next');
+ await closeApps();await start('signin');tabs=await appTabs();const signinTarget=(await call('Target.getTargets')).targetInfos.find(t=>t.url===base+'/signin'),sid=await attach(signinTarget.targetId);count=requests.filter(r=>r.url==='/ext/run/next').length;for(let i=0;i<3;i++)await tick();check(await evaluate('document.querySelector("#email").value===""&&document.querySelector("#password").value===""',sid)&&requests.filter(r=>r.url==='/ext/run/next').length===count&&items[1].state==='pending','Delayed sign-in holds first claim and leaves credentials untouched');
+ await control('run-cancel');await closeApps();holdAnswers=true;await start('form1',true);await wait(async()=>answerResponses.length===1,'First autofill awaits owned answer response');tabs=await appTabs();const lateId=tabs[0].id;await w(`chrome.tabs.remove(${lateId})`);for(let i=0;i<3;i++)await tick();check(items[1].state==='pending'&&(await appTabs()).length===0,'Close does not open next while prior answer task is outstanding');holdAnswers=false;answerResponses.splice(0).forEach(respond=>respond());await sleep(300);await tick();await tick();await wait(async()=>items[1].state==='opened','Late closed-tab work settles before exactly second opens');check(items[2].state==='pending'&&(await appTabs()).length===1,'Late first callback cannot release or duplicate second');check(await w(`chrome.storage.session.get('tabResults').then(v=>!v.tabResults?.[${lateId}])`),'Late callback cannot resurrect closed tab results');await control('run-cancel');
+
+ // T066 keeps all preceding lifecycle checks and adds current UI acceptance.
+ const {targetId:dashboardTarget}=await call('Target.createTarget',{url:base+'/dashboard'});const did=await attach(dashboardTarget);await call('Page.enable',{},did);await wait(()=>evaluate('typeof renderChromeRun==="function"&&document.readyState==="complete"',did),'Actual dashboard JavaScript initialized');
+ const rows=Array.from({length:65},(_,i)=>({application_id:i+100,company:'A company with a very long name '+i,title:'Software engineer internship with a very long title '+i,url:base+'/form'+i,description:'<img src=x onerror=alert(1)> '+('Stored description text. '.repeat(i===1?1:90)),rank:i+1,ats:'Workday'}));
+ const snapshot=async(session,name)=>call('Page.captureScreenshot',{format:'png'},session).then(r=>fs.writeFileSync(path.join(out,name+'.png'),Buffer.from(r.data,'base64')));
+ await evaluate(`render({rows:${JSON.stringify(rows)},sweep:{}});applyDiscoveryStatus({successful_at:new Date(Date.now()-49*3600000).toISOString()});renderChromeRun({items:[]})`,did);
+ check(await evaluate('views.priority==="list"&&!document.querySelector("#rows .queue-description")',did),'List defaults to compact rows without description previews');
+ for(const width of [1440,390]){
+  await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false},did);
+  await evaluate(`renderChromeRun({items:[{application_id:100,run_id:'visual',state:'opened',phase:'failed',detail:'Fixture fill error',company:'Company with an exceptionally long name',title:'A very long software engineering internship title'},{application_id:101,run_id:'visual',state:'pending'}],poll_age_seconds:0});document.querySelector('main').scrollTop=0`,did);await sleep(100);
+  check(await evaluate('document.documentElement.scrollWidth<=innerWidth&&document.querySelector("main").scrollWidth<=document.querySelector("main").clientWidth',did),'Queue has no horizontal overflow '+width);
+  check(await evaluate('(()=>{const s=document.querySelector("#chrome-run-status"),c=document.querySelector("#chrome-run-cancel");return !/1\\/2|Review error/.test(s.textContent)&&s.title.includes("Fixture fill error")&&s.getBoundingClientRect().right<=c.getBoundingClientRect().left})()',did),'Compact run identity and accessible error fit '+width);
+  check(await evaluate('!document.querySelector("#rows .actions a,#rows [data-cv-id],#rows .queue-description")&&document.querySelector("#rows .external-link")?.rel.includes("noopener")',did),'Compact List actions and safe title link '+width);
+  await snapshot(did,'queue-list-'+width);
+  await evaluate('pages.priority=1;draw("priority");document.querySelector("main").scrollTop=1000',did);await sleep(150);
+  check(await evaluate('(()=>{const h=document.querySelector("#rows .list-head").getBoundingClientRect(),n=document.querySelector(".navbar").getBoundingClientRect();if(Math.abs(h.top-n.bottom)>1)return false;for(let y=n.bottom;y<h.bottom;y+=3)for(let x=h.left+4;x<h.right;x+=35){const e=document.elementFromPoint(x,y);if(e?.closest(".item"))return false;}return document.querySelector("main").scrollTop>=800})()',did),'Scrolled List has no row content above or through sticky header '+width);
+  await snapshot(did,'queue-scrolled-'+width);
+  await evaluate('document.querySelector("main").scrollTop=0;document.querySelector("[data-view=grid]").click()',did);await sleep(100);
+  check(await evaluate('views.priority==="grid"&&document.querySelector("#rows").classList.contains("grid")&&!document.querySelector("#rows .queue-description img")&&getComputedStyle(document.querySelector(".description-text")).webkitLineClamp==="3"&&!document.querySelector(".queue-description button").hidden',did),'Grid has escaped stored descriptions capped to three lines '+width);
+  await evaluate('document.querySelector(".queue-description button").click()',did);
+  check(await evaluate('document.querySelector(".description-text").classList.contains("expanded")&&document.querySelector(".queue-description button").textContent==="Collapse"',did),'Grid description expands explicitly '+width);
+  await evaluate('document.querySelector(".queue-description button").click()',did);
+  check(await evaluate('!document.querySelector(".description-text").classList.contains("expanded")',did),'Grid description collapses '+width);
+  await snapshot(did,'queue-grid-'+width);
+  await evaluate('document.querySelector("[data-view=list]").click()',did);
+ }
+ check(await evaluate('document.querySelector("#discovery-state").textContent==="Last updated 2 days ago"',did),'Concise persisted success age shown');
+ // Replace selection even when a selected application is outside the filter and another tab.
+ await evaluate(`renderManual({applications:[{application_id:999,url:'${base}/form999',company:'Other tab',title:'Intern'}]});chromeSelected.add(999);chromeSelected.add(100);filters.priority='long name 2';sorts.priority={key:'application_id',direction:'descending'};draw('priority');document.querySelector('.select-count').value='0';document.querySelector('#chrome-selection-priority button').click()`,did);
+ check(await evaluate('chromeSelected.has(999)&&chromeSelected.has(100)',did),'Invalid top N preserves complete selection');
+ await evaluate('document.querySelector(".select-count").value="2";document.querySelector("#chrome-selection-priority button").click()',did);
+ check(await evaluate('JSON.stringify([...chromeSelected])==="[129,128]"&&document.querySelector("#chrome-run-priority").textContent==="Run (2)"&&document.querySelector("#chrome-run-needs-you").textContent==="Run (2)"',did),'Top N replaces filtered-out and other-tab selection with exact sorted candidates and Run count');
+ await evaluate('filters.priority="";pages.priority=1;draw("priority");document.querySelector("#pagination-priority-top").children[2].click()',did);
+ check(await evaluate('document.querySelector("#pagination-priority-top .range").textContent===document.querySelector("#pagination-priority .range").textContent&&pages.priority===2',did),'Top and bottom pagination stay synchronized');
+ await evaluate('renderChromeRun({items:[1,2,3].map(application_id=>({application_id,run_id:"done",company:"Fixture",title:"A long completed job title",state:"skipped"}))})',did);
+ check(await evaluate('document.querySelector("#chrome-run-panel").hidden&&!document.querySelector("#chrome-last-run").open&&!document.querySelector("#chrome-last-run").hidden',did),'Finished three-job run collapses and hides active controls');
+ await evaluate('document.querySelector("[data-view=grid]").click()',did);await call('Page.reload',{},did);await wait(()=>evaluate('document.readyState==="complete"&&typeof views!=="undefined"&&views.priority==="grid"',did),'Grid preference survives actual browser reload');
+ // Extension visuals use actual session updates; the run lifecycle above is unchanged.
+ await call('Emulation.setDeviceMetricsOverride',{width:360,height:700,deviceScaleFactor:1,mobile:false},panel);
+ await w(`chrome.storage.session.set({chromeRunPaused:true,chromeRun:{}})`);
+ await evaluate('document.querySelector("#company").textContent="Fixture International Research and Engineering Company";document.querySelector("#job").textContent="Software Engineering Intern, Developer Tools and Distributed Systems"',panel);
+ for(const state of ['inactive','active','paused','error']){
+  await w(`chrome.storage.session.set({chromeRun:${JSON.stringify(state==='inactive'?{}:{active:true,paused:state==='paused',index:1,total:3,current:{application_id:100},phase:state==='error'?'failed':'filled',error:state==='error'?'Fixture fill error details':''})}})`);await sleep(120);
+  check(await evaluate(`(()=>{const controls=document.querySelector('#run-controls'),job=document.querySelector('#job').getBoundingClientRect(),settings=document.querySelector('#settings').getBoundingClientRect();if(${JSON.stringify(state)}==='inactive')return controls.hidden;const r=controls.getBoundingClientRect();return !controls.hidden&&Math.abs(r.top-job.top)<5&&job.right<=r.left&&document.querySelector('#company').getBoundingClientRect().right<=settings.left&&getComputedStyle(controls.querySelector('button')).borderTopWidth==='0px'&&!!document.querySelector('#run-pause svg path')&&getComputedStyle(document.querySelector('#chrome-run-status')).clipPath==='inset(50%)'})()`,panel),'Extension compact long-title header '+state+' 360');
+  check(await evaluate(`document.querySelector('#run-pause').getAttribute('aria-label')===${JSON.stringify(state==='paused'?'Resume run':'Pause run')}`,panel),'SVG pause/resume label '+state);
+  if(state==='error')check(await evaluate('document.querySelector("#run-controls").title.includes("Fixture fill error details")',panel),'Extension error detail stays accessible by tooltip and live status');
+  await snapshot(panel,'header-'+state+'-360');
+ }
+ for(const checked of [false,true]){
+  await evaluate(`(()=>{const e=document.querySelector('#auto-advance');e.disabled=false;e.checked=${checked};e.focus();})()`,panel);
+  check(await evaluate(`(()=>{const i=document.querySelector('#auto-advance'),r=i.getBoundingClientRect(),l=document.querySelector('.auto-lock'),b=l.getBoundingClientRect(),knob=getComputedStyle(i,'::before');return i.getAttribute('role')==='switch'&&document.activeElement===i&&parseFloat(getComputedStyle(i).outlineWidth)>=2&&r.width===28&&r.height===16&&parseFloat(knob.width)===12&&i.parentElement.getBoundingClientRect().height>=32&&(${checked}?b.width===9&&Math.abs(b.y+b.height/2-r.y-r.height/2)<1&&Math.abs(b.x+b.width/2-(r.right-8))<1:getComputedStyle(l).display==='none')})()`,panel),'Proportional 28x16 auto-next switch checked='+checked);
+  await snapshot(panel,'lock-360-'+checked);
+ }
+ await evaluate('document.querySelector("#auto-advance").click();document.querySelector("#auto-advance").focus()',panel);
+ await call('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32},panel);await call('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32},panel);
+ check(await evaluate('document.querySelector("#auto-advance").checked',panel),'Original-size switch supports keyboard Space');
+ await evaluate('document.querySelector("#auto-advance").disabled=true',panel);
+ check(await evaluate('document.querySelector("#auto-advance").checked&&getComputedStyle(document.querySelector(".auto-lock")).display!=="none"',panel),'Disabled final-review preference keeps proportional checked lock');
+ check(!requests.some(r=>r.method==='POST'&&!r.url.startsWith('/ext/')),'All writes confined to local fixture APIs');
+ fs.writeFileSync(path.join(out,'direct-result.json'),JSON.stringify({ok:true,checks:results,requests,pid:browser.pid,profile},null,2));console.log('COMPLETE '+results.length+' actual Chrome checks');
+ try{await Promise.race([call('Browser.close'),sleep(1500)]);}catch{}socket.close();server.closeAllConnections();server.close();browser.kill();process.exit(0);
+})().catch(error=>{fs.writeFileSync(path.join(out,'direct-result.json'),JSON.stringify({ok:false,error:String(error.stack),checks:results,pid:browser?.pid,profile},null,2));console.error(error.stack);try{socket?.close();server?.closeAllConnections();server?.close();browser?.kill();}catch{}process.exit(1);});

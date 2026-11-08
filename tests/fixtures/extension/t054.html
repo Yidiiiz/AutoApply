@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Fixture application</title></head><body>
+<main><h1>Fixture Intern</h1><div data-automation-id="progressBar"><div data-automation-id="progressBarActiveStep" aria-current="step">Review</div></div>
+<button id="final" data-automation-id="pageFooterNextButton" aria-label="completed step 1 of 7 My Information completed step 2 of 7 current step 7 of 7 Review">Submit</button><div id="feedback"></div></main>
+<script>
+window.clicks=0;window.mode='pending';
+document.querySelector('#final').onclick=event=>{event.preventDefault();clicks++;if(mode==='invalid')document.querySelector('#feedback').innerHTML='<div role="alert">Required information missing. Fix the page and retry.</div>';};
+window.confirmApplication=()=>{document.querySelector('#feedback').innerHTML='<div data-automation-id="candidateHomeTaskModal" role="dialog" aria-labelledby="submitted-heading"><h2 id="submitted-heading">Application Submitted</h2><div data-automation-id="richText">Thank you for your application! As a reminder, we limit applications.</div><button>Return to Home</button></div>';};
+document.addEventListener('submit',event=>event.preventDefault());
+</script></body></html>

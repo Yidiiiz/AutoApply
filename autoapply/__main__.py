@@ -3,16 +3,35 @@ import asyncio
 import json
 import shutil
 import sys
+from contextlib import nullcontext
 
 from .config import Config, ROOT, setup_logging
 from .database import Database
 from .runtime import ProcessLock
 
 
+def semi_auto_limit(value):
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('--limit must be an integer between 1 and 10') from None
+    if not 1 <= count <= 10:
+        raise argparse.ArgumentTypeError('--limit must be between 1 and 10')
+    return count
+
+
 def parser():
     p = argparse.ArgumentParser(description="AutoApply internship discovery and applications")
     p.add_argument("--root", default=str(ROOT), help="Project root containing private data")
     sub = p.add_subparsers(dest="command", required=True)
+    entry = sub.add_parser('entry-test', help='Opt-in live application entry only; temporary browser profile, never fill or submit')
+    entry.add_argument('--limit', type=int, default=5, help='Maximum open listings to probe (positive; default: 5)')
+    entry.add_argument('--ids', type=int, nargs='+', default=[], help='Restrict to these job/listing IDs, in priority order')
+    entry.add_argument('--headed', action='store_true', help='Show the throwaway browser')
+    dashboard = sub.add_parser('dashboard', help='Local priority queue and discovery dashboard')
+    dashboard.add_argument('--port', type=int, default=8765)
+    dashboard.add_argument('--liveness-minutes', type=float, default=30, help='Probe interval in minutes (minimum 5)')
+    dashboard.add_argument('--no-browser', action='store_true', help='Do not open the local dashboard page')
     listings = sub.add_parser("listings", help="Maintain listing eligibility without deleting application history")
     listings.add_argument("action", choices=["cleanup", "stats"])
     history = sub.add_parser('history', help='Maintain private application history')
@@ -45,6 +64,17 @@ def parser():
     once = sub.add_parser("work-once")
     once.add_argument("--application-id", type=int, help="Process only this queued application; never fall back to another job")
     once.add_argument("--allow-incomplete", action="store_true", help="Inspect/fill with missing setup; unknown fields still pause")
+    semi = sub.add_parser('semi-auto', help='Fill a bounded batch of open priority listings; never submit')
+    semi.add_argument('--limit', type=semi_auto_limit, default=5, help='Retained forms per batch (1..10; default: 5)')
+    semi.add_argument('--rerun', type=int, nargs='+', default=[], help='Held zero-delivery entry failures to fill first')
+    semi.add_argument('--source', default='', help='Explicit operator authorization for --rerun')
+    fill = sub.add_parser('fill', help='Fill selected applications sequentially; never submit')
+    fill.add_argument('ids', type=int, nargs='*', help='Explicit queued/retry IDs in order; omit to select the next eligible queued application')
+    fill.add_argument('--limit', type=int, help='Maximum applications selected automatically from the queue (default: 1)')
+    fill.add_argument('--checkpoint-only', action='store_true', help='Save progress and close each form instead of waiting for live manual completion')
+    recovery = sub.add_parser('recover-checkpoint', help='One qualified pre-input adapter recovery; never submit')
+    recovery.add_argument('id', type=int)
+    recovery.add_argument('--source', required=True, help='Explicit user authorization for this single recovery')
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("id", type=int)
     reconcile.add_argument("outcome", choices=["submitted", "not-submitted"])
@@ -53,6 +83,10 @@ def parser():
 
 
 async def execute(args, config, db):
+    if args.command == 'dashboard':
+        from .dashboard import serve
+        serve(config, db, port=args.port, liveness_minutes=args.liveness_minutes, no_browser=args.no_browser)
+        return 0
     from .control import Controller
     from .engine import Engine
     controller = Controller(config, db)
@@ -95,6 +129,39 @@ async def execute(args, config, db):
     elif args.command == "reconcile":
         controller.reconcile(args.id, args.outcome == "submitted", args.evidence)
         print("Submission outcome reconciled.")
+    elif args.command == 'semi-auto':
+        from .semi_auto import SemiAutoLoop
+        config.data['application']['auto_submit'] = False
+        config.data['gmail']['enabled'] = False
+        # Runtime question recognition is deterministic; optional prose requires an explicit provider.
+        await SemiAutoLoop(config, db, rerun=args.rerun, rerun_source=args.source, limit=args.limit).run()
+    elif args.command in {'fill', 'recover-checkpoint'}:
+        from .fill_runner import run_selected
+        # This command needs neither messaging credentials nor external providers.
+        config.data['application']['auto_submit'] = False
+        config.data['discord']['enabled'] = False
+        config.data['gmail']['enabled'] = False
+        config.data['ai']['enabled'] = False
+        if args.command == 'recover-checkpoint':
+            from .checkpoint_recovery import prepare
+            if db.setting('paused') is not True:
+                raise ValueError('Recovery preparation requires paused production')
+            command = prepare(db, config, args.id, source=args.source)
+            print(json.dumps(await run_selected(config, db, [args.id],
+                checkpoint_only=True, recovery_id=command.id), indent=2))
+            return 0
+        if args.limit is not None and (args.limit < 1 or args.ids):
+            raise ValueError('--limit must be positive and applies only to automatic queue selection')
+        ids = args.ids
+        if not ids:
+            from .fill_batch import discover
+            db.set_setting('auto_submit', False)
+            ids = discover(db, config)[:args.limit or 1]
+        if not ids:
+            print('No eligible queued work. Existing holds and history are preserved.')
+            return 0
+        print(json.dumps(await run_selected(config, db, ids,
+                                           checkpoint_only=args.checkpoint_only), indent=2))
     elif args.command in {"run", "scan", "work-once", "login", "probe"}:
         if args.command in {"run", "work-once"} and config["browser"]["headless"]:
             print("Application processing requires browser.headless: false so protected steps can be completed in the preserved browser.")
@@ -170,24 +237,61 @@ async def execute(args, config, db):
 
 def main():
     args = parser().parse_args()
+    if args.command == 'entry-test':
+        # Bypass Config/logging, worker locks, Database startup and all engines.
+        from .entry_harness import run_entry_test
+        try:
+            report = asyncio.run(run_entry_test(args.root, limit=args.limit,
+                                               ids=args.ids, headed=args.headed))
+            print(json.dumps(report, indent=2))
+            return 0
+        except KeyboardInterrupt:
+            print('Entry test stopped.', file=sys.stderr)
+            return 130
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    # Claim the endpoint before Config, logging, migrations, or daily work. The
+    # OS releases this owned lock on exit/crash; never inspect or kill processes.
+    if args.command == 'dashboard' and args.port:
+        from pathlib import Path
+        from tempfile import gettempdir
+        guard = ProcessLock(Path(gettempdir()) / f'autoapply-dashboard-127.0.0.1-{args.port}.lock')
+        try:
+            guard.__enter__()
+        except RuntimeError:
+            print(f'Dashboard already running at http://127.0.0.1:{args.port}/')
+            return 0
+        try:
+            return _main_initialized(args)
+        finally:
+            guard.__exit__(None, None, None)
+    return _main_initialized(args)
+
+
+def _main_initialized(args):
     from dotenv import load_dotenv
     from pathlib import Path
     load_dotenv(Path(args.root) / ".env", override=False)
     config = Config(args.root)
     setup_logging(config)
-    db = Database(config.private / "autoapply.sqlite3", config["jobs"]["max_listing_age_days"],
-                  startup_maintenance=args.command not in {'status', 'queue', 'recent', 'pending'})
     try:
-        return asyncio.run(execute(args, config, db))
+        # Fill execution owns startup as well as the browser and final cleanup.
+        with ProcessLock(config.private / 'worker.lock') if args.command in {'fill', 'recover-checkpoint', 'semi-auto'} else nullcontext():
+            db = Database(config.private / "autoapply.sqlite3", config["jobs"]["max_listing_age_days"],
+                          history_maintenance=args.command != 'dashboard',
+                          startup_maintenance=args.command not in {'status', 'queue', 'recent', 'pending', 'fill', 'recover-checkpoint', 'semi-auto', 'dashboard'})
+            try:
+                return asyncio.run(execute(args, config, db))
+            finally:
+                db.close()
     except KeyboardInterrupt:
-        print("Stopped. Interrupted submissions are reconciled on restart.")
+        print("Dashboard stopped." if args.command == 'dashboard' else "Stopped. Interrupted submissions are reconciled on restart.")
         return 130
     except (ValueError, RuntimeError, OSError) as exc:
         # Only operator-directed, bounded errors are printed; provider exceptions are audited by type.
         print(str(exc), file=sys.stderr)
         return 1
-    finally:
-        db.close()
 
 
 if __name__ == "__main__":

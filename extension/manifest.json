@@ -1,0 +1,80 @@
+{
+  "manifest_version": 3,
+  "name": "AutoApply",
+  "version": "0.1.0",
+  "description": "Fill application forms from your paired local AutoApply dashboard. Submission stays manual.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "native-roots.js",
+        "credentials.js",
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Open AutoApply",
+    "default_icon": {
+      "16": "icons/moon-16.png",
+      "32": "icons/moon-32.png",
+      "48": "icons/moon-48.png",
+      "128": "icons/moon-128.png"
+    }
+  },
+  "commands": {
+    "autofill": {
+      "suggested_key": {
+        "default": "Alt+Shift+F"
+      },
+      "description": "Autofill the current page"
+    },
+    "toggle-sidebar": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Toggle AutoApply sidebar"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "sidepanel.html",
+        "sidepanel.js",
+        "sidepanel.css",
+        "shared.css",
+        "api.js",
+        "pairing.js",
+        "dashboard-launcher.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/moon-16.png",
+    "32": "icons/moon-32.png",
+    "48": "icons/moon-48.png",
+    "128": "icons/moon-128.png"
+  }
+}

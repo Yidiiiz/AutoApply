@@ -1,4 +1,5 @@
 """Normalize explicit checkbox choice groups without weakening other validation."""
+from .form_controls import DOM_JS, CONTROL_SELECTOR
 CHECKBOX_GROUP_JS = r'''e => {
  const root=e.closest('fieldset,[role=group],[data-field],.application-question');
  if(!root) return null;
@@ -12,9 +13,10 @@ CHECKBOX_GROUP_JS = r'''e => {
 }'''
 
 VALIDATION_JS = r'''() => {
+ __DOM__
  const groupFor=__GROUP__;
  const ignored=new Set(), groups=new Set(), issues=[];
- for(const e of document.querySelectorAll('input[type=checkbox]')) {
+ for(const e of deepQuery(document,'input[type=checkbox]')) {
   const group=groupFor(e);
   if(!group || groups.has(group.root)) continue;
   groups.add(group.root);
@@ -22,8 +24,17 @@ VALIDATION_JS = r'''() => {
   if(count<group.min || count>group.max) issues.push('Checkbox group selection count outside allowed range: '+group.heading);
   for(const control of group.controls) if(control.validity.valueMissing && !control.validity.customError && control.getAttribute('aria-invalid')!=='true') ignored.add(control);
  }
- for(const e of document.querySelectorAll('input:invalid,select:invalid,textarea:invalid,[aria-invalid="true"]')) {
+ for(const e of deepQuery(document,'input:invalid,select:invalid,textarea:invalid,[aria-invalid="true"]')) {
   if(!ignored.has(e)) issues.push('Invalid required form control');
  }
+ for(const e of deepQuery(document,'[role="radiogroup"][aria-required="true"]')) {
+   if(visible(e) && !deepQuery(e,'[role="radio"],input[type="radio"]').some(checked))
+     issues.push('Required radio group has no selection');
+ }
+ for(const e of deepQuery(document,'__CONTROLS__')) {
+   if(!visible(e) || e.disabled || e.getAttribute('aria-disabled')==='true' || e.getAttribute('aria-required')!=='true') continue;
+   if(e.matches('[role="checkbox"],[role="switch"]') && !checked(e) ||
+      e.isContentEditable && !e.textContent.trim()) issues.push('Invalid required form control');
+ }
  return issues;
-}'''.replace('__GROUP__', CHECKBOX_GROUP_JS)
+}'''.replace('__GROUP__', CHECKBOX_GROUP_JS).replace('__DOM__', DOM_JS).replace('__CONTROLS__', CONTROL_SELECTOR)

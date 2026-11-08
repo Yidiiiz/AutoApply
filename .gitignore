@@ -24,3 +24,7 @@ build/
 dist/
 .tmp/
 .ruff_cache/
+.agent/
+
+# Chromium writes this to the working directory during headless tests
+debug.log

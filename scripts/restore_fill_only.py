@@ -23,6 +23,9 @@ async def restore(config, db, app_id):
         raise ValueError('Protected application excluded')
     path = config.private / 'fill-only-checkpoints' / f'{app_id}.json'
     saved = json.loads(path.read_text(encoding='utf-8'))
+    from autoapply.operations import FileSnapshot
+    if saved.get('resume_sha256') != FileSnapshot.read(config.resume, force=True).sha256:
+        raise ValueError('Resume changed; checkpoint requires fresh upload and revalidation')
     if saved.get('readiness') not in {'RECONSTRUCTABLE_CHECKPOINT','RECONSTRUCTION_VERIFIED'} and not saved.get('reconstruction_verified'):
         raise ValueError('This application has no reconstructable checkpoint')
     verify_safety(db)

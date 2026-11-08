@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Inline writing context fixture</title>
+<style>label{display:block;margin:8px} [contenteditable]{border:1px solid;min-height:40px}</style>
+<main id="view"></main>
+<template id="application"><form id="application-form"><h1>Job application</h1>
+<label>Full name<input name="full_name"></label><label>Email<input type="email" name="email"></label>
+<label>Resume<input type="file" name="resume" hidden></label>
+<label>Why this role?<textarea id="essay"></textarea></label>
+<label>Additional information<div id="written-editor" contenteditable="true"></div></label>
+<label>Long answer<input id="long-answer" size="60"></label>
+<label>Chat<textarea id="chat-input"></textarea></label>
+<button type="submit">Submit application</button></form>
+<form><h2>Contact support</h2><label>Email<input type="email"></label><textarea id="unrelated"></textarea><button>Send</button></form>
+<textarea id="outside"></textarea></template>
+<template id="outside-heading"><h1>Job application</h1><form><label>Email<input type=email></label><label>Resume<input type=file></label><label>Why this role?<textarea></textarea></label><button>Submit</button></form>
+<form><h2>Contact support</h2><label>Email<input type=email></label><textarea></textarea><button>Submit</button></form></template>
+<template id="nonapplication"><h1>How to apply yourself</h1>
+<form><h2>Blog comments</h2><label>Name<input name="full_name"></label><textarea aria-label="Why apply this advice?"></textarea><button>Post</button></form>
+<form><h2>Contact support</h2><input type="email"><input type="file" aria-label="Attachment"><textarea></textarea><button>Send</button></form>
+<form><h2>Email composer</h2><input type="email"><textarea></textarea><button>Send</button></form>
+<form><h2>Newsletter</h2><input type="email"><input size="60"><button>Subscribe</button></form>
+<div role="textbox" contenteditable="true">Document editor</div><textarea aria-label="Chat"></textarea></template>
+<script>
+window.showView=name=>{history.pushState({},'',name==='application'?'/careers/opening':'/blog/apply-advice');document.querySelector('#view').replaceChildren(document.querySelector('#'+name).content.cloneNode(true));};
+showView('nonapplication');document.addEventListener('submit',event=>event.preventDefault());
+</script></html>

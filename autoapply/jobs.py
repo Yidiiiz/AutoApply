@@ -3,6 +3,7 @@ import hashlib
 import re
 import unicodedata
 from datetime import datetime, timezone
+from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .config import fact
@@ -10,7 +11,12 @@ from .models import Eligibility
 
 
 def normalize(text):
-    return re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', str(text)).casefold()).strip()
+    return _normalize_text(str(text))
+
+
+@lru_cache(maxsize=4096)
+def _normalize_text(text):
+    return re.sub(r"[^\w]+", " ", unicodedata.normalize('NFKC', text).casefold()).strip()
 
 
 def canonical_url(url):
@@ -75,14 +81,16 @@ def freshness(posted, max_days=30, today=None):
 US_STATES = set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split())
 US_NAMES = "alabama alaska arizona arkansas california colorado connecticut delaware florida georgia hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri montana nebraska nevada ohio oklahoma oregon pennsylvania tennessee texas utah vermont virginia washington wisconsin wyoming".split()
 US_CITIES = {"sf", "nyc", "new york", "san francisco", "seattle", "boston", "austin", "chicago", "atlanta", "denver", "college park", "pittsburgh", "san jose", "san diego", "los angeles", "sunnyvale", "mountain view"}
+_US_NAME = re.compile(r'\b(?:' + '|'.join(re.escape(s) for s in US_NAMES) + r')\b')
 
 
+@lru_cache(maxsize=1024)
 def us_location(location):
     text = normalize(location)
     foreign = re.search(r"\b(canada|toronto|vancouver|montreal|ontario|london|united kingdom|uk|india|bangalore|bengaluru|singapore|germany|berlin|france|paris|australia|sydney|china|beijing|japan|tokyo|ireland|dublin|mexico|switzerland|poland|netherlands|israel|brazil)\b", text)
     explicit = bool(re.search(r"\b(united states|usa|u s|us)\b", text))
     state = bool(set(re.findall(r"\b[A-Z]{2}\b", location)) & US_STATES)
-    domestic = explicit or state or any(re.search(r"\b" + re.escape(s) + r"\b", text) for s in US_NAMES) or text in US_CITIES
+    domestic = explicit or state or bool(_US_NAME.search(text)) or text in US_CITIES
     if foreign:
         return None if domestic else False
     return True if domestic else None
@@ -114,8 +122,22 @@ def priority(listing, config):
     return score
 
 
+def phd_rejection(title, description=''):
+    """PhD titles are always out; descriptions must also mention bachelor."""
+    def mentions(text):
+        return re.search(r'\b(?:phd|ph\s+d)\b', (text or '').lower().replace('.', ''))
+    if mentions(title):
+        return 'phd_title'
+    if mentions(description) and 'bachelor' not in description.lower():
+        return 'phd_without_bachelor'
+    return ''
+
+
 def eligibility(job, profile):
     from .standing import resolve_standing
+    rejected = phd_rejection(job.get('title', ''), job.get('description') or '')
+    if rejected:
+        return Eligibility(False, [rejected], [])
     title = normalize(job["title"])
     description = job.get("description", "")
     reasons, uncertain, failures = [], [], []
@@ -137,113 +159,102 @@ def eligibility(job, profile):
     if re.search(r"\b(senior|staff|principal|lead)\b", title) and not student:
         failures.append("Experienced role")
     if re.search(r"\b(phd|ph d|doctoral|masters|master s|mba)\b", title) and not re.search(r"\b(bachelor|undergrad|bs|b s)\b", title):
-        if normalize(fact(profile, "education.degree") or "") not in title:
+        degree = normalize(fact(profile, "education.degree") or "")
+        if not degree:
+            uncertain.append("Role title specifies an advanced degree; degree is not verified")
+        elif degree not in title:
             failures.append("Role title specifies an advanced degree")
-    # Preferred qualifications are not hard requirements. Keep section context.
-    required_lines, preferred, in_requirements = [], False, False
-    hard_lines = []
-    for line in re.split(r"[\n;]+", description):
-        lower = line.lower().strip()
-        if re.fullmatch(r"(?:preferred (?:qualifications|skills(?:\s*(?:&|and)\s*experience)?|experience)|nice to have|bonus qualifications)\s*:?", lower):
-            preferred = True
-            in_requirements = False
-            continue
-        elif re.fullmatch(r"(?:(?:minimum|required|basic|additional|technical|itar|export control) (?:qualifications|requirements)|requirements|qualifications|responsibilities|roles and responsibilities)\s*:?", lower):
-            preferred = False
-            in_requirements = "responsibilities" not in lower
-            continue
-        elif re.fullmatch(r"(?:pay range|additional information|company description|job description)\s*:?", lower):
-            preferred = False
-            in_requirements = False
-            continue
-        if not preferred and not re.search(r"\b(preferred|a plus|nice to have)\b", lower):
-            required_lines.append(line)
-            if in_requirements or re.search(r"\b(must|required|minimum|at least|only)\b", lower):
-                hard_lines.append(line)
+    from .requirements import extract_requirements, duration_requirement
     standing_matches = []
-    unmatched_lines = []
-    for line in required_lines:
+    for item in extract_requirements(description):
+        if item.preferred:
+            continue
+        line = item.text
+        lower = normalize(line)
         match = resolve_standing(line, profile)
         if match:
             standing_matches.append(match)
             reasons.append("USER_PROVIDED standing assertion: " + ", ".join(match["assertion_ids"]))
-        else:
-            unmatched_lines.append(line)
-    required_lines = unmatched_lines
-    hard_lines = [line for line in hard_lines if line in required_lines]
-    required = "\n".join(required_lines)
-    if re.search(r'\b(?:pursuing|enrolled in|must have|requires?) (?:a |an )?graduate degree\b', required, re.I):
-        degree = normalize(fact(profile, 'education.degree') or '')
-        if re.search(r'bachelor|undergrad', degree):
-            failures.append('Role requires a graduate degree; saved education is bachelor level')
-    for line in hard_lines:
-        lower = line.lower()
-        if re.search(r"bachelor|undergraduate|currently enrolled|pursuing", lower):
-            degree = normalize(fact(profile, "education.degree") or "")
-            if re.search(r"bachelor|undergraduate", lower) and not re.search(r"bachelor|undergrad|\bbs\b|\bba\b", degree):
-                uncertain.append("Required degree level is not verified: " + line[:250])
-            if re.search(r"enrolled|pursuing", lower) and fact(profile, "education.currently_enrolled") is not True:
-                uncertain.append("Current enrollment must be verified")
-        if re.search(r"major|degree in|pursuing.{0,20}in ", lower):
-            major = normalize(fact(profile, "education.major") or "")
-            if not major or major not in normalize(line):
-                uncertain.append("Required field of study needs verification: " + line[:250])
-        if re.search(r"master|ph\.?d|doctoral|mba", lower) and not re.search(r"bachelor|undergraduate", lower):
-            uncertain.append("Advanced degree requirement: " + line[:250])
-        if re.search(r"\b(experience|proficien\w*|knowledge|familiar\w*|skills?|ability|able to|available|availability|certif\w*|years? old|security clearance|clearance)\b", lower):
-            # Only this basic requirement can be satisfied by a verified boolean.
-            # Specific languages, years, and additional qualifications still need review.
-            basic_programming = re.fullmatch(
-                r"\s*(?:previous|prior) programming experience is (?:a must|required)\."
-                r"(?:\s+while we use [^.]+, we care more about engineering skills than knowledge of specific languages or frameworks\.?)?\s*",
-                lower,
-            )
-            if basic_programming and fact(profile, "qualifications.programming_experience") is True:
-                reasons.append("Previous programming experience verified")
-                continue
-            # Natural-language skill/availability requirements are not assumed from enrollment.
-            uncertain.append("Verify qualification against your experience: " + line[:250])
-    checks = [(r"(?:must|require\w*).{0,50}(?:u\.?s\.? citizen|united states citizen)", "citizenship.us_citizen", "U.S. citizenship"),
-              (r"(?:must|require\w*).{0,50}(?:authorized|authorization).{0,30}(?:united states|u\.?s\.?)", "work_authorization.us_authorized", "U.S. work authorization")]
-    for pattern, path, label in checks:
-        if re.search(pattern, required, re.I):
-            answer = fact(profile, path)
-            if answer is True:
-                reasons.append(label + " verified")
-            elif answer is False:
-                failures.append(label + " required")
+            continue
+        if duration_requirement(line):
+            # A start date, or a guessed day within a month range, cannot prove
+            # attendance throughout a program. Exact confirmations are scoped
+            # to this complete requirement, never a global availability boolean.
+            uncertain.append("Confirm full-program availability: " + line)
+            continue
+        if api_integration_evidence(line, profile):
+            reasons.append("API/scripting/system integration supported by verified technical evidence")
+            continue
+        if student_requirement(line, profile):
+            reasons.append("Student degree/standing verified")
+            continue
+        basic_programming = re.fullmatch(
+            r"\s*(?:previous|prior) programming experience is (?:a must|required)\."
+            r"(?:\s+while we use [^.]+, we care more about engineering skills than knowledge of specific languages or frameworks\.?)?\s*",
+            line, re.I)
+        if basic_programming and fact(profile, "qualifications.programming_experience") is True:
+            reasons.append("Previous programming experience verified")
+            continue
+        # Recognize only complete, simple factual clauses. Unsupported compound
+        # qualifications stay unknown rather than being satisfied by one fact.
+        simple = lower.rstrip()
+        checks = [
+            (r"(?:(?:must be (?:a )?|required to be (?:a )?)(?:u s|us|united states) citizen|(?:u s|us|united states) citizenship (?:is )?required)", "citizenship.us_citizen", "U.S. citizenship"),
+            (r"(?:must be |required to be )?(?:legally )?authorized to work in (?:the )?(?:u s|us|united states)(?: (?:is )?required)?", "work_authorization.us_authorized", "U.S. work authorization"),
+        ]
+        handled = False
+        for pattern, path, label in checks:
+            if re.fullmatch(pattern, simple):
+                value = fact(profile, path)
+                if value is True:
+                    reasons.append(label + " verified")
+                elif value is False:
+                    failures.append(label + " required")
+                else:
+                    uncertain.append(label + " not verified")
+                handled = True
+                break
+        if handled:
+            continue
+        if re.fullmatch(r"(?:must be (?:a )?(?:resident of|residing in)|(?:your )?(?:primary )?residence must be (?:located )?in) (?:the )?(?:u s|united states)", simple) or re.fullmatch(
+            r"to be eligible for this position your primary residence must be located in the united states please indicate the state in which you currently reside", simple):
+            country = normalize(fact(profile, "contact.country") or "")
+            if country in {"us", "usa", "u s", "united states", "united states of america"}:
+                reasons.append("U.S. residence verified")
+            elif country:
+                failures.append("U.S. residence required")
             else:
-                uncertain.append(label + " not verified")
-    if re.search(r"(?:no|not.{0,20})(?:visa )?sponsorship|unable to sponsor|cannot sponsor", required, re.I):
-        values = [fact(profile, "work_authorization." + key) for key in ["sponsorship_now", "sponsorship_future"]]
-        if True in values:
-            failures.append("Employer does not provide required sponsorship")
-        elif None in values:
-            uncertain.append("Sponsorship requirements not verified")
-    # Evaluate every unmatched GPA line, including 'Minimum GPA 3.7'. A prior
-    # matched 3.5 assertion must never hide an additional higher threshold.
-    for line in required_lines:
-        if not re.search(r"\bgpa\b", line, re.I):
+                uncertain.append("U.S. residence not verified")
             continue
-        thresholds = re.findall(r"\b\d\.\d+\b", line)
-        if len(thresholds) != 1:
-            uncertain.append("GPA requirement needs verification: " + line[:250])
-            continue
-        minimum = float(thresholds[0])
-        actual = fact(profile, "education.gpa")
-        if actual is None:
+        if re.search(r"(?:no |not.{0,20})(?:visa )?sponsorship|unable to sponsor|cannot sponsor", line, re.I):
+            values = [fact(profile, "work_authorization." + key) for key in ["sponsorship_now", "sponsorship_future"]]
+            if True in values:
+                failures.append("Employer does not provide required sponsorship")
+            elif None in values:
+                uncertain.append("Sponsorship requirements not verified")
+            # Do not discard any extra requirement attached to sponsorship.
+            if re.fullmatch(r"(?:no (?:visa )?sponsorship(?: (?:is )?(?:available|provided))?|(?:we are )?unable to sponsor|(?:we )?cannot sponsor)", simple):
+                continue
+        if re.fullmatch(r"(?:minimum |a minimum )?gpa(?: of| at least)? \d \d+(?: required| or (?:above|higher))?", simple):
+            threshold = re.search(r"\d\.\d+", line)
+            if not threshold:
+                uncertain.append("GPA requirement needs verification: " + line)
+                continue
+            minimum = float(threshold[0])
+            actual = fact(profile, "education.gpa")
             standing_gpa = resolve_standing("Minimum GPA of 3.5", profile) if minimum <= 3.5 else None
-            if standing_gpa:
+            if actual is not None:
+                if float(actual) < minimum:
+                    failures.append(f"GPA below required {minimum}")
+            elif standing_gpa:
                 standing_matches.append({**standing_gpa, "requirement": line})
                 reasons.append("Verified minimum GPA 3.5 satisfies stated lower threshold")
             else:
                 uncertain.append(f"Minimum GPA {minimum} needs verification")
-        elif float(actual) < minimum:
-            failures.append(f"GPA below required {minimum}")
-    if re.search(r"(?:active|current|existing).{0,35}(?:clearance|top secret)|(?:clearance|top secret).{0,25}(?:required|must)", required, re.I):
-        uncertain.append("Existing clearance requirement must be verified")
-    for line in required_lines:
-        # Degree level and graduate-program start dates are not graduation dates.
+            continue
+        if re.search(r'\b(?:pursuing|enrolled in|must have|requires?) (?:a |an )?graduate degree\b', line, re.I):
+            if re.search(r'bachelor|undergrad', normalize(fact(profile, 'education.degree') or '')):
+                failures.append('Role requires a graduate degree; saved education is bachelor level')
         if re.search(r"\b(?:graduation|graduating|graduate(?:d|s)?\s+(?:in|by|between|before|after))\b", line, re.I):
             years = [int(x) for x in re.findall(r"\b20\d{2}\b", line)]
             graduation = fact(profile, "education.graduation_date")
@@ -252,18 +263,64 @@ def eligibility(job, profile):
                     uncertain.append("Graduation date missing")
                 elif int(str(graduation)[:4]) < min(years) or int(str(graduation)[:4]) > max(years):
                     failures.append("Graduation year outside stated window")
-                elif re.search(r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|before|after", line, re.I):
-                    uncertain.append("Exact graduation date window requires review: " + line[:300])
-                else:
+                elif re.fullmatch(r'(?:must )?(?:graduate|graduating|graduation) (?:in 20\d{2}|between 20\d{2} and 20\d{2})', lower):
                     reasons.append("Graduation year within stated window")
-        if re.search(r"\b(must|required|minimum|at least|only)\b", line, re.I):
-            if re.search(r"\b(age|years? of experience|certification|available|availability|security|clearance|major|degree|enrolled|pursuing|citizen|authorized|sponsor|gpa|graduat)\b", line, re.I):
-                if re.search(r"bachelor|undergraduate|computer science|currently enrolled", line, re.I):
-                    # Complex conjunctions still need review below.
-                    if not re.search(r"master|ph\.?d|years? of experience|certif|clearance|\bage\b|available", line, re.I):
-                        continue
-                if not any(x in line.lower() for x in ["gpa", "graduat", "citizen", "sponsor", "authoriz"]):
-                    uncertain.append("Verify requirement: " + line[:300])
+                else:
+                    # Year membership does not verify a compound clause or an
+                    # exact month/day boundary.
+                    uncertain.append("Exact graduation date window requires review: " + line)
+                continue
+        # A proven independent-work assertion does not establish limited
+        # supervision, pace, energy or motivation. Ask only about the remainder.
+        independent = re.match(r"ability to work independently (with .+)", line, re.I)
+        if independent and resolve_standing("Ability to work independently", profile):
+            standing_matches.append(resolve_standing("Ability to work independently", profile))
+            line = "Ability to work " + independent[1]
+        uncertain.append("Verify qualification: " + line)
     if not description.strip():
         uncertain.append("Job description was not captured")
     return Eligibility(False if failures else None if uncertain else True, failures or reasons, list(dict.fromkeys(uncertain)), standing_matches)
+
+
+def student_requirement(line, profile):
+    """Closed grammars: enrollment cannot satisfy extra experience/skill clauses."""
+    text = normalize(line)
+    degree = normalize(fact(profile, 'education.degree') or '')
+    enrolled = fact(profile, 'education.currently_enrolled') is True
+    bachelor = bool(re.search(r"bachelor|undergrad|\bbs\b|\bba\b", degree))
+    degree_clause = re.fullmatch(
+        r"(?:(?:must be )?(?:currently )?(?:enrolled in|pursuing)) (?:a )?bachelor(?: s)? degree(?: program)?(?: in (.+))?", text)
+    if enrolled and bachelor and degree_clause:
+        field = degree_clause[1]
+        return field is None or field == normalize(fact(profile, 'education.major') or '')
+    if enrolled and bachelor and re.fullmatch(
+        r"rising junior or senior pursuing a bachelor s degree or a graduate student in an accredited college or university", text):
+        return normalize(fact(profile, 'education.school_year') or '') in {'junior', 'senior'}
+    return False
+
+
+def api_integration_evidence(line, profile):
+    """Basic comfort only; no language, years, proficiency or AI extrapolation."""
+    if not re.fullmatch(r'comfort working with apis scripting and connecting systems together', normalize(line)):
+        return False
+    skills = {normalize(s) for s in profile.get('skills', []) if isinstance(s, str)}
+    if not skills.intersection({'apis', 'restful apis', 'rest apis'}):
+        return False
+    if {'scripting', 'system integration'} <= skills:
+        return True
+    # Existing verified source excerpts can establish these two basic activities.
+    # Require positive first-person implementation wording, not technology words
+    # appearing in arbitrary prose, plans, job descriptions or unverified projects.
+    verified = profile.get('verified_facts', {})
+    sources = profile.get('fact_sources', {})
+    excerpts = [normalize(value) for key, value in verified.items()
+                if isinstance(value, str) and isinstance(sources.get(key), dict)
+                and sources[key].get('file') and sources[key].get('sha256')
+                and sources[key].get('page') and 'manually checked' in sources[key].get('basis', '').lower()]
+    scripting = 'python' in skills and any(re.fullmatch(
+        r'i built a .{0,80}application that (?:polls .{1,80} in real time|periodically polls .{1,80}) to .{1,80} using python beautiful soup requests and pyinstaller', v)
+        for v in excerpts)
+    integration = any(re.fullmatch(
+        r'(?:i architected server client communication and replication systems for real time multiplayer interaction|i implemented client server communication and state replication to support real time multiplayer gameplay)', v)
+        for v in excerpts)
+    return scripting and integration

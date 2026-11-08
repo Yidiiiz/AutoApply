@@ -1,11 +1,46 @@
 import copy
 import logging
+import re
+from urllib.parse import urlsplit, parse_qsl
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def validate_discovery_urls(kind, urls):
+    """Only the three existing adapters accept discovery URLs; never credentials."""
+    if kind not in {'github', 'linkedin', 'handshake'} or not isinstance(urls, list) or len(urls) > 20:
+        raise ValueError('Use at most 20 URLs per supported source type.')
+    seen = set()
+    for url in urls:
+        if not isinstance(url, str) or not 1 <= len(url) <= 2048 or any(c.isspace() or ord(c) < 32 for c in url):
+            raise ValueError('Enter a public HTTPS source URL (maximum 2048 characters).')
+        try:
+            parts = urlsplit(url)
+            safe = (parts.scheme == 'https' and parts.hostname and not parts.username and not parts.password
+                    and parts.port in (None, 443) and not parts.fragment and '\\' not in url)
+        except ValueError:
+            safe = False
+        if not safe:
+            raise ValueError('Use public HTTPS URLs without credentials, fragments or custom ports.')
+        host = parts.hostname.lower()
+        supported = (bool(re.fullmatch(r'https://github\.com/[\w.-]+/[\w.-]+/?', url)) if kind == 'github' else
+                     host in {'linkedin.com', 'www.linkedin.com'} and parts.path in {'/jobs/search', '/jobs/search/'} if kind == 'linkedin' else
+                     bool(re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*joinhandshake\.com', host))
+                     and bool(re.fullmatch(r'/(?:stu/)?(?:postings|jobs)/?|/job-search/?', parts.path)))
+        if not supported:
+            raise ValueError('Choose a GitHub repository, LinkedIn jobs search, or Handshake jobs search for its matching type.')
+        if any(re.search(r'token|secret|password|credential|auth|session|key$', k, re.I)
+               for k, _ in parse_qsl(parts.query)):
+            raise ValueError('Source URLs must not contain credentials or access tokens.')
+        identity = url.rstrip('/').removesuffix('.git').lower() if kind == 'github' else url
+        if identity in seen:
+            raise ValueError('Remove duplicate source URLs.')
+        seen.add(identity)
+    return urls
 
 
 def merge(base, override):
@@ -36,11 +71,18 @@ class Config:
         window(self.data["jobs"]["max_listing_age_days"])
         from .cursor.types import CursorConfig
         CursorConfig(**self.data.get("cursor", {}))
+        from .patience import PatiencePolicy
+        PatiencePolicy(**self.data.get('browser', {}).get('patience', {}))
+        budget = self.data['browser'].get('process_inventory_timeout_seconds', 30)
+        if type(budget) not in (int, float) or not 0 < budget <= 120:
+            raise ValueError('browser.process_inventory_timeout_seconds must be greater than zero and at most 120')
         for section, key in [("jobs", "max_listing_age_days"), ("processing", "max_retries"),
                              ("processing", "max_applications_per_day"), ("browser", "timeout_ms"),
-                             ("discovery", "max_results_per_query"), ("discovery", "max_pages_per_query"), ("application", "max_pages"), ("application", "confirmation_timeout_seconds")]:
+                             ("discovery", "max_results_per_query"), ("discovery", "max_pages_per_query"), ("application", "max_pages"), ("application", "max_inventory_rounds"), ("application", "confirmation_timeout_seconds")]:
             if type(self.data[section][key]) is not int or self.data[section][key] < 1:
                 raise ValueError(f"{section}.{key} must be a positive integer")
+        if self.data['application']['max_inventory_rounds'] > 64:
+            raise ValueError('application.max_inventory_rounds must be at most 64')
         for section, key in [("application", "auto_submit"), ("browser", "headless"), ("ai", "allow_paid"),
                              ("discord", "enabled"), ("gmail", "enabled"), ("ai", "enabled")]:
             if type(self.data[section][key]) is not bool:
@@ -62,8 +104,16 @@ class Config:
         path = self.private / 'profile.yaml'
         stat = path.stat() if path.exists() else None
         token = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino) if stat else None
+        from .operations import FileSnapshot
+        resume_token = FileSnapshot.identity(self.resume) if self.resume.exists() else None
+        token = (token, resume_token)
         if reload or not hasattr(self, '_snapshot') or token != self._snapshot_token:
-            self._snapshot = ProfileSnapshot.create(read_yaml(path), path)
+            profile = read_yaml(path)
+            revision = profile.get('resume_revision')
+            if revision and (not self.resume.exists() or
+                             FileSnapshot.read(self.resume, force=True).sha256 != revision['sha256']):
+                raise ValueError('Resume/profile revision mismatch; migrate resume-derived facts before continuing')
+            self._snapshot = ProfileSnapshot.create(profile, path)
             self._snapshot_token = token
         return self._snapshot
 

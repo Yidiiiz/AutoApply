@@ -110,7 +110,7 @@ until explicit recovery; uncertain final submissions retain their durable hold.
 Added `autoapply/providers.py`, `autoapply/security.py`, `autoapply/retry.py`, `autoapply/handoff.py`, `tests/test_security.py`, and this document. Updated `autoapply/models.py`, `autoapply/database.py`, `autoapply/browser.py`, `autoapply/applications.py`, `autoapply/engine.py`, `autoapply/control.py`, `autoapply/__main__.py`, `tests/test_browser.py`, `README.md`, and `DESIGN.md`.
 
 Validation for the earlier security-state implementation (the subsequent cursor
-integration passed all 207 tests; see [DESIGN.md](DESIGN.md#cursor-subsystem)):
+integration passed all 207 tests; see [Architecture](docs/architecture.md#cursor-subsystem)):
 
 - Full existing/new suite: **141 passed**; the subsequently added embedded-application-frame regression also passed independently (**1 passed**). There are 142 tests in the resulting suite, including 88 added for this task.
 - Ruff syntax/undefined-name checks over all application/test files passed. The broader `F` checks passed for the new provider/security/retry/handoff modules and security tests.

@@ -1,0 +1,10 @@
+<!doctype html><link rel="stylesheet" href="style.css"><script src="audit.js"></script>
+<h1>Engineering Intern</h1><section id="shell"><button type="button" onclick="document.getElementById('shell').remove();document.getElementById('chooser').hidden=false;document.getElementById('cookie').hidden=false">Apply</button></section>
+<div id="chooser" role="dialog" aria-modal="true" hidden><h2>Start Your Application</h2>
+<button type="button">Autofill with Resume</button><button type="button" onclick="enterForm()">Apply Manually</button>
+<button type="button">Use My Last Application</button><button type="button">Close</button></div>
+<div id="cookie" class="backdrop" hidden><div class="panel cookie-banner">We use cookies.
+<button type="button" onclick="document.getElementById('cookie').remove()">Decline</button><button type="button">Accept Cookies</button></div></div>
+<form id="application" data-automation-id="applicationPage" hidden><h2>Application</h2>
+<label>First Name<input name="first_name"></label><label>Email<input type="email"></label>
+<label>Resume<input type="file"></label><button type="button">Next</button></form>

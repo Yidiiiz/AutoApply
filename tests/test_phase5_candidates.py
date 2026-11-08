@@ -24,6 +24,7 @@ def candidate(**changes):
     ({'posted_at': (datetime.now(timezone.utc)-timedelta(days=31)).isoformat()}, 'stale_listing'),
     ({'location': 'Toronto, Canada'}, 'foreign_only_location'),
     ({'location': 'Berlin, Germany; Paris, France'}, 'foreign_only_location'),
+    ({'description': '', 'title': 'Senior scientist PhD'}, 'phd_title'),
     ({'description': 'Must have a masters degree'}, 'incompatible_degree'),
     ({'description': 'Must graduate in 2027'}, 'incompatible_graduation'),
     ({'description': 'Required qualifications\nGraduate between 2026 and 2027'}, 'incompatible_graduation'),
@@ -49,7 +50,6 @@ def test_verified_legal_incompatibility(config, description, path, value, reason
 
 
 @pytest.mark.parametrize('changes', [
-    {'description': '', 'title': 'Senior scientist PhD'},
     {'description': 'A growing team with excellent benefits.', 'title': 'Engineer'},
     {'location': ''}, {'location': 'Remote'}, {'posted_at': None},
     {'location': 'London'}, {'location': 'Canada or Remote'},

@@ -9,9 +9,16 @@ discovery:
   max_results_per_query: 250
   max_pages_per_query: 5
 browser:
+  process_inventory_timeout_seconds: 30 # One CIM observation; bounded to at most 120 seconds.
   headless: false
   timeout_ms: 30000
   channel: null
+  patience:
+    grace: 8
+    timeout: 30
+    extension: 5
+    stable_seconds: 0.3
+    poll_seconds: 0.1
 cursor:
   backend: playwright # Or cdp (Chromium only).
   mode: restricted
@@ -22,10 +29,11 @@ cursor:
   timing_variation: false
   curve_variation: false
 application:
-  auto_submit: true
+  auto_submit: false
   delay_seconds: 60
   min_confidence: 0.98
   max_pages: 12
+  max_inventory_rounds: 12 # Conditional reconciliation budget per real form step.
   confirmation_timeout_seconds: 15
 processing:
   max_retries: 3

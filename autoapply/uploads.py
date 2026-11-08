@@ -126,6 +126,8 @@ class UploadTracker:
                  and (not ashby or metadata_ok and ui['replace_usable'] and ui['file_entry']))
         if ready:
             category = 'UPLOAD_READY'
+        elif not self.selected and not records:
+            category = 'UPLOAD_NOT_ATTEMPTED'
         elif failed or not ui['attached']:
             category = 'UPLOAD_FAILED'
         elif expired and not records and ashby:
@@ -155,7 +157,13 @@ UI = r"""(e, expected) => {
    }
    return g.roots.get(root).value;
  };
- const visible=n=>!!(n.offsetWidth||n.offsetHeight||n.getClientRects().length);
+ const visible=n=>{
+   if(!n.isConnected||n.closest('template,[hidden],[inert],[aria-hidden="true"]'))return false;
+   for(let p=n;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}
+   const r=n.getBoundingClientRect();return r.width>0&&r.height>0;
+ };
+ if(expected.require_actionable && (!visible(e)||e.matches(':disabled')||e.closest('[aria-busy="true"]')||e.getAttribute('aria-disabled')==='true'))
+   return {identity,attached:false,replace_visible:false,replace_usable:false,file_entry:false};
  if(e.matches('.file-upload[data-autoapply-upload]')) {
    const entry=e.querySelector('.file-upload__filename');
    const remove=entry?.querySelector('button[aria-label="Remove file"]');
@@ -188,8 +196,9 @@ class SessionAttachment:
     present file control must still show the file; disappearance on the same step
     invalidates it. Late network failures remain blockers in UploadTracker.
     """
-    def __init__(self, page, selector):
+    def __init__(self, page, selector, *, require_actionable=False):
         self.page, self.selector = page, selector
+        self.require_actionable = require_actionable
         self.accepted = None
         self.carried = False
         self.last_state = None
@@ -203,7 +212,7 @@ class SessionAttachment:
     async def state(self, expected):
         field = self.page.locator(self.selector)
         if await field.count() == 1:
-            result = await field.evaluate(UI, expected)
+            result = await field.evaluate(UI, dict(expected, require_actionable=self.require_actionable))
             self.last_state = result
             if (not result.get('attached') or result.get('warning') or result.get('busy') or result.get('disabled')
                     or self.accepted and result.get('identity') != self.accepted.get('identity')):
@@ -237,6 +246,20 @@ async def _wait_for_uploads(browser, page, controls, deadline):
     stable_key = None
     prior = None
     while True:
+        # Browser-only callers also reject carried receipts after local replacement.
+        snapshots = getattr(page, '_autoapply_document_snapshots', {})
+        if snapshots:
+            from .operations import FileSnapshot
+            try:
+                compatible = all(key in snapshots and FileSnapshot.read(
+                    snapshots[key].path, force=True) == snapshots[key] for key in controls)
+            except (OSError, ValueError):
+                compatible = False
+            if not compatible:
+                tracker.receipt = None
+                tracker.result = dict(ready=False, category='UPLOAD_FAILED', reason='Resume changed; fresh upload required')
+                browser.observation(page)['upload_result'] = tracker.result
+                return False
         marker = await browser.change_marker(page)
         from .security import SecurityDetector
         security, _ = await SecurityDetector().detect(page, browser.observation(page))
@@ -245,7 +268,7 @@ async def _wait_for_uploads(browser, page, controls, deadline):
             tracker.result = dict(tracker.result, ready=False, category='UPLOAD_PENDING')
             return False
         ui = dict(attached=bool(controls), busy=False, disabled=False, warning=False,  # noqa: C408
-                  replace_visible=True, replace_usable=True, file_entry=True)
+                  replace_visible=bool(controls), replace_usable=bool(controls), file_entry=bool(controls))
         identities = []
         for field, name, size in controls.values():
             state = await attachment_state(field, {'name':name, 'size':size})
@@ -292,6 +315,16 @@ async def _wait_for_uploads(browser, page, controls, deadline):
 
 async def wait_for_uploads(browser, page, controls, timeout_seconds):
     tracker = page._autoapply_uploads
+    if not tracker.selected and not tracker.requests:
+        # No final lifecycle verdict before selection; persisted flags or a
+        # filename alone cannot establish a valid same-session attachment.
+        tracker.receipt = None
+        tracker.result = dict(ready=False, category='UPLOAD_NOT_ATTEMPTED', file_selected=False,
+                              request_started=False, active=False, metadata_confirmed=False,
+                              ui=dict(attached=False, busy=False, disabled=False, warning=False,
+                                      replace_visible=False, replace_usable=False, file_entry=False), requests=[])
+        browser.observation(page)['upload_result'] = tracker.result
+        return False
     deadline = time.monotonic() + timeout_seconds
     if tracker.deadline and not tracker.receipt:
         deadline = min(deadline, tracker.deadline)

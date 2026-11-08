@@ -1,0 +1,161 @@
+{
+  "max_concurrent_workers": 1,
+  "max_worker_launches_per_budget": 20,
+  "max_task_attempts": 3,
+  "worker_timeout_seconds": 2400,
+  "check_timeout_seconds": 3000,
+  "max_log_bytes_per_run": 20000000,
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "checks": {
+    "semi_auto": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_semi_auto.py",
+        "tests/test_question_rules.py",
+        "tests/test_integrations.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-semi_auto"
+      ],
+      "timeout_seconds": 300
+    },
+    "runner": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_agent_runner.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-runner"
+      ],
+      "timeout_seconds": 300
+    },
+    "offline": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-offline"
+      ],
+      "timeout_seconds": 3000
+    },
+    "diff": {
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "timeout_seconds": 120
+    },
+    "dashboard": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_dashboard.py",
+        "tests/test_autonomy_fixes.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-dashboard"
+      ],
+      "timeout_seconds": 600
+    },
+    "entry": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_entry_harness.py",
+        "tests/test_autonomy_fixes.py",
+        "tests/test_workday_entry_mode.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-entry"
+      ],
+      "timeout_seconds": 900
+    },
+    "autonomy": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_autonomy_fixes.py",
+        "tests/test_semi_auto.py",
+        "tests/test_semi_auto_qualification.py",
+        "tests/test_question_rules.py",
+        "tests/test_standing.py",
+        "tests/test_eligibility_parser.py",
+        "tests/test_browser_patience.py",
+        "tests/test_workday_readiness.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-autonomy"
+      ],
+      "timeout_seconds": 1500
+    },
+    "settings": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_dashboard.py",
+        "tests/test_dashboard_settings.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-settings"
+      ],
+      "timeout_seconds": 600
+    },
+    "answers": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_dashboard.py",
+        "tests/test_dashboard_answers.py",
+        "tests/test_autonomy_fixes.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-answers"
+      ],
+      "timeout_seconds": 600
+    },
+    "extension": {
+      "argv": [
+        "{python}",
+        "-m",
+        "pytest",
+        "tests/test_extension.py",
+        "tests/test_extension_api.py",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        ".tmp/check-extension"
+      ],
+      "timeout_seconds": 900
+    }
+  }
+}

@@ -1,0 +1,97 @@
+"""Small, auditable grammars for reusable answers. Similarity is never authority."""
+import re
+from functools import lru_cache
+
+from .field_mapping import normalize
+
+VERSION = 'experience-v1'
+PREFIX = 'known_answer_signature:reusable:'
+SKIP_PREFIX = 'known_answer_signature:skip:'
+
+
+def skip_key(q, descriptor, app):
+    """Exact preference, with conservative application scope for sensitive wording."""
+    import hashlib
+    import json
+    from .field_mapping import answer_signature
+    sensitive = re.search(r'\b(?:employ\w*|compan\w*|legal|consent|agree\w*|terms|privacy|visa|'
+                          r'citizen\w*|sponsor\w*|authoriz\w*|disab\w*|gender|race|veteran|'
+                          r'government|referr\w*|conflict\w*|salary|compensation|cover|why|'
+                          r'attest\w*|certif\w*|financial|ownership|relative\w*|medical|health|restriction\w*)\b', normalize(q.label))
+    from .concepts import REGISTRY
+    spec = REGISTRY.get(descriptor.semantic_key)
+    scoped = sensitive or q.kind in {'textarea', 'file'} or descriptor.policy == 'REQUIRE_USER' or spec and spec.special_policy
+    scope = str(app.get('canonical_url') or app.get('id') or '') if scoped else 'global'
+    return SKIP_PREFIX + hashlib.sha256(json.dumps([
+        answer_signature(q.label, q.kind, q.options), descriptor.semantic_key,
+        descriptor.policy, scope]).encode()).hexdigest()
+
+
+def skipped(settings, q, descriptor, app):
+    return settings.get(skip_key(q, descriptor, app), {}).get('source') == 'USER_PROVIDED'
+SUBJECTS = {
+    'git': ('git', 'version control using git', 'git version control'),
+    'version_control': ('version control tools such as git', 'version control', 'version control tools'),
+    'sql': ('sql',),
+    'sql_database': ('sql and database management systems',),
+    'python': ('python',),
+    'embedded': ('embedded development',),
+    'embedded_software': ('embedded software development',),
+    'cicd': ('ci cd', 'continuous integration continuous deployment ci cd pipeline',
+             'continuous integration and continuous deployment pipelines', 'ci cd pipelines'),
+}
+
+
+@lru_cache(maxsize=2048)
+def experience_key(label):
+    text = normalize(label)
+    prefix = 'can you confirm this requirement verify qualification '
+    if text.startswith(prefix):
+        text = text[len(prefix):]
+    # Full grammars preserve negation, durations, qualifications and extra clauses.
+    match = re.fullmatch(r'(?:do you have |have you had |have you got )?experience (?:with |using |in )?(.+)', text)
+    if not match:
+        return None
+    subjects = [key for key, aliases in SUBJECTS.items() if match[1] in aliases]
+    return subjects[0] if len(subjects) == 1 else None
+
+
+def remember(db, config, q, value, question_id):
+    from .dropdowns import (location_ordinal, location_identity, ordered_locations,
+                            ORDERED_LOCATIONS_SETTING)
+    rank = location_ordinal(q.label)
+    if (rank and q.kind in {'radio', 'select', 'combobox'} and value in q.options
+            and location_identity(value) and q.policy not in {'REQUIRE_USER', 'DO_NOT_ANSWER'}):
+        preferences = ordered_locations(config.profile, db.setting(ORDERED_LOCATIONS_SETTING))
+        preferences = [p for p in preferences if location_identity(p) != location_identity(value)]
+        preferences.insert(min(rank - 1, len(preferences)), value)
+        db.set_setting(ORDERED_LOCATIONS_SETTING, dict(value=preferences, source='USER_PROVIDED',
+                                                     question_id=question_id))
+        return True
+    key = experience_key(q.label)
+    if q.semantic_key not in {'','UNKNOWN_FIELD'}:
+        return False
+    if not key or q.kind not in {'radio', 'select', 'combobox'} or set(q.options) != {'Yes', 'No'}:
+        return False
+    if value not in {'Yes', 'No'} or q.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}:
+        return False
+    db.set_setting(PREFIX + key, dict(value=value, source='USER_PROVIDED',
+        question_id=question_id, rule_version=VERSION,
+        profile_revision=config.profile_snapshot().revision))
+    return True
+
+
+def resolve(settings, q, descriptor, revision):
+    key = experience_key(q.label)
+    if (not key or descriptor.semantic_key != 'UNKNOWN_FIELD'
+            or descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}):
+        return None
+    if q.kind not in {'radio', 'select', 'combobox'} or set(q.options) != {'Yes', 'No'}:
+        return None
+    item = settings.get(PREFIX + key)
+    if (not item or item.get('source') != 'USER_PROVIDED' or item.get('rule_version') != VERSION
+            or item.get('profile_revision') != revision or item.get('value') not in q.options):
+        return None
+    from .models import Answer
+    return Answer(item['value'], 'verified_keyword_memory',
+        evidence=[str(item['question_id'])], provenance={'rule':VERSION, 'subject':key})

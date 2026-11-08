@@ -1,0 +1,10 @@
+<!doctype html><html><head><title>Fixture batch application</title></head><body><form>
+<label for="name">Full name *</label><input id="name" required>
+<label for="email">Email</label><input id="email" type="email" required>
+<div class="phone"><button type="button" id="country" role="combobox" aria-label="Phone country *" aria-required="true"><span aria-hidden="true">🇺🇸</span> +1</button><input type="tel" aria-label="Phone"></div>
+<label for="writing">Why this role? *</label><textarea id="writing" required></textarea>
+<button type="submit" id="submit">Apply</button></form><script>
+window.submitClicks=0;window.submissions=0;
+document.querySelector('#submit').onclick=()=>submitClicks++;
+document.querySelector('form').onsubmit=e=>{e.preventDefault();submissions++;};
+</script></body></html>

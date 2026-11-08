@@ -1,37 +1,249 @@
 import json
 import re
 import copy
+import calendar
+from collections.abc import Mapping
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 
 from .config import fact
 from .jobs import location_rank, normalize, us_location
 from .models import Answer, AnswerResolution, Question, now
+from .profile_rules import parse_profile_date
 
 from .concepts import LABELS, question_text, concept
+from . import question_rules
 
 
 def scope_for(label, app):
     return "global" if concept(label) else f"application:{app['id']}"
 
 
+def bachelor_degree(value):
+    """The same narrow bachelor family used by the native section chooser."""
+    text = normalize(value)
+    return (text in {'bachelor', 'bachelors', 'bachelor s', 'bachelor degree', 'bachelors degree',
+                     'bachelor s degree', 'bs', 'b s', 'bsc', 'b sc', 'bachelor of science'}
+            or bool(re.fullmatch(r'bachelor s? or equivalent first degree isced 6(?: ba bsc beng llb etc)?', text)))
+
+
+def job_location_answer(q, app, profile, preferences):
+    """Posting locations are job evidence, never newly learned applicant preferences."""
+    from .dropdowns import location_identity, location_ordinal
+    label = question_text(q.label)
+    top = re.search(r'\btop (\d+|two|three) (?:preferred )?(?:office )?locations?\b', label)
+    rank = location_ordinal(q.label)
+    office = bool(re.search(r'\b(?:office|location)\w*\b', label) and re.search(r'\bprefer\w*\b', label))
+    context = app.get('public_job_context') or {}
+    if not (top or rank or office and context) or not (context or q.options):
+        return False, None
+    locations = context.get('locations', [])
+    identities = {location_identity(v) for v in locations} - {None}
+    allowed = [o for o in q.options if location_identity(o) and (not context or location_identity(o) in identities)]
+    pool = allowed if q.options else locations
+    ordered = []
+    for preferred in preferences:
+        matches = [v for v in pool if location_identity(v) == location_identity(preferred)]
+        if len(matches) == 1 and matches[0] not in ordered:
+            ordered.append(matches[0])
+    states = profile.get('locations', {}).get('preferred_states') or []
+    from .dropdowns import us_state
+    for state in states:
+        ordered.extend(v for v in pool if v not in ordered and location_identity(v)[1] == us_state(state))
+    if profile.get('locations', {}).get('any_us_fallback') is True:
+        ordered.extend(v for v in pool if v not in ordered)
+        # An unqualified Any on an international menu does not mean Any US.
+        fallback = [o for o in q.options if normalize(o) in {
+            'any us location', 'any u s location', 'any united states location', 'open to any us location',
+            'open to any u s location', 'open to any united states location'}]
+        if len(fallback) == 1 and (not context or identities):
+            ordered.append(fallback[0])
+        elif not q.options and identities:
+            ordered.append('Open to any US location')
+    count = {'two': 2, 'three': 3}.get(top[1], int(top[1]) if top and top[1].isdigit() else 0) if top else 1
+    chosen = ordered[(rank or 1) - 1:(rank or 1)] if not top else ordered[:count]
+    value = chosen if q.kind == 'multiselect' else '; '.join(chosen)
+    return True, (Answer(value, 'job_context:locations', evidence=['job_context.locations', 'locations.ordered_preferences'],
+                         provenance=context) if chosen and (not top or len(chosen) == count) else None)
+
+
 def fit_options(value, options):
     if not options:
         return str(value)
-    expected = normalize(value)
+    if bachelor_degree(value):
+        matches = [option for option in options if bachelor_degree(option)]
+        # Preserve the ordinary full-degree alias preference. An ISCED
+        # equivalent alongside another bachelor program remains ambiguous.
+        preferred = [o for o in matches if normalize(o) in {'bachelor s degree', 'bachelors degree'}]
+        if len(preferred) == 1 and not any('isced' in normalize(o) for o in matches):
+            return preferred[0]
+        return matches[0] if len(matches) == 1 else None
+    from .concepts import equivalent_answer
+    literal = [option for option in options if option == str(value)]
+    if len(literal) == 1:
+        return literal[0]
+    expected = normalize(equivalent_answer(value))
+    if expected == 'decline':
+        matches = [option for option in options if equivalent_answer(option) == 'decline']
+        return matches[0] if len(matches) == 1 else None
     exact = [option for option in options if normalize(option) == expected]
     if len(exact) == 1:
         return exact[0]
-    if expected == "decline":
-        matches = [option for option in options if re.search(r"decline|prefer not|do not wish|don t wish", option, re.I)]
+    if not exact:
+        country = 'united states' if expected in {'usa', 'us', 'u s', 'united states of america'} else expected
+        matches = []
+        for option in options:
+            name = re.sub(r'(?:\s+\+\d+|\s*\(\+\d+\))\s*$', '', option)
+            if name != option and normalize(name) == country:
+                matches.append(option)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    veteran = re.sub(r'^i am (?:a )?', '', expected)
+    if veteran == 'not a veteran':
+        plain = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
+        if plain:
+            return plain[0] if len(plain) == 1 else None
+        fallback = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a protected veteran']
+        return fallback[0] if len(fallback) == 1 else None
+    if veteran in {'protected veteran', 'not a protected veteran'}:
+        matches = [option for option in options if re.sub(r'^i am (?:a )?', '', normalize(option)) == veteran]
+        if not matches and veteran == 'not a protected veteran':
+            matches = [o for o in options if re.sub(r'^i am ', '', normalize(o)) == 'not a veteran']
         return matches[0] if len(matches) == 1 else None
     return None
 
 
+def format_start_date(value, kind='text', placeholder=''):
+    """Fit a configured profile date to HTML date controls or a visible hint."""
+    raw = str(value or '')
+    parsed = parse_profile_date(raw)
+    if parsed is None:
+        try:
+            parsed = datetime.strptime(raw, '%m/%d/%Y').date()
+        except ValueError:
+            return None
+    hint = placeholder.lower()
+    if kind == 'date' or 'yyyy-mm-dd' in hint:
+        return parsed.isoformat()
+    formats = {'dd/mm/yyyy': '%d/%m/%Y', 'mm-dd-yyyy': '%m-%d-%Y',
+               'dd-mm-yyyy': '%d-%m-%Y', 'yyyy/mm/dd': '%Y/%m/%d', 'mm/yyyy': '%m/%Y'}
+    for pattern, output in formats.items():
+        if pattern in hint:
+            return parsed.strftime(output)
+    return parsed.strftime('%m/%d/%Y')
+
+
+def salary_range(label, description, fallback):
+    """Use the first advertised pay range, preserving its unit unless requested."""
+    amount = r'\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)'
+    pattern = amount + r'\s*(?:-|–|—|to)\s*' + amount + r'\s*(?:USD\s*)?(per\s+hour|/\s*(?:hour|hr)|an?\s+hour|hourly|per\s+year|/\s*(?:year|yr)|annually|annual)?'
+    text = normalize(label)
+    for hit in re.finditer(pattern, str(description or ''), re.I):
+        low, high = float(hit[1].replace(',', '')), float(hit[2].replace(',', ''))
+        unit = (hit[3] or '').lower()
+        hourly = bool(re.search(r'hour|hr', unit))
+        if low <= 0 or high < low or not hourly and (low < 1000 or not unit and "$" not in hit[0] and ',' not in hit[0]):
+            continue
+        annual_question = bool(re.search(r'\bannual(?:ly)?\b|\bper year\b', text))
+        hourly_question = bool(re.search(r'\bhourly\b|\bper hour\b', text))
+        if hourly and annual_question:
+            low, high, hourly = low * 2080, high * 2080, False
+        elif not hourly and hourly_question:
+            low, high, hourly = low / 2080, high / 2080, True
+        def money(value):
+            return "$" + (f'{value:,.0f}' if value.is_integer() else f'{value:,.2f}')
+        return money(low) + ' - ' + money(high) + (' per hour' if hourly else '')
+    return fallback
+
+
+def gpa_option(value, options):
+    """Select a unique GPA band containing the configured value."""
+    if not options:
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    hits = []
+    for option in options:
+        text = option.lower().strip()
+        band = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:\.\d+)?)', text)
+        lower = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(?:\+|or (?:higher|above|more)|and (?:above|higher))', text)
+        above = re.fullmatch(r'(?:above|at least)\s+(\d+(?:\.\d+)?)', text)
+        if (band and float(band[1]) <= number <= float(band[2])
+                or (lower or above) and number >= float((lower or above)[1])
+                or text == str(value)):
+            hits.append(option)
+    return hits[0] if len(hits) == 1 else None
+
+
+def permanent_address(profile):
+    parts = [fact(profile, 'contact.permanent_' + key) or fact(profile, 'contact.' + key)
+             for key in ('address', 'city', 'state', 'postal_code', 'country')]
+    address, city, state, postal, country = parts
+    region = ' '.join(str(v) for v in (state, postal) if v)
+    return ', '.join(str(v) for v in (address, city, region, country) if v) or None
+
+
+def standard_answer(q, app, profile):
+    from .concepts import canonical_key, demographic_value
+    key = canonical_key(q.label)
+    paths = {'start_date': 'application_preferences.desired_start_date',
+             'prior_employment': 'application_preferences.previous_employer_work_default',
+             'government_employment': 'application_preferences.government_employment',
+             'independent_auditor_employment': 'application_preferences.independent_auditor_employment'}
+    supported = {'start_date', 'prior_employment', 'government_employment', 'independent_auditor_employment',
+                 'education.credit_hours_by_start', 'education.gpa', 'contact.permanent_address',
+                 'contact.phone_device_type', 'application_preferences.availability_dates',
+                 'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
+                 'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
+                 'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino'}
+    if key not in supported or q.semantic_key != key:
+        return None
+    path = paths.get(key, key)
+    value = fact(profile, path)
+    if key == 'application_preferences.terms_acknowledgement' and value is None:
+        value = fact(profile, 'application_preferences.ordinary_policy_acknowledgement')
+    if key == 'contact.permanent_address':
+        value = permanent_address(profile)
+    elif key == 'education.gpa' and value is not None:
+        value = gpa_option(value, q.options)
+    elif key == 'start_date':
+        value = format_start_date(value, q.kind, q.label)
+    elif key == 'application_preferences.default_salary_range':
+        value = salary_range(q.label, app.get('description', ''), value or fact(profile, 'application_preferences.compensation_text'))
+    elif key == 'demographics.hispanic_latino':
+        value = 'decline' if demographic_value(profile, key) == 'decline' else None
+    if value is None:
+        return None
+    if type(value) is bool:
+        if key == 'application_preferences.terms_acknowledgement' and value and q.options:
+            hits = [o for o in q.options if re.fullmatch(r'yes|i agree|agree|i accept|accept|i acknowledge|acknowledge', normalize(o))]
+            if q.kind == 'checkbox' and len(q.options) == 1 and canonical_key(q.options[0]) == key:
+                hits = q.options
+            value = hits[0] if len(hits) == 1 else None
+        else:
+            value = 'Yes' if value else 'No'
+    value = fit_options(value, q.options) if value is not None else None
+    if q.kind == 'multiselect' and value is not None:
+        value = [value]
+    try:
+        validate_answer(q, value)
+    except (ValueError, TypeError):
+        return None
+    source = 'profile:' + path
+    return Answer(value, source, evidence=[path])
+
+
 def validate_answer(q, value):
+    if q.kind == 'checkbox' and len(q.options) <= 1 and type(value) is bool:
+        return
     if q.kind == "multiselect":
         if not isinstance(value, list) or not value and q.required:
             raise ValueError("Select one or more exact options as a JSON list")
+        none = [v for v in value if re.fullmatch(r'none(?: of (?:the )?above)?', normalize(v))]
+        if none and len(value) > 1:
+            raise ValueError('None is exclusive of other selections')
         if any(v not in q.options for v in value):
             raise ValueError("Answer contains an unavailable option")
         if len(set(value)) != len(value) or (q.min_selections is not None and len(value) < q.min_selections) or (q.max_selections is not None and len(value) > q.max_selections):
@@ -67,6 +279,139 @@ def from_row(row):
                     min_selections=row.get('min_selections'), max_selections=row.get('max_selections'))
 
 
+def repair_tokens(value):
+    """Content words only; never rank a memory on application boilerplate."""
+    return set(normalize(value).split()) - set(
+        'a an the i you your we our do does did have has are is was were be been '
+        'what which how please select choose provide specify describe application questions '
+        'required optional yes no of in on at to for and or with that this any all'.split())
+
+
+def repair_fact_present(value):
+    """Empty saved containers carry no evidence, including frozen snapshots."""
+    return (value is not None and value != ''
+            and not (isinstance(value, (list, tuple, Mapping)) and not value))
+
+
+def repair_facts(q, descriptor, profile, app=None):
+    """Small per-question evidence whitelist for wording repair, never a profile dump."""
+    from .concepts import REGISTRY, demographic_value
+    from .profile_rules import completed_education, preference_boolean, primary_graduation_matches
+    text = question_text(q.label)
+    if (descriptor.policy in {'REQUIRE_USER', 'DO_NOT_ANSWER'}
+            or descriptor.semantic_key == 'REJECTED_FIELD'
+            or q.kind not in {'text', 'textarea', 'email', 'tel', 'url', 'number', 'date', 'select', 'radio', 'combobox', 'multiselect', 'checkbox'}
+            or is_writing_question(q)
+            or re.search(r'\b(?:password|credential|account|login|sign in|one time|verification code|captcha|honeypot)\b', text)
+            or not q.required and descriptor.semantic_key.startswith('demographics.')):
+        return None
+    if not primary_graduation_matches(q.label, profile):
+        return None
+    path, negative = preference_boolean(q.label)
+    if path and negative is None:
+        return None
+    if completed_education(q.label):
+        paths = ['education.highest_completed_degree']
+    elif path:
+        paths = [path]
+    elif re.search(r'\bspouse\b', text) and re.search(r'\b(?:military|veteran|armed forces)\b', text):
+        paths = ['demographics.military_spouse']
+    elif re.search(r'\bnational guard\b|\breserves\b', text):
+        paths = ['demographics.national_guard_reserves']
+    elif re.search(r'\bai\b.*\b(?:review|screen|process)\w*\b', text):
+        paths = ['application_preferences.employer_ai_review_opt_out']
+    else:
+        spec = REGISTRY.get(descriptor.semantic_key)
+        if (descriptor.semantic_key.startswith('demographics.')
+                and demographic_value(profile, descriptor.semantic_key) == 'decline'):
+            return None
+        if spec and spec.profile_path and not spec.special_policy:
+            paths = [spec.profile_path]
+        elif re.search(r'\b(?:legal|immigration|visa status|sponsor\w*|citizen\w*|certif\w*|attest\w*|military|veteran|gender|race|ethnic\w*|disab\w*|consent|privacy|opt out)\b', text):
+            return None
+        elif re.search(r'\b(?:office|location)\w*\b', text) and re.search(r'\b(?:prefer\w*|top)\b', text):
+            paths = ['locations.ordered_preferences']
+        elif re.search(r'\b(?:graduat\w*)\b', text):
+            paths = ['education.graduation_date']
+        elif re.search(r'\b(?:degree|program|studying|education)\b', text):
+            paths = ['education.degree', 'education.major', 'education.currently_enrolled']
+        elif re.search(r'\b(?:skills?|technolog\w*|programming|tools?)\b', text):
+            paths = ['skills']
+        elif re.search(r'\blanguages?\b', text):
+            paths = ['languages']
+        else:
+            return ordinary_repair_facts(q, descriptor, profile)
+    # Large free-form facts are not suitable for this bounded mapping request.
+    facts = {path: value for path in paths if repair_fact_present(value := fact(profile, path))
+            and len(json.dumps(value, default=str)) <= 4000}
+    if 'locations.ordered_preferences' in paths and app and app.get('public_job_context'):
+        if not app['public_job_context'].get('locations'):
+            return None
+        facts['job_context.locations'] = app['public_job_context']
+        # Only compatible preferences may be used to word this job's office answer.
+        from .dropdowns import location_identity
+        allowed = {location_identity(v) for v in app['public_job_context']['locations']}
+        facts['locations.ordered_preferences'] = [v for v in facts.get('locations.ordered_preferences', [])
+                                                  if location_identity(v) in allowed]
+    return facts or None
+
+
+def ordinary_repair_facts(q, descriptor, profile):
+    """Retrieve bounded ordinary facts for unknown wording, without absence defaults.
+
+    Sensitive assertions need their existing exact mapping or scoped user answer.
+    Only this ordinary whitelist is searched; arbitrary profile keys never leave.
+    None means ineligible; an empty dict permits an honest grounded abstention.
+    """
+    if descriptor.semantic_key != 'UNKNOWN_FIELD' or re.search(
+            r'\b(?:conflict\w*|interest|board|spouse|relative\w*|relationship|government|official|'
+            r'previous|former|employ\w*|referr\w*|merchant|third party|financial|ownership|'
+            r'agree\w*|acknowledg\w*|terms|nondisclosure|nda|legal|attest\w*|certif\w*|'
+            r'consent|privacy|citizen\w*|visa|immigration|sponsor\w*|authoriz\w*|'
+            r'military|veteran|gender|race|ethnic\w*|disab\w*|medical|health|treatment|opt out)\b', question_text(q.label)):
+        return None
+    if re.fullmatch(r'(?:please )?check (?:one|any|all)(?: of)? (?:the )?boxes below', question_text(q.label)):
+        return None
+    vocabulary = {
+        'identity.first_name': 'given forename first full name',
+        'identity.last_name': 'family surname last full name',
+        'contact.email': 'email electronic mail',
+        'contact.phone': 'phone telephone mobile number',
+        'contact.address': 'street residential mailing address',
+        'contact.city': 'city town municipality residence reside',
+        'contact.state': 'state province region', 'contact.postal_code': 'postal zip code',
+        'contact.country': 'country residence reside',
+        'education.school': 'school university college institution academic',
+        'education.major': 'major discipline subject specialization academic',
+        'education.degree': 'degree program qualification',
+        'education.graduation_date': 'graduation graduate completion date',
+        'skills': 'skills technology technologies programming tools stack ecosystem',
+        'languages': 'language languages speak fluent proficiency',
+        'links.github': 'github code repository', 'links.linkedin': 'linkedin professional link',
+        'links.personal_website': 'website portfolio personal site',
+    }
+    words = repair_tokens(q.label)
+    offered = set().union(*(repair_tokens(o) for o in q.options)) if q.options else set()
+    ranked = []
+    for path, terms in vocabulary.items():
+        value = fact(profile, path)
+        if not repair_fact_present(value) or len(json.dumps(value, default=str)) > 2000:
+            continue
+        score = len(words & repair_tokens(terms)) * 2
+        # Actual offers can relate unfamiliar wording to a supplied fact, but a
+        # generic Yes/No never makes an unrelated fact relevant.
+        if path in {'skills', 'languages', 'education.school', 'education.major', 'education.degree'}:
+            score += min(2, len(offered & repair_tokens(str(value))))
+        if score:
+            ranked.append((score, path, value))
+    selected, size = {}, 0
+    for _, path, value in sorted(ranked, key=lambda row: (-row[0], row[1]))[:6]:
+        size += len(json.dumps(value, default=str))
+        if size <= 6000:
+            selected[path] = value
+    return selected
+
+
 class AnswerResolver:
     def __init__(self, config, db):
         self.config, self.db = config, db
@@ -84,6 +429,11 @@ class AnswerResolver:
                 "SELECT key,value FROM settings WHERE key LIKE 'verified_fact:%' OR key LIKE 'known_answer_signature:%'")}
             self._memory = {(r['normalized_question'], r['scope']): r for r in self.db.rows(
                 'SELECT * FROM known_answers WHERE verified=1')}
+            self._memory_fields = {r['memory_id']: dict(label=r['raw_question'], kind=r['field_type'], options=json.loads(r['options']))
+                for r in self.db.rows('''SELECT k.id AS memory_id,q.raw_question,q.field_type,q.options
+                    FROM known_answers k JOIN questions q ON q.id=(
+                        SELECT MAX(id) FROM questions WHERE normalized_question=k.normalized_question
+                        AND scope=k.scope AND question_signature=k.question_signature) WHERE k.verified=1''')}
             self.snapshot = snapshot.with_overrides(self._settings)
             self._revision = revision
         return self.snapshot
@@ -93,7 +443,7 @@ class AnswerResolver:
         self.refresh()
         descriptor = describe(q, app, self.snapshot.facts)
         # The complete immutable descriptor also distinguishes exact rendered options.
-        key = descriptor
+        key = (descriptor, app.get('description', ''), json.dumps(app.get('public_job_context'), sort_keys=True))
         if key not in self._cache:
             self.computations += 1
             canonical = replace(q, scope=descriptor.scope, semantic_key=descriptor.semantic_key)
@@ -102,7 +452,9 @@ class AnswerResolver:
                 answer.semantic_key, answer.scope = descriptor.semantic_key, descriptor.scope
                 answer.signature, answer.profile_revision = descriptor.signature, self.snapshot.revision
                 answer.verified = True
-                answer.reason = 'Exact compatible verified answer or explicit deterministic policy'
+                answer.reason = ('Compatible verified saved answer matched by keyword overlap'
+                                 if answer.source == 'verified_fuzzy_memory' else
+                                 'Exact compatible verified answer or explicit deterministic policy')
                 answer.provenance.update(profile_revision=self.snapshot.revision, fact_revision=self._revision[1],
                                          policy_version=descriptor.policy_version, evidence=answer.evidence)
             status = ('RESOLVED' if answer else 'REJECTED' if descriptor.semantic_key == REJECTED_FIELD
@@ -114,7 +466,9 @@ class AnswerResolver:
     def current_result(self, prior, q, app):
         from .field_mapping import describe
         self.refresh()
-        if (prior and prior.context_revision == self._revision and
+        # Salary depends on the current listing as well as the field/profile.
+        if (prior and prior.descriptor.semantic_key != 'application_preferences.default_salary_range'
+                and prior.context_revision == self._revision and
                 prior.descriptor == describe(q, app, self.snapshot.facts)):
             return prior
         return self.resolve_result(q, app)
@@ -154,13 +508,229 @@ class AnswerResolver:
             return None
         return answer
 
+    def repair_memory_facts(self, q, app, descriptor):
+        """Relevant, signed user memory, bound to this application and revision."""
+        from .field_mapping import describe, answer_signature
+        candidates = []
+        words = repair_tokens(q.label)
+        for row in self._memory.values():
+            if row.get('source') != 'USER_PROVIDED' or row['scope'] != descriptor.scope:
+                continue
+            # Unknown/application disclosures never borrow another employer's memory.
+            if row['scope'] == 'global' and row.get('concept') != descriptor.semantic_key:
+                continue
+            data = json.loads(row.get('provenance') or '{}')
+            if data.get('provenance', {}).get('canonical_profile_revision') != self._revision[0]:
+                continue
+            field = data.get('field')
+            if not field or field.get('kind') != q.kind:
+                continue
+            label = field.get('label', '')
+            overlap = words & repair_tokens(label)
+            if len(overlap) < 2 or len(overlap) / max(1, len(words)) < .4:
+                continue
+            old = replace(q, label=label, options=field.get('options', []), scope=row['scope'])
+            remembered = replace(old, required=False, max_length=None)
+            if (row.get('question_signature') not in {describe(old, app, self.snapshot.facts).signature,
+                                                      describe(remembered, app, self.snapshot.facts).signature}
+                    or self._settings.get('known_answer_signature:' + str(row['id'])) !=
+                    answer_signature(label, old.kind, old.options)):
+                continue
+            value = json.loads(row['answer'])
+            try:
+                validate_answer(old, value)
+            except (TypeError, ValueError):
+                continue
+            # Match normalized offers, but leave exact current wording to the
+            # provider and its strict output validator.
+            values = value if isinstance(value, list) else [value]
+            if q.options and any(not any(normalize(v) == normalize(o) for o in q.options) for v in values):
+                continue
+            evidence = dict(question=label, answer=value, source='USER_PROVIDED',
+                            scope=row['scope'], profile_revision=self._revision[0])
+            if len(json.dumps(evidence)) <= 1500:
+                candidates.append((len(overlap), row['id'], evidence))
+        return {'saved_answer:' + str(ident): value
+                for _, ident, value in sorted(candidates, key=lambda r: (-r[0], -r[1]))[:3]}
+
+    def _fuzzy_answer(self, q, app, descriptor, stored):
+        from .concepts import canonical_key
+        from .field_mapping import describe, answer_signature
+        from .question_keywords import match, similarity
+        from .question_rules import experience_key
+        candidates = []
+        target_concept = match(q.label)
+        for row in self._memory.values():
+            label = row['normalized_question']
+            if row['scope'] != q.scope or normalize(q.label) == label:
+                continue
+            if row.get('concept') and row['concept'] != descriptor.semantic_key:
+                continue
+            if match(label) != target_concept or canonical_key(label) != canonical_key(q.label):
+                continue
+            # Preserve the existing narrow experience grammars for compound claims.
+            if experience_key(label) != experience_key(q.label):
+                continue
+            score = similarity(q.label, label)
+            if score < .6:
+                continue
+            data = json.loads(row.get('provenance') or '{}')
+            revision = data.get('provenance', {}).get('canonical_profile_revision')
+            if revision and revision != self._revision[0]:
+                continue
+            # Receipts supply field metadata; extension memory carries the same data.
+            field = data.get('field') or self._memory_fields.get(row['id'])
+            if not field or field['kind'] != q.kind:
+                continue
+            old_label = field.get('label', label)
+            old = replace(q, label=old_label, options=field['options'])
+            if row.get('question_signature') != describe(old, app, self.snapshot.facts).signature:
+                continue
+            if self._settings.get('known_answer_signature:' + str(row['id'])) != answer_signature(old_label, q.kind, field['options']):
+                continue
+            value = json.loads(row['answer'])
+            if stored and stored.get('source') == 'USER_PROVIDED' and normalize(stored.get('value')) != normalize(value):
+                continue
+            if isinstance(value, list):
+                value = [fit_options(v, q.options) for v in value] if q.options else None
+            else:
+                value = fit_options(value, q.options)
+            try:
+                validate_answer(q, value)
+            except (ValueError, TypeError):
+                continue
+            candidates.append((score, row['id'], value))
+        if not candidates:
+            return None
+        best = max(score for score, _, _ in candidates)
+        winners = [(ident, value) for score, ident, value in candidates if score == best]
+        if len({json.dumps(value, sort_keys=True) for _, value in winners}) != 1:
+            return None
+        ident, value = winners[0]
+        return Answer(value, 'verified_fuzzy_memory', provenance={'memory_id': ident, 'similarity': best})
+
     def _resolve(self, q, app, descriptor, profile):
         from .field_mapping import REJECTED_FIELD
         mapped_key, policy = descriptor.semantic_key, descriptor.policy
+        from .question_keywords import unusable_label, robot_only
+        if unusable_label(q.label) or robot_only(q.label):
+            return None
+        # A standalone consent checkbox is its own offered action; its existing
+        # explicit acknowledgement policy does not require a separate menu.
+        if q.kind in {'select', 'radio', 'multiselect'} and not q.options:
+            return None
+        if re.search(r'\b(?:address(?: line)?\s*2|line\s*2|apt|apartment|suite|unit)\b', normalize(q.label)):
+            return Answer('', 'policy:empty_address_line_2') if not q.options else None
+        # Negated ability/requirement wording must not reach affirmative fallbacks.
+        if mapped_key != 'locations.ordered_preferences' and re.search(r"\bnot (?:able|willing|authorized|eligible|require|need|agree|commit|have)\b|\b(?:unable|cannot)\b|\bcan t\b", normalize(q.label)):
+            return None
+        if mapped_key == 'application_preferences.schedule_commitment' and re.search(r"\b(?:not|no|unable|cannot|never)\b|\bcan t\b", normalize(q.label)):
+            return None
         if policy == 'DO_NOT_ANSWER':
             return None
+        if question_rules.skipped(self._settings, q, descriptor, app):
+            return None
+        # Explicit writing edits are exact posting answers, including textareas
+        # that happen to carry a canonical fact label. They never alter that fact.
+        if q.kind == 'textarea':
+            row = self._memory.get((normalize(q.label), q.scope))
+            data = json.loads(row.get('provenance') or '{}') if row else {}
+            provenance = data.get('provenance', {})
+            if (row and row.get('source') == 'USER_PROVIDED'
+                    and row.get('question_signature') == descriptor.signature
+                    and provenance.get('explicit_extension_edit') is True
+                    and provenance.get('canonical_profile_revision') == self._revision[0]):
+                value = json.loads(row['answer'])
+                try:
+                    validate_answer(q, value)
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    return Answer(value, 'verified_memory', provenance={'memory_id': row['id']})
+        if policy != 'REQUIRE_USER':
+            from .dropdowns import ordered_locations, ORDERED_LOCATIONS_SETTING
+            handled, located = job_location_answer(q, app, profile, ordered_locations(
+                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)))
+            if handled:
+                return located
+        from .question_keywords import export_status_label
+        if export_status_label(q.label):
+            # A status menu is not a blanket legal acknowledgement. Authorization,
+            # residency and nationality alone never establish U.S. citizenship.
+            choices = [o for o in q.options if question_text(o) == 'a united states citizen or national']
+            conflicting = any(fact(profile, 'citizenship.' + key) is True for key in
+                              ('permanent_resident', 'green_card_holder', 'refugee', 'asylee', 'non_us_citizen'))
+            if (policy != 'REQUIRE_USER' and fact(profile, 'citizenship.us_citizen') is True
+                    and not conflicting and len(choices) == 1
+                    and q.kind in {'select', 'radio', 'combobox'}):
+                return Answer(choices[0], 'derived:citizenship.us_citizen',
+                              evidence=['citizenship.us_citizen'], provenance={'rule': 'explicit-export-citizen-status'})
+            return None
+        from .question_keywords import current_immigration_status
+        citizen_options = [o for o in q.options if normalize(o) in {'u s citizen', 'us citizen', 'uscitizen', 'united states citizen'}]
+        citizenship_request = current_immigration_status(q.label) or bool(re.fullmatch(r'(?:are you (?:a )?)?(?:u s|us|united states) citizen(?:ship)?(?: status)?', normalize(q.label)))
+        if citizen_options and not citizenship_request:
+            return None
+        if current_immigration_status(q.label) or citizenship_request and citizen_options:
+            path = 'citizenship.us_citizen'
+            if fact(profile, path) is True and len(citizen_options) == 1:
+                return Answer(citizen_options[0], 'profile:' + path, evidence=[path],
+                              provenance={'rule': 'explicit-current-citizenship'})
+            return None
+        if (q.kind == 'checkbox' and q.required and len(q.options) <= 1
+                and re.fullmatch(r'(?:required )?allow us to process your personal information', normalize(q.label).strip())
+                and fact(profile, 'application_preferences.ordinary_policy_acknowledgement') is True):
+            return Answer(True,
+                          'profile:application_preferences.ordinary_policy_acknowledgement',
+                          evidence=['application_preferences.ordinary_policy_acknowledgement'])
+        if re.fullmatch(r'(?:were you referred(?: to .+)?(?: by (?:a |an )?(?:current )?employee)?|have you been referred by (?:a |an )?(?:current )?employee|did (?:a |an )?(?:current )?employee refer you(?: to .+)?|employee referral(?: yes no)?)', normalize(q.label)):
+            path = 'application_preferences.referred_by_employee'
+            value = fact(profile, path)
+            if isinstance(value, bool):
+                selected = fit_options('Yes' if value else 'No', q.options)
+                if selected is not None:
+                    return Answer(selected, 'profile:' + path, evidence=[path],
+                                  provenance={'rule': 'explicit-all-employer-referral'})
+            return None
+        # A verified current-authorization fact has one fixed representation.
+        # Its label must independently match, even if supplied metadata is stale.
+        from .question_keywords import match, authorization_answer
+        if (mapped_key == 'work_authorization.us_authorized'
+                and match(q.label) == mapped_key and policy != 'REQUIRE_USER'
+                and fact(profile, mapped_key) is True
+                and q.kind in {'text', 'textarea', 'select', 'radio', 'checkbox', 'combobox', 'multiselect'}):
+            value = authorization_answer(q.kind, q.options)
+            if value is None:
+                return None
+            try:
+                validate_answer(q, value)
+            except (ValueError, TypeError):
+                return None
+            return Answer(value, 'profile:' + mapped_key, evidence=[mapped_key])
+        if mapped_key == 'work_authorization.us_authorized' and match(q.label) != mapped_key:
+            return None
+        # Current explicit all-employer fact takes precedence over stale answer memory.
+        if mapped_key == 'employment_restrictions':
+            from .disclosures import restriction_existence
+            path = 'application_preferences.employment_restrictions'
+            supplied = fact(profile, path)
+            if isinstance(supplied, bool) and restriction_existence(q.label, app.get('company', '')):
+                value = fit_options('Yes' if supplied else 'No', q.options) if q.options else None
+                if value is not None and q.kind in {'select', 'radio', 'combobox'}:
+                    return Answer(value, 'profile:' + path, evidence=[path],
+                                  provenance={'rule': 'explicit-all-employer-restriction'})
+            if isinstance(supplied, bool):
+                return None
+        # An explicit canonical personal site wins stale generic Website memory
+        # and the legacy portfolio alias. GitHub/LinkedIn remain separate facts.
+        if policy != 'REQUIRE_USER' and mapped_key in {'links.personal_website', 'links.portfolio'} and q.kind in {'text', 'url', 'textarea'}:
+            website = fact(profile, 'links.personal_website')
+            if website:
+                return Answer(website, 'profile:links.personal_website', evidence=['links.personal_website'])
         row = self._memory.get((normalize(q.label), q.scope))
         from .concepts import REGISTRY
+        from .concepts import ALIASES, DEMOGRAPHIC_PATHS, demographic_value
+        mapped_key = ALIASES.get(mapped_key, mapped_key)
         spec = REGISTRY.get(mapped_key)
         memory_path = spec.profile_path if spec and spec.profile_path else 'sponsorship_combined' if mapped_key == 'sponsorship_combined' else None
         stored = self._settings.get('verified_fact:' + memory_path) if memory_path else None
@@ -169,7 +739,7 @@ class AnswerResolver:
                               memory_data['provenance']['canonical_profile_revision'] == self._revision[0])
         compatible_override = (not stored or stored.get('source') != 'USER_PROVIDED' or
                                normalize(stored.get('value')) == normalize(json.loads(row['answer']) if row else None))
-        if row and row.get('question_signature') == descriptor.signature and compatible_profile and compatible_override:
+        if row and (mapped_key != 'employment_restrictions' or row.get('source') == 'USER_PROVIDED') and row.get('question_signature') == descriptor.signature and compatible_profile and compatible_override:
             value = json.loads(row['answer'])
             try:
                 validate_answer(q, value)
@@ -178,8 +748,137 @@ class AnswerResolver:
             else:
                 return Answer(value, 'verified_memory', provenance={'memory_id': row['id'],
                     'reference': json.loads(row.get('provenance') or '{}')})
+        from .profile_rules import completed_education, preference_boolean, primary_graduation_matches
+        if not primary_graduation_matches(q.label, profile):
+            return None
+        if completed_education(q.label) and mapped_key != REJECTED_FIELD:
+            if policy == 'REQUIRE_USER':
+                return None
+            path = 'education.highest_completed_degree'
+            value = fact(profile, path)
+            value = fit_options(value, q.options) if value else None
+            return Answer(value, 'profile:' + path, evidence=[path]) if value else None
+        preference_path, negative = preference_boolean(q.label)
+        if preference_path and mapped_key != REJECTED_FIELD:
+            supplied = fact(profile, preference_path)
+            if preference_path == 'application_preferences.employer_ai_review_opt_out' and type(supplied) is bool and policy != 'REQUIRE_USER':
+                offered = [o for o in q.options if normalize(o) in ({'opt out', 'i opt out'} if supplied else {'opt in', 'i opt in'})]
+                if len(offered) == 1:
+                    return Answer(offered[0], 'profile:' + preference_path, evidence=[preference_path])
+            if type(supplied) is not bool or negative is None or policy == 'REQUIRE_USER':
+                return None
+            value = not supplied if negative else supplied
+            if q.kind == 'checkbox' and len(q.options) <= 1:
+                return Answer(value, 'profile:' + preference_path, evidence=[preference_path])
+            selected = fit_options('Yes' if value else 'No', q.options)
+            if selected is not None:
+                return Answer(selected, 'profile:' + preference_path, evidence=[preference_path])
+            return None
+        top = re.search(r'\btop (\d+|two|three) (?:office )?locations?\b', question_text(q.label))
+        if top and mapped_key != REJECTED_FIELD:
+            if policy == 'REQUIRE_USER':
+                return None
+            count = {'two': 2, 'three': 3}.get(top[1], int(top[1]) if top[1].isdigit() else 0)
+            if not 1 <= count <= 10 or q.kind not in {'text', 'textarea', 'multiselect'}:
+                return None
+            from .dropdowns import ordered_locations, location_identity, ORDERED_LOCATIONS_SETTING
+            preferences = ordered_locations(profile, self._settings.get(ORDERED_LOCATIONS_SETTING))
+            selected = []
+            for preferred in preferences:
+                matches = [o for o in q.options if location_identity(o) == location_identity(preferred)] if q.options else [preferred]
+                if len(matches) == 1 and matches[0] not in selected:
+                    selected.append(matches[0])
+                if len(selected) == count:
+                    value = selected if q.kind == 'multiselect' else '; '.join(selected)
+                    return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences'])
+            return None
+        # Substantive agreement/existence questions may only use exact scoped user memory.
+        if mapped_key == 'employment_restrictions':
+            return None
+        if policy == 'REQUIRE_USER' and mapped_key in {
+                'locations.ordered_preferences', 'application_preferences.role_preferences',
+                'application_preferences.internship_cohort', 'languages.other_proficient'}:
+            return None
+        from .dropdowns import ranked_location, ordered_locations, ORDERED_LOCATIONS_SETTING
+        if mapped_key == 'locations.ordered_preferences':
+            value = ranked_location(q.label, q.options, ordered_locations(
+                profile, self._settings.get(ORDERED_LOCATIONS_SETTING)), profile.get('locations', {}).get('preferred_states'))
+            return Answer(value, 'profile:locations.ordered_preferences', evidence=['locations.ordered_preferences',
+                *(['locations.preferred_states'] if profile.get('locations', {}).get('preferred_states') else [])]) if value else None
+        if mapped_key == 'application_preferences.role_preferences':
+            preferences = fact(profile, mapped_key)
+            if not isinstance(preferences, (list, tuple)) or q.kind != 'multiselect':
+                return None
+            choices = list(dict.fromkeys(fit_options(v, q.options) for v in preferences))
+            choices = [v for v in choices if v is not None]
+            try:
+                validate_answer(q, choices)
+            except (ValueError, TypeError):
+                return None
+            return Answer(choices, 'profile:' + mapped_key, evidence=[mapped_key]) if choices else None
+        if mapped_key == 'languages.other_proficient':
+            languages = fact(profile, 'languages')
+            # This grammar lists natural languages; programming skills supply no evidence.
+            if (languages and all(str(e.get('language', '')).casefold() == 'english' for e in languages)
+                    and all(normalize(o) in {'spanish', 'french', 'none of the above'} for o in q.options)
+                    and q.kind == 'multiselect'):
+                none = [o for o in q.options if normalize(o) == 'none of the above']
+                if len(none) == 1:
+                    return Answer(none, 'profile:languages', evidence=['languages'],
+                                  provenance={'rule': 'other-languages-english-only'})
+            return None
+        if mapped_key == 'application_preferences.internship_cohort':
+            value = fact(profile, mapped_key)
+            if normalize(value) == 'no preference':
+                choices = [o for o in q.options if normalize(o) in {'no preference', 'no preference i can join any cohort'}]
+                return Answer(choices[0], 'profile:' + mapped_key, evidence=[mapped_key]) if len(choices) == 1 else None
+            return None
+        # Common factual questions (residence, ZIP, graduation date, prior employer)
+        # come straight from the canonical profile, never a Discord prompt.
+        if mapped_key in {'', 'UNKNOWN_FIELD', 'contact.country', 'contact.state', 'contact.postal_code',
+                          'contact.city', 'locations.willing_to_relocate', 'demographics.veteran_status',
+                          'demographics.hispanic_latino', 'application_preferences.discovery_source'} \
+                and q.kind not in {'file', 'attestation'} \
+                and __import__('autoapply.affirmative', fromlist=['ENABLED']).ENABLED:
+            from .profile_rules import resolve as profile_rule, SOURCE as PROFILE_RULE
+            value = profile_rule(q.label, q.kind, q.options, profile)
+            if value is not None and q.kind == 'multiselect' and isinstance(value, str):
+                value = [value]  # "Select all that apply" takes a list of exact options.
+            if value is not None:
+                try:
+                    validate_answer(q, value)
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    return Answer(value, PROFILE_RULE, provenance={'rule': 'profile-rules-v1'})
+        # Operator policy: skill/willingness/requirement confirmations are Yes.
+        # Mapped profile concepts (authorization, sponsorship, demographics...) never qualify.
+        from .affirmative import affirmative, SOURCE as AFFIRMATIVE
+        if (mapped_key in {'', 'UNKNOWN_FIELD', 'eligibility_confirmation'}
+                and q.kind in {'radio', 'select', 'combobox'} and affirmative(q.label)):
+            value = fit_options('Yes', q.options)
+            if value is not None:
+                return Answer(value, AFFIRMATIVE, provenance={'rule': 'affirmative-keywords-v1'})
         if policy == 'REQUIRE_USER':
             return None
+        standard = standard_answer(q, app, profile)
+        if standard:
+            return standard
+        if mapped_key in {'start_date', 'application_preferences.availability_dates',
+                          'application_preferences.default_salary_range', 'application_preferences.relatives_at_company',
+                          'application_preferences.family_conflict_of_interest', 'application_preferences.schedule_commitment',
+                          'application_preferences.terms_acknowledgement', 'demographics.hispanic_latino',
+                          'education.gpa', 'education.credit_hours_by_start', 'contact.permanent_address',
+                          'contact.phone_device_type', 'government_employment', 'independent_auditor_employment'}:
+            return None
+        if row is None and mapped_key != REJECTED_FIELD:
+            fuzzy = self._fuzzy_answer(q, app, descriptor, stored)
+            if fuzzy:
+                return fuzzy
+        from .question_rules import resolve as resolve_keyword_memory
+        reusable = resolve_keyword_memory(self._settings, q, descriptor, self.snapshot.revision)
+        if reusable:
+            return reusable
         from .standing import resolve_standing, SOURCE
         match = resolve_standing(descriptor, profile)
         # A boolean assertion never supplies an essay, numeric GPA, or dates.
@@ -259,11 +958,18 @@ class AnswerResolver:
             values = [fact(profile, "work_authorization." + key) for key in ["sponsorship_now", "sponsorship_future"]]
             value = None if any(v is None for v in values) else any(values)
         else:
-            value = fact(profile, path) if path else None
+            value = demographic_value(profile, path) if path in DEMOGRAPHIC_PATHS else fact(profile, path) if path else None
         if path == "identity.full_name" and not value:
             first, last = fact(profile, "identity.first_name"), fact(profile, "identity.last_name")
             value = f"{first} {last}" if first and last else None
         text = question_text(q.label)
+        if path == 'education.graduation_date':
+            parsed = parse_profile_date(value)
+            if parsed:
+                if q.kind == 'date':
+                    value = parsed.isoformat()
+                elif text == 'when are you expected to graduate':
+                    value = calendar.month_abbr[parsed.month] + '-' + str(parsed.year)[2:]
         if path == "application_preferences.discovery_source" and value is not None and q.options:
             selected = fit_options(str(value), q.options)
             if selected is None and normalize(value) == "job board":
@@ -271,7 +977,7 @@ class AnswerResolver:
                 selected = selected or next((o for o in q.options if normalize(o) == "other"), None)
             # Never turn a generic job-board answer into a university or named-board claim.
             value = selected
-        if value is None and text in {"race", "race ethnicity", "gender", "disability status", "veteran status"}:
+        if value is None and path not in DEMOGRAPHIC_PATHS and text in {"race", "race ethnicity", "gender", "disability status", "veteran status"}:
             preference = {"race ethnicity": "race", "disability status": "disability", "veteran status": "veteran"}.get(text, text)
             value = fact(profile, "application_preferences." + preference)
             path = "application_preferences." + preference
@@ -302,12 +1008,30 @@ class AnswerResolver:
                 value, path = item.get("answer"), "common_answers"
         if value is None:
             return None
+        if spec and spec.answer_type == 'boolean' and type(value) is not bool:
+            return None
         if isinstance(value, bool):
             value = "Yes" if value else "No"
         if isinstance(value, tuple):
             value = list(value)
+        if path == 'skills' and isinstance(value, list) and q.kind in {'text', 'textarea'}:
+            value = ', '.join(str(v) for v in value)
         if not isinstance(value, list):
-            value = fit_options(str(value), q.options)
+            selected = fit_options(str(value), q.options)
+            # A saved affirmative disability status supports this standard disclosure,
+            # but never arbitrary Yes-prefixed claims or a current-No/history inference.
+            from .field_mapping import semantic_key
+            if (selected is None and path == 'demographics.disability'
+                    and semantic_key(q.label) == path and normalize(value) == 'yes'
+                    and q.kind in {'select', 'combobox', 'radio'}):
+                affirmative = [o for o in q.options if normalize(o) ==
+                               'yes i have a disability or have had one in the past']
+                competing = [o for o in q.options if normalize(o).startswith('yes ')]
+                selected = affirmative[0] if len(affirmative) == len(competing) == 1 else None
+            # A single saved demographic decline still selects one exact offer
+            # in a checkbox group. Keep substantive identity values unchanged.
+            value = ([selected] if selected is not None and q.kind == 'multiselect'
+                     and path in DEMOGRAPHIC_PATHS and value == 'decline' else selected)
         if value is None:
             return None
         try:
@@ -333,6 +1057,9 @@ def writing_topic(question):
 
 def is_writing_question(q):
     """Only narrative prompts; a text box alone does not authorize factual invention."""
+    from .question_keywords import robot_only
+    if robot_only(q.label):
+        return False
     from .field_mapping import REJECTED_FIELD
     from .field_mapping import semantic_key
     from .concepts import REGISTRY

@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><style>label{display:block}input{min-height:20px}.results{position:relative;height:70px;overflow-y:auto;width:280px}.entry{border:1px solid;padding:8px}</style>
+<form><section id="work" data-automation-id="workExperienceSection"><div class="entries"></div><button type="button" data-automation-id="add-button" aria-label="Add item">Add</button></section>
+<section id="education" data-automation-id="educationSection"><div class="entries"></div><button type="button" data-automation-id="add-button">Add</button></section>
+<section id="skills"><h2>Skills</h2><div data-automation-id="formField-skills"><label>Skills</label><div data-automation-id="multiselectInputContainer"><input data-automation-id="searchBox"><div class="pills"></div><div class="results" role="listbox" hidden></div></div></div></section><button type="submit" id="submit">Submit</button></form>
+<script>
+window.clicks={submit:0,submissions:0};window.order=[];window.searches=[];window.commits=[];window.dateKeys=[];
+submit.onclick=()=>clicks.submit++;document.querySelector('form').onsubmit=e=>{e.preventDefault();clicks.submissions++};
+const field=(id,label,type='text')=>'<div data-automation-id="formField-'+id+'"><label>'+label+'<input type="'+type+'"></label></div>';
+const date=(id,label,month=true)=>'<div data-automation-id="formField-'+id+'"><label>'+label+'</label>'+(month?'<input data-automation-id="dateSectionMonth-input" aria-label="Month">':'')+'<input data-automation-id="dateSectionYear-input" aria-label="Year"></div>';
+function add(section){const entry=document.createElement('div');entry.className='entry';
+ if(section.id==='work')entry.innerHTML=field('jobTitle','Job Title')+field('companyName','Company')+field('currentlyWorkHere','I currently work here','checkbox')+date('startDate','From')+'<div class="end">'+date('endDate','To')+'</div>'+field('roleDescription','Role Description');
+ else entry.innerHTML=field('schoolName','School or University')+'<div data-automation-id="formField-degree"><label>Degree</label><button type="button" aria-label="Degree Select One Required" aria-haspopup="listbox">Select One</button><div role="listbox" hidden><div role="option">Bachelor of Science</div></div></div><div data-automation-id="formField-fieldOfStudy"><label>Field of Study</label><div data-automation-id="multiselectInputContainer"><input data-automation-id="searchBox"><div class="pills"></div><div class="results" role="listbox" hidden></div></div></div>'+date('firstYearAttended','From',false)+date('lastYearAttended','To',false)+field('gradeAverage','Overall Result (GPA)');
+ section.querySelector('.entries').append(entry);
+ if(section.id==='work'){const box=entry.querySelector('[type=checkbox]');box.onclick=()=>{order.push('current:click');entry.querySelector('.end').hidden=box.checked;entry.querySelectorAll('.end input').forEach(input=>input.disabled=box.checked);};}
+ const degree=entry.querySelector('button');if(degree){degree.onclick=()=>{degree.nextElementSibling.hidden=false;degree.setAttribute('aria-expanded','true')};degree.nextElementSibling.firstElementChild.onclick=()=>{degree.textContent='Bachelor of Science';degree.setAttribute('aria-expanded','false');degree.nextElementSibling.hidden=true;};}
+ for(const input of entry.querySelectorAll('[data-automation-id$="-input"]')){input.oninput=e=>{if(e.data && e.data.length!==1)input.value='';};input.onblur=()=>commits.push(input.value);input.onkeydown=e=>dateKeys.push(e.key);}
+ for(const input of entry.querySelectorAll('input'))input.onchange=()=>order.push('fill:'+section.id);
+ entry.querySelectorAll('[data-automation-id="searchBox"]').forEach(prompt);
+}
+function prompt(input){const wrapper=input.parentElement,list=wrapper.querySelector('.results');let options=[];
+ const render=()=>{list.replaceChildren();const spacer=document.createElement('div');spacer.style.height='280px';list.append(spacer);let index=0;for(const value of (list.scrollTop<100?options.slice(0,2):options.slice(2))){const option=document.createElement('div');option.dataset.automationId='promptOption';option.dataset.automationLabel=value;option.textContent=value;option.style.position='absolute';option.style.top=(list.scrollTop<100?index++*30:180+index++*30)+'px';option.onclick=()=>{if(!option.isConnected)throw Error('Detached virtual option');const pill=document.createElement('span');pill.dataset.automationId='selectedItem';pill.textContent=value;wrapper.querySelector('.pills').append(pill);input.value='';list.hidden=true;order.push('select:'+value);};list.prepend(option);}};
+ list.onscroll=render;
+ input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();searches.push(input.value);options=['Aviation '+input.value,input.value==='Computer Science'?'Computer & Information Science':'Advanced '+input.value,...(['Computer Science','Python','JavaScript'].includes(input.value)?[input.value]:[])];list.hidden=false;list.scrollTop=0;render();}if(e.key==='Escape')list.hidden=true;};
+ input.oninput=()=>{if(!input.value)list.hidden=true;};
+}
+for(const section of document.querySelectorAll('section[data-automation-id]')){const button=section.querySelector('button');button.onclick=()=>{order.push('add:'+section.id);setTimeout(()=>{add(section);const old=section.querySelector('[data-automation-id=add-button]');const next=old.cloneNode(true);next.textContent='Add Another';next.onclick=old.onclick;old.replaceWith(next);},120);};}
+prompt(document.querySelector('#skills input'));
+window.initialEntry=()=>add(document.querySelector('#work'));
+</script>

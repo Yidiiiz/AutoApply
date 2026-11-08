@@ -6,6 +6,7 @@ unrecognized qualifier or additional claim causes abstention.
 import logging
 import re
 import unicodedata
+from functools import lru_cache
 
 SOURCE = "USER_PROVIDED_STANDING_ELIGIBILITY_ASSERTIONS"
 MEANINGS = {
@@ -63,6 +64,10 @@ PATTERNS = {
         r"ability to solve problems creatively and communicate trade(?: |)offs effectively",
     ],
     "communication": [
+        # Enumerated communication modalities share the final noun; this is not
+        # a general comma/keyword match and cannot swallow an extra qualifier.
+        QUALITY + r"written, verbal(?:,)? and (?:oral )?communication skills",
+        QUALITY + r"written, verbal,? and interpersonal communication skills",
         r"demonstrated effective communication skills",
         r"ability to present and communicate concepts and ideas",
         r"strong interpersonal and technical communication skills \(examples: leading a student project team, presenting research at conferences, etc\.\)",
@@ -100,27 +105,25 @@ PATTERNS = {
 }
 
 
+@lru_cache(maxsize=2048)
 def _intents(text):
     for assertion_id, patterns in PATTERNS.items():
         if any(re.fullmatch(pattern, text) for pattern in patterns):
             return [assertion_id]
     # Every component must be independently supported; unknown qualifiers cannot
     # be discarded. Try whole clauses first so experience disjunctions stay intact.
-    parts = re.split(r",\s*(?:and )?", text) if "," in text else re.split(r" and ", text)
-    if len(parts) > 1:
-        result = []
-        for part in parts:
-            matched = _intents(part.strip())
-            if not matched:
-                return []
-            result.extend(matched)
-        return list(dict.fromkeys(result))
+    for separator in re.finditer(r",\s*(?:and )?| and ", text):
+        left = _intents(text[:separator.start()].strip())
+        if left:
+            right = _intents(text[separator.end():].strip())
+            if right:
+                return list(dict.fromkeys(left + right))
     return []
 
 
 def resolve_standing(text, profile):
     text = getattr(text, 'label', text)
-    ids = _intents(normalize_requirement(text))
+    ids = list(_intents(normalize_requirement(text)))
     assertions = profile.get("eligibility_assertions", [])
     verified = {item.get("id") for item in assertions if isinstance(item, dict)
                 and item.get("source") == "USER_PROVIDED" and item.get("scope") == "standing"

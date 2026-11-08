@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_revisions (
  source TEXT PRIMARY KEY, revision TEXT, default_branch TEXT, checked_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS discovery_contexts (
+ context_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, checked_day TEXT NOT NULL,
+ members TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS app_queue ON applications(status, retry_at);
 CREATE INDEX IF NOT EXISTS questions_pending ON questions(status, application_id);
 CREATE INDEX IF NOT EXISTS jobs_canonical_url ON jobs(canonical_url);
@@ -93,7 +96,24 @@ CREATE TABLE IF NOT EXISTS manual_commands (
 
 
 class Database(ListingStore):
-    def __init__(self, path, max_listing_age_days=None, *, startup_maintenance=True):
+    @classmethod
+    @contextmanager
+    def discovery_reader(cls, path, history_root):
+        """Thread-owned, read-only policy view; no migrations or archive exports."""
+        from .archive import ApplicationHistory
+        reader = cls.__new__(cls)
+        reader._history_ready = False
+        reader.conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True,
+                                      timeout=30, isolation_level=None)
+        reader.conn.row_factory = sqlite3.Row
+        reader.conn.execute('PRAGMA query_only=ON')
+        reader.history = ApplicationHistory(history_root)
+        try:
+            yield reader
+        finally:
+            reader.conn.close()
+
+    def __init__(self, path, max_listing_age_days=None, *, startup_maintenance=True, history_maintenance=True):
         self._history_ready = False
         self._flushing_history = False
         self._closed = False
@@ -180,10 +200,10 @@ class Database(ListingStore):
         if max_listing_age_days is not None:
             window(max_listing_age_days)
             self.set_setting('listing_max_age_days', max_listing_age_days)
-        self._initialize_history(Path(path).parent / 'application_history')
+        self._initialize_history(Path(path).parent / 'application_history', maintenance=history_maintenance)
         self.listing_startup_report = self.maintain_listings(migration=first_listings) if startup_maintenance else {}
 
-    def _initialize_history(self, root):
+    def _initialize_history(self, root, *, maintenance=True):
         from .archive import ApplicationHistory
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS history_dirty (application_id INTEGER PRIMARY KEY);
@@ -227,6 +247,10 @@ class Database(ListingStore):
                     ON CONFLICT(application_id) DO NOTHING;
                 END;''')
         self.history = ApplicationHistory(root)
+        self.history_startup_report = {}
+        if not maintenance:
+            # Dashboard reads leave validation and pending exports to their owner.
+            return
         first = not (root / '.layout.json').exists()
         self.history_startup_report = self.history.validate()
         for row in self.rows('SELECT id FROM applications'):
@@ -256,6 +280,14 @@ class Database(ListingStore):
                     self.history.sync(self, pending)
                     self.conn.execute('DELETE FROM history_dirty')
                 self.conn.execute('COMMIT')
+            except RuntimeError as exc:
+                self.conn.execute('ROLLBACK')
+                if 'history is busy' not in str(exc):
+                    raise
+                # The archive is derived from SQLite; history_dirty rows persist and
+                # the next flush/startup exports them. Never fail a live form for it.
+                import logging
+                logging.getLogger('autoapply').warning('[HISTORY] Archive busy; export deferred for %d application(s)', len(pending))
             except BaseException:
                 self.conn.execute('ROLLBACK')
                 raise
@@ -311,6 +343,10 @@ class Database(ListingStore):
             self.flush_history()
 
     def setting(self, key, default=None):
+        # Raw settings from this selection's DB snapshot, never cached decisions.
+        settings = getattr(self, '_discovery_settings', None)
+        if settings is not None:
+            return settings.get(key, default)
         row = self.one("SELECT value FROM settings WHERE key=?", (key,))
         return json.loads(row["value"]) if row else default
 
@@ -449,6 +485,11 @@ class Database(ListingStore):
                 self.refresh_listing_statistics()
 
     def application(self, app_id):
+        # Discovery already fetched these rows in its read snapshot. Conflict
+        # checks use the same details without another join per candidate.
+        cached = getattr(self, '_discovery_applications', None)
+        if cached is not None and app_id in cached:
+            return cached[app_id]
         row = self.one("""SELECT a.*,j.company,j.title,j.location,j.canonical_url,j.description,j.ats,j.posted_at,
                       j.eligibility_json,j.listing_status,j.listing_active,j.freshness_state,j.posted_at_source,j.posted_at_confidence FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?""", (app_id,))
         if not row:

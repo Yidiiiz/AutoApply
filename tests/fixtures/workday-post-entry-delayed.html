@@ -1,0 +1,21 @@
+<!doctype html><html><body>
+<button id="apply">Apply</button>
+<script>
+window.clicks = {apply:0, manual:0, next:0, submit:0};
+const chooser = '<h2>Start Your Application</h2><a id="manual" href="/careers/job/fixture/apply/applyManually">Apply Manually</a>';
+const loading = '<div role="progressbar" data-automation-id="loading">Loading...</div>';
+const form = '<form><label>First Name<input name="first_name"></label><button type="button">Submit application</button></form>';
+document.addEventListener('click', e => {
+  if(e.target.id === 'apply') {
+    window.clicks.apply++;
+    document.body.innerHTML = chooser;
+  } else if(e.target.id === 'manual') {
+    e.preventDefault(); window.clicks.manual++;
+    history.pushState({}, '', e.target.href);
+    document.body.innerHTML = loading;
+    // Replaced, visible chooser after a positively confirmed transition.
+    setTimeout(() => document.body.innerHTML = chooser + loading, 700);
+    setTimeout(() => document.body.innerHTML = form, window.hydrationDelay);
+  } else if(e.target.textContent === 'Submit application') window.clicks.submit++;
+});
+</script></body></html>

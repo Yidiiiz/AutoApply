@@ -5,6 +5,7 @@ import logging
 import time
 
 import discord
+from .discord_batch import BatchView
 
 log = logging.getLogger("autoapply.discord")
 
@@ -75,7 +76,15 @@ class QuestionView(discord.ui.View):
     def __init__(self, bot, question):
         super().__init__(timeout=None)
         self.bot, self.question = bot, question
-        for action, label in [("answer", "Answer / Change"), ("accept", "Accept proposal"), ("skip", "Skip"), ("ai", "Let AI Answer"), ("ask", "Ask / Clarify")]:
+        from .answers import from_row, is_writing_question
+        actions = [("answer", "Answer")]
+        if bot.controller.db.setting(f"draft:{question['id']}"):
+            actions.append(("accept", "Accept draft"))
+        if not question['required']:
+            actions.append(("skip", "Skip optional"))
+        if bot.controller.ai and bot.controller.config['ai']['enabled'] and bot.controller.config['ai']['providers'] and is_writing_question(from_row(question)):
+            actions.append(("ai", "Draft for review"))
+        for action, label in actions:
             button = discord.ui.Button(label=label, custom_id=f"aa:{question['id']}:{action}", style=discord.ButtonStyle.secondary)
             async def callback(interaction, selected=action):
                 await self.act(interaction, selected)
@@ -90,13 +99,14 @@ class QuestionView(discord.ui.View):
                 if not bot.authorized(interaction.user):
                     await interaction.response.send_message("Unauthorized", ephemeral=True)
                     return
+                await interaction.response.defer(ephemeral=True)
                 try:
                     selected = [options[int(i)] for i in select.values]
                     value = selected if question["field_type"] == "multiselect" else selected[0]
                     result = bot.controller.answer(question["id"], value)
                 except ValueError as exc:
                     result = str(exc)
-                await interaction.response.send_message(result, ephemeral=True)
+                await interaction.followup.send(result, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
             select.callback = select_callback
             self.add_item(select)
 
@@ -181,12 +191,15 @@ class DiscordBot(discord.Client):
         if not message.content.startswith(("!", "/")):
             return
         started = time.monotonic()
-        await message.channel.send("Received.")
+        if not getattr(self.controller, 'semi_auto', None):
+            await message.channel.send('Received.')
         command = message.content.lstrip("!/")
         self.controller.db.event(None, "discord_command_ack", json.dumps({"command":command.split()[0] if command.split() else "", "latency_ms":round((time.monotonic()-started)*1000)}))
         try:
             if command.startswith("ai "):
                 result = "Proposed answer (confirm with !accept QUESTION_ID):\n" + await self.controller.draft(int(command.split()[1]))
+            elif getattr(self.controller, 'semi_auto', None):
+                result = await self.controller.semi_auto.command(command)
             else:
                 result = self.controller.route(command)
         except Exception as exc:
@@ -199,9 +212,43 @@ class DiscordBot(discord.Client):
         while not self.is_closed():
             try:
                 user = self.get_user(self.owner_id) or await self.fetch_user(self.owner_id)
-                for row in self.controller.db.rows("SELECT * FROM notifications WHERE delivered_at IS NULL ORDER BY id LIMIT 10"):
+                semi = getattr(self.controller, 'semi_auto', None)
+                if semi and semi.phase != 'REVIEW':
+                    await asyncio.sleep(1)
+                    continue
+                query = "SELECT * FROM notifications WHERE delivered_at IS NULL"
+                args = ()
+                if semi:
+                    query += " AND (json_extract(payload,'$.kind')='semi_batch' OR json_extract(payload,'$.application_id') IN (" + ','.join('?' for _ in semi.ids) + "))"
+                    args = tuple(semi.ids)
+                for row in self.controller.db.rows(query + " ORDER BY id LIMIT 10", args):
                     payload = json.loads(row["payload"])
                     view = None
+                    if payload.get('kind') == 'input':
+                        pending = [q for q in self.controller.pending() if q['application_id']==payload['application_id']]
+                        for q in pending:
+                            signature = q['question_signature']
+                            key = f"discord_question_delivery:{q['id']}"
+                            if self.controller.db.setting(key)==signature:
+                                continue
+                            text = (f"{q['company']} · #{q['application_id']}\n"
+                                    f"Question #{q['id']}: {q['raw_question']}\n"
+                                    f"{'Required' if q['required'] else 'Optional'} · Choose below or !answer {q['id']} <answer>.")
+                            options = json.loads(q['options'])
+                            if options and (len(options)>25 or any(len(o)>100 for o in options)):
+                                text += '\nChoices: ' + ' | '.join(options)
+                            for piece in chunks(text)[:-1]:
+                                await user.send(piece, allowed_mentions=discord.AllowedMentions.none())
+                            await user.send(chunks(text)[-1],view=QuestionView(self,q),allowed_mentions=discord.AllowedMentions.none())
+                            self.controller.db.set_setting(key,signature)
+                        self.controller.db.execute("UPDATE notifications SET delivered_at=datetime('now') WHERE id=?",(row['id'],))
+                        continue
+                    if semi and payload.get('kind') != 'semi_batch':
+                        # The batch summary includes ordinary stops; no second failure ping.
+                        self.controller.db.execute("UPDATE notifications SET delivered_at=datetime('now') WHERE id=?",(row['id'],))
+                        continue
+                    if payload.get('kind') == 'semi_batch':
+                        view = BatchView(self,payload.get('application_ids',[]))
                     if "question_id" in payload:
                         q = next((q for q in self.controller.pending() if q["id"] == payload["question_id"]), None)
                         if not q:

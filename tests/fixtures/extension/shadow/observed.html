@@ -1,0 +1,40 @@
+﻿<!doctype html><meta charset="utf-8"><title>Offline observed native application</title>
+<h1>Job application</h1><form id="application"><div id="hosts"></div><button type="submit">Submit application</button></form>
+<script>
+// Synthetic native controls with the reported Oct 25 root membership and labels.
+// This models standard DOM events, not SmartRecruiters implementation internals.
+window.submissions=0;
+application.onsubmit=e=>{e.preventDefault();submissions++;};
+window.model={};
+const shapes={
+  6:['spl-dropzone','spl-dropzone-file-input-2','Choose a file or drop it here','file'],
+  12:['spl-input','first-name-input','First name','text'],
+  13:['spl-input','last-name-input','Last name','text'],
+  14:['spl-input','email-input','Email','email'],
+  15:['spl-input','confirm-email-input','Confirm your email','email'],
+  26:['spl-input','linkedin-input','LinkedIn','text'],
+  27:['spl-input','facebook-input','Facebook','text'],
+  28:['spl-input','twitter-input','X (fka Twitter)','text'],
+  29:['spl-input','website-input','Website','text'],
+  32:['spl-dropzone','spl-dropzone-file-input-1','Choose a file or drop it here','file'],
+  34:['spl-textarea','hiring-manager-message-input','Let the company know about your interest working there','textarea']
+};
+for(let i=1;i<=34;i++){
+  const shape=shapes[i],host=document.createElement(shape?.[0]||'spl-icon');
+  host.dataset.observedRoot=i;hosts.append(host);
+  const root=host.attachShadow({mode:'open'});
+  if(!shape){root.innerHTML='<span aria-hidden="true">.</span>';continue;}
+  const [tag,id,label,type]=shape;
+  root.innerHTML=`<label id="label" for="${id}">${label}</label>`;
+  const control=document.createElement(type==='textarea'?'textarea':'input');
+  if(type!=='textarea')control.type=type;
+  control.id=id;control.setAttribute('aria-labelledby','label');root.append(control);
+  host.addEventListener('input',e=>{if(e.composed)model[id]=control.value;});
+  host.addEventListener('change',e=>{if(e.composed)model[id]=control.value;});
+}
+for(let i=0;i<80;i++){const icon=document.createElement('spl-icon');hosts.append(icon);icon.attachShadow({mode:'open'}).innerHTML='<span>.</span>';}
+const late=document.createElement('spl-input');late.id='late-host';hosts.append(late);
+late.attachShadow({mode:'open'}).innerHTML='<label for="late">First name</label><input id="late">';
+const closed=document.createElement('closed-widget');hosts.append(closed);
+closed.attachShadow({mode:'closed'}).innerHTML='<label>Closed unknown<input></label>';
+</script>

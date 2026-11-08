@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Synthetic internship</title>
+<style>body{font:16px Arial;margin:24px}fieldset{margin:16px 0}label{display:block;margin:8px}input,textarea,button{font:inherit} [data-automation-id=dateInputWrapper]{width:134px;height:40px;border:1px solid;display:flex} .part{width:42px;height:38px;position:relative} .part input{width:8px;height:22px;transform:scale(.01);transform-origin:center} .visual{display:inline-block;width:24px;height:24px;border:1px solid;position:relative}.visual input{opacity:0;width:24px;height:24px;margin:0} [role=listbox]{border:1px solid;background:white;width:420px} [role=option]{padding:8px}</style></head><body><main id=main></main><script>
+const degreeLabel="Bachelor’s or Equivalent First-Degree (ISCED 6: BA, BSc, BEng, LLB, etc.)";
+function dateParts(id,heading){return `<div data-automation-id="formField-${id}"><label>${heading}</label><div id="${id}" data-automation-id="dateInputWrapper" role="group" aria-labelledby="hiddenDateValueId-${id}"><span id="hiddenDateValueId-${id}" hidden>${heading}</span>${['Month','Day','Year'].map(part=>`<span class="part"><input id="${id}-dateSection${part}-input" data-automation-id="dateSection${part}-input" role="spinbutton" aria-label="${part}" required></span>`).join('')}</div></div>`;}
+function work(company,title){return `<section><div data-automation-id="formField-jobTitle"><label>Job Title<input value="${title}"></label></div><div data-automation-id="formField-companyName"><label>Company<input value="${company}"></label></div><div data-automation-id="formField-location"><label>Location<input data-company="${company}"></label></div></section>`;}
+function application(){
+ main.innerHTML=`<form onsubmit="event.preventDefault();window.submissions++">
+ <h2>Supplementary questionnaire</h2>${dateParts('synthetic-grad','Anticipated graduation date (MM/DD/YYYY)')}
+ <div><label>Month<input id=generic-month aria-label=Month></label></div>
+ <h2>Voluntary Self-Identification of Disability — Form CC-305</h2>
+ ${dateParts('selfIdentifiedDisabilityData--dateSignedOn','Date')}
+ <table role=group aria-label="Please check one of the boxes below:">${['Yes, I have a disability, or have had one in the past','No, I do not have a disability and have not had one in the past','I do not want to answer'].map((option,i)=>`<tr><td><span class=visual><input id="disability-${i}" type=checkbox required aria-label="${option}"></span></td><td><label for="disability-${i}">${option}</label></td></tr>`).join('')}</table>
+ <fieldset><legend>Education</legend><div data-automation-id=formField-school><label>School<input value="Synthetic University"></label></div><div data-automation-id=formField-degree><label for=education-51--degree>Degree</label><button id=education-51--degree name=degree type=button aria-label="Degree Select One Required" aria-haspopup=listbox aria-expanded=false aria-controls=degree-options>Select One</button></div></fieldset>
+ <fieldset><legend>Work Experience</legend>${work('Tea Fixture','Crew Member')}${work('Freelance Fixture','Developer')}</fieldset>
+ <label>Are you a military spouse?<select id=spouse required><option value="">Select One</option><option>Yes</option><option>No</option></select></label>
+ <label>Are you currently a member of the National Guard or Reserves?<select id=guard required><option value="">Select One</option><option>Yes</option><option>No</option></select></label>
+ <label>Would you like to opt out of AI review?<select id=ai required><option value="">Select One</option><option>Yes</option><option>No</option></select></label>
+ <label>Which programming tools do you use?<select id=tools required><option value="">Select One</option><option>Python (programming)</option><option>Rust</option></select></label>
+ <label>What are your top two preferred office locations?<textarea id=offices required></textarea></label>
+ <button type=submit>Submit application</button></form>`;
+ const degree=document.getElementById('education-51--degree');
+ degree.onclick=()=>{if(document.getElementById('degree-options'))return;degree.setAttribute('aria-expanded','true');const menu=document.createElement('div');menu.id='degree-options';menu.setAttribute('role','listbox');for(const label of ['High School Upper Secondary (ISCED 3)',degreeLabel,'Master or Equivalent Second-Degree (ISCED 7)','Other (Not Listed)']){const item=document.createElement('div');item.setAttribute('role','option');item.textContent=label;item.onclick=()=>{degree.textContent=label;degree.setAttribute('aria-expanded','false');menu.remove();};menu.append(item);}document.body.append(menu);};
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.getElementById('degree-options')?.remove();degree.setAttribute('aria-expanded','false');}});
+ if(window.revertDate){const day=document.querySelector('#synthetic-grad [aria-label=Day]');day.addEventListener('blur',()=>setTimeout(()=>day.value='',50));}
+}
+function landing(){main.innerHTML='<h1>Synthetic internship</h1><div data-automation-id=jobPostingDescription>Build synthetic research tools.</div><div data-automation-id=locations>Bay City, CA</div><button id=apply type=button>Apply</button>';const metadata=document.createElement('script');metadata.type='application/ld+json';metadata.id='posting';metadata.textContent=JSON.stringify({'@type':'JobPosting',title:'Synthetic internship',description:'Build synthetic research tools.',hiringOrganization:{name:'Fixture'},jobLocation:[{'@type':'Place',address:{addressLocality:'Bay City',addressRegion:'CA',addressCountry:'US'}}]});document.head.append(metadata);document.getElementById('apply').onclick=()=>{history.pushState({},'',location.pathname.replace(/\/apply$/,'')+'/apply');metadata.remove();application();};}
+window.submissions=0;
+window.initialView==='landing'?landing():application();
+</script></body></html>

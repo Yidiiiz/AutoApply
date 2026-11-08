@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fixture internship | Fixture ATS</title>
+<meta property="og:site_name" content="Fixture Company">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Fixture Intern","hiringOrganization":{"name":"JSON-LD Company"},"description":"<p>Build useful local tools.</p>"}</script>
+<style>body{font:16px sans-serif}label{display:block;margin:8px}input,textarea,select{padding:5px}fieldset{margin:12px} [contenteditable]{min-height:30px;border:1px solid gray}</style>
+</head><body><main>
+<input type="search" aria-label="Search jobs" id="search">
+<form id="application">
+  <label for="name">Full name *</label><input id="name" required>
+  <label>Email<input id="email" type="email" required></label>
+  <label for="phone">Phone</label><input id="phone" type="tel">
+  <label for="about">About you</label><textarea id="about" maxlength="200"></textarea>
+  <label for="country">Country *</label><select id="country" required><option value="">Choose one</option><option value="us">United States</option><option value="ca">Canada</option></select>
+  <fieldset><legend>Work authorization *</legend><label><input id="authorized" type="radio" name="authorization" value="yes" required>Yes</label><label><input id="unauthorized" type="radio" name="authorization" value="no">No</label></fieldset>
+  <fieldset><legend>Skills</legend><label><input id="python" type="checkbox" name="skills" value="py">Python</label><label><input id="js" type="checkbox" name="skills" value="js">JavaScript</label><label><input id="java" type="checkbox" name="skills" value="java">Java</label></fieldset>
+  <label><input id="consent" type="checkbox">Contact consent</label>
+  <label for="resume">Resume *</label><input id="resume" type="file" accept="application/pdf" required>
+  <label for="missing">Unresolved required *</label><input id="missing" required>
+  <label for="writing">Why this role? *</label><textarea id="writing" aria-required="true"></textarea>
+  <label for="cover">Cover letter *</label><input id="cover" type="file" required>
+  <label for="existing">Existing answer *</label><input id="existing" value="User supplied" required>
+  <label for="optional">Optional field</label><input id="optional">
+  <label for="too-long">Short answer *</label><input id="too-long" maxlength="3" required>
+  <label id="editor-label">Additional information</label><div id="editor" contenteditable="true" aria-labelledby="editor-label"></div>
+  <input id="city" role="combobox" aria-label="City" list="cities"><datalist id="cities"><option>New York</option><option>Boston</option></datalist>
+  <div>Website</div><input id="website" type="url">
+  <label for="hidden">Hidden trap</label><input id="hidden" type="hidden">
+  <label for="offscreen">Offscreen trap</label><input id="offscreen" style="position:absolute;left:-9000px">
+  <input id="zero" aria-label="Zero size trap" style="width:0;height:0;padding:0;border:0">
+  <input id="disabled" aria-label="Disabled trap" disabled>
+  <input id="readonly" aria-label="Readonly trap" readonly>
+  <button id="submit" type="submit">Submit application</button><button id="next" type="button">Next page</button>
+</form>
+<iframe title="Embedded form" src="/frame.html"></iframe>
+</main><script>
+window.submitClicks = 0; window.nextClicks = 0; window.submissions = 0; window.fieldEvents = [];
+document.querySelector('#submit').onclick = () => window.submitClicks++;
+document.querySelector('#next').onclick = () => window.nextClicks++;
+document.querySelector('form').onsubmit = event => {event.preventDefault(); window.submissions++;};
+for (const kind of ['input','change','blur']) document.addEventListener(kind, event => window.fieldEvents.push([event.target.id, kind]));
+</script></body></html>

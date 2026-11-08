@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Local async school search</title>
+<style>body{font:16px sans-serif}.select__control{border:1px solid #999;padding:8px}[role=option]{padding:4px}</style>
+</head><body><form>
+<div class="select">
+  <label for="school">School</label>
+  <div class="select__control"><span class="select__single-value"></span>
+    <input id="school" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="schools" required>
+  </div>
+  <input type="hidden" name="school">
+</div>
+<button id="submit" type="submit">Submit application</button>
+</form><script>
+window.searchEvents = []; window.submissions = 0; window.submitClicks = 0;
+document.querySelector('form').onsubmit = event => {event.preventDefault(); submissions++;};
+document.querySelector('#submit').onclick = () => submitClicks++;
+const input = document.querySelector('#school');
+const root = document.querySelector('.select');
+const values = ['University of Maryland - Baltimore', 'University of Maryland - Baltimore County',
+  'University of Maryland - College Park Extension', 'University of Maryland - College Park',
+  'University of Maryland - Eastern Shore', 'University of Maryland - University College'];
+const firstPage = Array.from({length: 10}, (_, i) => `Unrelated School ${i + 1}`);
+let timer, trackedValue = '';
+// Model React's value tracker: assigning input.value alone must not fire onInputChange.
+const nativeValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+Object.defineProperty(input, 'value', {
+  get() {return nativeValue.get.call(this);},
+  set(value) {nativeValue.set.call(this, value); trackedValue = this.value;}
+});
+function close() {
+  clearTimeout(timer);
+  document.querySelector('#schools')?.remove();
+  input.setAttribute('aria-expanded', 'false');
+}
+function render(options) {
+  const list = document.querySelector('#schools');
+  list.replaceChildren();
+  for (const value of options) {
+    const option = document.createElement('div');
+    option.setAttribute('role', 'option'); option.textContent = value;
+    option.onmousedown = event => event.preventDefault();
+    option.onclick = () => {
+      root.querySelector('.select__single-value').textContent = value;
+      root.querySelector('[type=hidden]').value = value;
+      input.value = ''; close();
+    };
+    list.append(option);
+  }
+}
+function open() {
+  close();
+  const list = document.createElement('div');
+  list.id = 'schools'; list.setAttribute('role', 'listbox'); root.append(list);
+  input.setAttribute('aria-expanded', 'true');
+  render(firstPage);
+}
+input.onkeydown = event => {
+  if (event.key === 'ArrowDown') open();
+  if (event.key === 'Escape') close();
+};
+input.oninput = event => {
+  if (!(event instanceof InputEvent) || input.value === trackedValue) return;
+  trackedValue = input.value;
+  searchEvents.push({term: input.value, inputType: event.inputType, data: event.data});
+  if (!document.querySelector('#schools')) open();
+  clearTimeout(timer);
+  const term = input.value;
+  timer = setTimeout(() => {
+    const noResults = root.dataset.noResults || root.dataset.prefixOnly && term.split(/\s+/).length > 3;
+    render(noResults ? [] : values.filter(value => value.toLowerCase().includes(term.toLowerCase())));
+  }, 1500);
+};
+</script></body></html>

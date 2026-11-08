@@ -1,0 +1,6 @@
+body { font: 18px sans-serif; margin: 40px; }
+button, a { display: inline-block; margin: 12px; padding: 12px; }
+label { display: block; margin: 20px; }
+.backdrop { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5); }
+.panel { margin: 80px auto; padding: 30px; width: 650px; background: white; }
+[hidden] { display: none !important; }

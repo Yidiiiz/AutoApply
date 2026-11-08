@@ -5,6 +5,11 @@ def snapshot(db, app_id, *, live_page=None, live_browser=False):
     app = db.application(app_id)
     live = bool(live_browser and live_page is not None and not live_page.is_closed())
     checkpoint = db.setting(f'fill_checkpoint:{app_id}', {})
+    readiness = checkpoint.get('readiness', 'NONE')
+    if app['manual_action_required'] or app['application_state'] == 'MANUAL_REQUIRED':
+        # A historical persistence label cannot promote a current manual hold.
+        readiness = ('SAVED_PROGRESS_CHECKPOINT' if checkpoint.get('schema_version') == 2
+                     else 'FILLED_CHECKPOINT' if checkpoint else 'NONE')
     return {
         'application_id': app_id, 'lifecycle': app['status'], 'application_state': app['application_state'],
         'listing': {'status': app['listing_status'], 'active': bool(app['listing_active']), 'freshness': app['freshness_state']},
@@ -18,6 +23,6 @@ def snapshot(db, app_id, *, live_page=None, live_browser=False):
         'session': {'preserved_flag': bool(app['session_preserved']), 'live_page': live,
                     'live_browser': bool(live_browser), 'availability': 'LIVE' if live else 'UNVERIFIED_OR_UNAVAILABLE'},
         'checkpoint': checkpoint,
-        'readiness': ('LIVE_READY_FOR_MANUAL_SUBMIT' if live and app['application_state'] == 'READY_FOR_MANUAL_SUBMIT'
-                      else checkpoint.get('readiness', 'NONE')),
+        'readiness': ('LIVE_READY_FOR_MANUAL_SUBMIT' if live and not app['manual_action_required'] and app['application_state'] == 'READY_FOR_MANUAL_SUBMIT'
+                      else readiness),
     }
