@@ -5,7 +5,7 @@ import yaml
 import pytest
 from playwright.sync_api import expect
 
-from test_extension import loaded_extension, extension_server, fixture_delay, KEY
+from test_extension import loaded_extension, extension_server, fixture_delay, select_analyze, KEY
 
 pytestmark = pytest.mark.browser
 FIXTURE = Path(__file__).parent/'fixtures/extension/interactions/t095.html'
@@ -78,10 +78,12 @@ def test_t095_durable_native_and_panel_edits_scroll_skip_restore(interaction_pro
         worker.evaluate('id=>autoApplyAutofill(id)',tab)
         settle(page,worker,tab)
         expect(page.locator('#website')).to_have_value('https://latest.test/')
+        panel.locator('#tab-fill').click()
         prompt.get_by_role('button',name='Skip',exact=True).click()
         expect(panel.get_by_role('button',name='Undo Skip',exact=True)).to_be_visible()
         worker.evaluate('id=>autoApplyAutofill(id)',tab)
         settle(page,worker,tab)
+        panel.locator('#tab-fill').click()
         expect(panel.get_by_role('button',name='Undo Skip',exact=True)).to_be_visible()
         # A new document reuses the canonical correction and explicit Skip.
         page.reload()
@@ -193,6 +195,7 @@ def test_t095_required_cover_cancel_optional_and_apply_enter(interaction_profile
         expect(page.locator('#first')).to_have_value('Test')
         expect(page.locator('#website')).to_have_value('')
         assert page.evaluate('clicks===0')
+        select_analyze(panel)
         panel.locator('#cancel-cover-letter').click()
         settle(page,worker,tab)
         assert page.locator('#cover').evaluate('e=>e.files.length')==0

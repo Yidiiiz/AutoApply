@@ -29,6 +29,20 @@ After installing or reloading the extension, reload any application tabs that we
 
 The extension uses plain JavaScript modules with no build step, dependencies or remote scripts. The background service worker calls the content script in its isolated world in every accessible frame, with frame-prefixed keys to keep identical field IDs separate. Last results and sidebar visibility live per tab in session storage. The Answers tab supports inline changes; your own edits on the page are learned automatically, excluding private input types and essays. Confirmed manual submission marks the matched listing as applied and offers Undo.
 
+Use the fourth **Analyze** tab for Analyze page, the automatic-analysis switch,
+capture feedback, findings and repair status. Automatic recovery progress and
+unresolved questions appear there as results arrive. Selecting Analyze keeps it
+open while verified answers update Answers. Arrow keys, Home and End navigate
+the tool tabs. Autofill and Next page / Submit remain in the global footer on
+every tool tab; cover-letter cancellation stays above the tabs.
+
+The dashboard Queue's default ascending Rank order keeps jobs from the same
+company together, anchored at that company's best rank. Only case and whitespace
+are normalized; distinct names and blank companies remain separate. Original job
+ranks stay visible. Grouping happens before pagination, Select top N and Chrome
+run ordering. Other column sorts and descending Rank retain their explicit order.
+Each job keeps its own checkbox, links and actions in List and Grid views.
+
 Comboboxes are opened during scanning to discover their available choices. Autofill waits up to six seconds for search options to appear and settle, prefers the exact full answer, and retries a shorter search prefix when needed. It checks that the selection committed; failed searches are cleared and listed under **Needs your input**. Hidden Resume/CV upload controls use their field labels and attributes instead of generic Attach/Upload button text, and their displayed filename is checked after attachment. Cover-letter upload fields remain listed under **Needs writing**. Education start/end month and year use the profile's `education.start_date` and `education.graduation_date` when the field is in an Education section.
 
 Local fixture verification (no real dashboard or employer requests):

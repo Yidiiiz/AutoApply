@@ -19,6 +19,13 @@ KEY = "fixture-pairing-key"
 RESUME = b"%PDF-1.4\n% synthetic fixture resume\n%%EOF\n"
 
 
+def select_analyze(panel):
+    """Navigate to page tools before using their controls in the actual sidebar."""
+    panel.locator('#tab-analyze').click()
+    expect(panel.locator('#tab-analyze')).to_have_attribute('aria-selected', 'true')
+    expect(panel.locator('#analyze-section')).to_be_visible()
+
+
 def test_t064_outside_heading_generic_application(loaded_extension, extension_server):
     context, worker, extension_id = loaded_extension
     server, requests = extension_server
@@ -221,6 +228,7 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     expect(panel.locator('#auto-snapshot-notice')).to_have_count(0)
     page.set_viewport_size(dict(width=360, height=600))
     (ROOT/'.tmp/review/t056').mkdir(parents=True, exist_ok=True)
+    select_analyze(panel)
     page.screenshot(path=str(ROOT/'.tmp/review/t056'/f'feedback-sent-360-{theme}.png'))
     assert panel.evaluate("()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left&&Math.abs(s.y+s.height/2-b.y-b.height/2)<2;}")
     # Repeated actual result broadcasts cannot restart the fade deadline.
@@ -241,6 +249,7 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     output = ROOT/'.tmp/review/t056'
     output.mkdir(parents=True, exist_ok=True)
     def shot(name):
+        select_analyze(panel)
         assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
         assert panel.evaluate('''()=>['autofill','next-page','auto-advance','auto-send-structure','send-structure','settings'].every(id=>{
           const e=document.getElementById(id),b=e.getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.bottom<=innerHeight&&e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));})''')
@@ -252,8 +261,10 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
         assert panel.locator('.auto-toggle').inner_text() == ''
         shot(f'filled-{width}-off')
         if width == 360:
+            select_analyze(panel)
             panel.locator('#auto-send-structure').uncheck()
             shot('capture-360-off')
+            select_analyze(panel)
             panel.locator('#auto-send-structure').check()
             expect(panel.locator('#snapshot-status')).to_be_empty()
             shot('capture-360-on')
@@ -272,6 +283,7 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     worker.evaluate('id=>autoApplyAutofill(id)', tab_id)
     expect(panel.locator('#snapshot-status')).to_have_text('Sent')
     assert len(snapshots()) == 2
+    select_analyze(panel)
     panel.locator('#auto-send-structure').uncheck()
     expect(panel.locator('#auto-send-structure')).to_be_enabled()
     panel.evaluate('location.reload()')
@@ -281,6 +293,7 @@ def test_t056_actual_sidebar_autosend_and_controls(loaded_extension, extension_s
     assert len(snapshots()) == 2
     # Explicit Analyze remains repeatable; automatic capture above remains passive.
     for _ in range(2):
+        select_analyze(panel)
         panel.locator('#send-structure').click()
         expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     assert len(snapshots()) == 4
@@ -332,15 +345,19 @@ def test_t056_writing_settles_and_snapshot_failure_manual_retry(loaded_extension
     expect(panel.locator('#autofill .fill-count')).to_have_text('7 fields filled')
     worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
     # Auto off hides automatic feedback; enabling restores its actionable failure.
+    select_analyze(panel)
     panel.locator('#auto-send-structure').uncheck()
     expect(panel.locator('#snapshot-status')).to_be_empty()
+    select_analyze(panel)
     panel.locator('#auto-send-structure').check()
     expect(panel.locator('#snapshot-status')).to_have_text('Failed')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#error')).to_contain_text('Try Analyze page again.')
     worker.evaluate('async id=>{const {tabResults}=await chrome.storage.session.get("tabResults");await chrome.runtime.sendMessage({type:"autofill-result",result:tabResults[id]});}', tab_id)
     expect(panel.locator('#error')).to_contain_text('Try Analyze page again.')
     worker.evaluate('()=>{globalThis.fetch=realFetch;}')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     expect(panel.locator('#error')).to_be_empty()
@@ -1997,6 +2014,7 @@ def test_t039_labels_rules_navigation_and_snapshot(loaded_extension, extension_s
     assert page.evaluate('submitClicks') == 0
     panel = context.new_page()
     panel.goto(f'chrome-extension://{extension_id}/sidepanel.html?tabId={tab_id}')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     worker.evaluate("""async id=>chrome.storage.session.set({tabResults:{[id]:{tabId:id,busy:true,waiting:true,fields:[],pending:[],writing:[],page:{},summary:{filled:0,skipped:0,errors:[]}}}})""", tab_id)
@@ -2492,10 +2510,12 @@ def test_t049_one_click_skills_and_layout(loaded_extension, extension_server, th
         assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
         footer=panel.locator('.page-navigation').bounding_box()
         assert footer['y']+footer['height']<=800
+        select_analyze(panel)
         assert panel.locator('#send-structure').is_visible()
         assert panel.locator('#footer-autofill-skills').count()==0
         panel.screenshot(path=str(output/f'sidebar-{width}-{theme}.png'))
     panel.set_viewport_size(dict(width=360,height=800))
+    panel.locator('#tab-fill').click()
     panel.locator('#skills-menu > summary').click()
     panel.screenshot(path=str(output/f'expanded-skills-360-{theme}.png'))
     panel.locator('#tab-answers').click()
@@ -2706,6 +2726,8 @@ def test_t051_actual_iframe_settings_helper_and_collapsed_control(loaded_extensi
     output.mkdir(parents=True, exist_ok=True)
 
     def bounds():
+        selected = panel.locator('.tabs:not(.subtabs) [aria-selected="true"]').get_attribute('id')
+        select_analyze(panel)
         assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
         assert panel.evaluate("""() => {
             const header=document.querySelector('header').getBoundingClientRect(),footer=document.querySelector('footer').getBoundingClientRect();
@@ -2715,6 +2737,7 @@ def test_t051_actual_iframe_settings_helper_and_collapsed_control(loaded_extensi
                 return b.width>0 && b.height>0 && b.left>=0 && b.right<=innerWidth && b.top>=0 && b.bottom<=innerHeight && e.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));
             });
         }""")
+        panel.locator('#'+selected).click()
 
     for width, height in ((360,800),(400,800),(360,600)):
         page.set_viewport_size(dict(width=width,height=height))
@@ -2903,6 +2926,7 @@ def test_t054_manual_submit_confirmation_and_narrow_utilities(loaded_extension, 
     output=ROOT/'.tmp/review/t054'
     output.mkdir(parents=True,exist_ok=True)
     def shot(name):
+        select_analyze(panel)
         assert panel.evaluate('document.documentElement.scrollWidth<=innerWidth')
         assert panel.evaluate('''()=>['settings','minimize','close','autofill','next-page','send-structure'].every(id=>{
             const e=document.getElementById(id),b=e.getBoundingClientRect();
@@ -2922,16 +2946,19 @@ def test_t054_manual_submit_confirmation_and_narrow_utilities(loaded_extension, 
     expect(panel.locator('#server')).to_be_enabled()
     page.screenshot(path=str(output/'settings-360x600.png'))
     panel.locator('#settings-back').click()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     assert panel.evaluate('''()=>{const s=document.getElementById('snapshot-status').getBoundingClientRect(),b=document.getElementById('send-structure').getBoundingClientRect();return s.right<=b.left&&Math.abs(s.y+s.height/2-b.y-b.height/2)<2;}''')
     shot('sent-inline')
     expect(panel.locator('#snapshot-status')).to_be_empty(timeout=5000)
     panel.evaluate('''()=>{const send=chrome.runtime.sendMessage.bind(chrome.runtime);let failed=false;chrome.runtime.sendMessage=m=>m.type==='page-snapshot'&&!failed?(failed=true,Promise.resolve({error:'Fixture snapshot failed'})):send(m);}''')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Failed')
     expect(panel.locator('#error')).to_contain_text('Try Analyze page again')
     shot('snapshot-error')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
     expect(panel.locator('#error')).to_be_empty()
@@ -3473,6 +3500,7 @@ def test_t060_capture_derived_active_variants(loaded_extension, extension_server
     page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
     panel = next(f for f in page.frames if '/sidepanel.html' in f.url)
     def analyze():
+        select_analyze(panel)
         panel.locator('#send-structure').click()
         expect(panel.locator('#snapshot-status')).to_have_text('Analyzed')
         files = (config.private/'snapshots').glob('*.json')
@@ -3518,6 +3546,7 @@ def test_t060_fresh_analysis_singleflight_bound_repair_report(loaded_extension, 
     other = context.new_page()
     other.goto(server+'/job.html')
     worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.analysisCalls=0;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot')){analysisCalls++;await new Promise(r=>globalThis.releaseAnalysis=r);}return analysisFetch(url,...args);};}")
+    select_analyze(panel)
     panel.locator('#send-structure').evaluate('e=>{e.click();e.click()}')
     expect(panel.locator('#send-structure')).to_have_text('Analyzing\u2026')
     expect(panel.locator('#send-structure')).to_be_disabled()
@@ -3571,6 +3600,7 @@ def test_t060_analysis_busy_preserves_scanner_handles(loaded_extension, extensio
     value=worker.evaluate("async id=>{for(let i=0;i<1000;i++){const {tabResults={}}=await chrome.storage.session.get('tabResults');const r=tabResults[id];if(r?.writing?.length && !r.writingSettled)return r;await new Promise(r=>setTimeout(r,10));}throw Error('writing did not start')}",tab_id)
     worker.evaluate("id=>chrome.scripting.executeScript({target:{tabId:id},func:()=>{autoApplyContent.scan=()=>{throw Error('Analysis rescanned')};}})",tab_id)
     before=page.locator('form').evaluate("e=>Array.from(e.querySelectorAll('input,textarea,select'),e=>[e.value,e.checked])")
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#error')).to_contain_text('busy')
     expect(panel.locator('#send-structure')).to_be_enabled()
@@ -3596,13 +3626,16 @@ def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, exte
     worker.evaluate('id=>autoApplySidebar(id,"open")',tab_id)
     page.frame_locator('#autoapply-sidebar iframe').locator('#autofill').wait_for()
     panel=next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#analysis-summary')).to_have_text('No application inputs are exposed yet. Check the entry action and page loading, then Analyze again.')
     page.locator('body').evaluate("e=>e.insertAdjacentHTML('afterbegin','<form><label>Full name<input value=synthetic></label></form>')")
     expect(panel.locator('#page-analysis')).to_be_hidden()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#analysis-summary')).to_have_text('Filled 0 \u00b7 0 need attention')
     worker.evaluate("()=>{globalThis.analysisFetch=fetch;globalThis.fetch=async(url,...args)=>{if(String(url).endsWith('/ext/snapshot'))await new Promise(r=>globalThis.releaseAnalysis=r);return analysisFetch(url,...args);};}")
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#send-structure')).to_be_disabled()
     worker.evaluate("async()=>{for(let i=0;i<600 && !globalThis.releaseAnalysis;i++)await new Promise(r=>setTimeout(r,10))}")
@@ -3612,6 +3645,7 @@ def test_t060_analysis_empty_allfilled_and_stale_response(loaded_extension, exte
     expect(panel.locator('#page-analysis')).to_be_hidden()
     assert all(path not in {'/ext/applied','/ext/answers','/ext/remember'} for path,_,_ in requests)
     worker.evaluate("()=>{globalThis.fetch=async(url,...args)=>String(url).endsWith('/ext/snapshot')?{ok:true,status:200,json:async()=>({ok:true,filename:'legacy.json'})}:analysisFetch(url,...args)}")
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#error')).to_contain_text('requires the updated local dashboard')
     expect(panel.locator('#page-analysis')).to_be_hidden()
@@ -3649,11 +3683,14 @@ def test_t063_analyze_alone_recovers_failed_capture_widget(loaded_extension, ext
     expect(panel.locator('#auto-advance')).to_be_enabled()
     panel.locator('#auto-advance').check()
     expect(panel.locator('#auto-send-structure')).to_be_enabled()
+    select_analyze(panel)
     panel.locator('#auto-send-structure').uncheck()
+    select_analyze(panel)
     panel.locator('#auto-send-structure').check()
     expect(panel.locator('#auto-send-structure')).to_be_enabled()
     assert not any(path=='/ext/answers' for path,_,_ in requests)
     expect(page.locator('#full')).to_be_empty()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=30000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 6')
@@ -3683,6 +3720,7 @@ def test_t063_analyze_alone_recovers_failed_capture_widget(loaded_extension, ext
     serialized = json.dumps(payload)+json.dumps(saved)
     assert all(secret not in serialized for secret in ['PRIVATE_MANUAL','Fixture Student','student@example.test','87423','87467'])
     assert not any(path in {'/ext/profile-sections','/ext/write','/ext/cover-letter','/ext/applied','/ext/remember','/ext/chat','/ext/match'} for path,_,_ in requests)
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=15000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
@@ -3712,6 +3750,7 @@ def test_t063_analyze_reconciles_existing_autofill_pending_and_counts(loaded_ext
     expect(panel.locator('#needs-input .prompt').filter(has_text='Country')).to_have_count(1)
     expect(page.locator('#country')).to_have_value('')
     for attempt in range(2):
+        select_analyze(panel)
         panel.locator('#send-structure').click()
         expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
         expect(page.locator('#country')).to_have_value('us')
@@ -3757,6 +3796,7 @@ def test_t063_reconciliation_rechecks_user_edit_during_report_read(loaded_extens
         }return result;};
       globalThis.fetch=async(url,...args)=>{const response=await pendingFetch(url,...args);
         if(String(url).endsWith('/ext/snapshot'))hold=true;return response;};}''')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     assert worker.evaluate('''async()=>{for(let i=0;i<1000&&!globalThis.releaseRepairReport;i++)await new Promise(r=>setTimeout(r,10));return Boolean(globalThis.releaseRepairReport)}''')
     expect(page.locator('#country')).to_have_value('us')
@@ -3780,6 +3820,7 @@ def t063_answers_pending(worker):
 def test_t063_duplicate_and_busy_mutation_exclusion(loaded_extension, extension_server):
     page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
     t063_hold_answers(worker)
+    select_analyze(panel)
     panel.locator('#send-structure').evaluate('e=>{e.click();e.click()}')
     expect(panel.locator('#send-structure')).to_have_attribute('aria-busy','true')
     assert t063_answers_pending(worker) == 1
@@ -3809,6 +3850,7 @@ def test_t063_duplicate_and_busy_mutation_exclusion(loaded_extension, extension_
 def test_t063_delayed_answer_stale_document_step_and_user_edit(loaded_extension, extension_server, change):
     page, worker, tab_id, panel, requests = t063_page(loaded_extension, extension_server)
     t063_hold_answers(worker)
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     assert t063_answers_pending(worker) == 1
     if change == 'document':
@@ -3836,6 +3878,7 @@ def test_t063_delayed_answer_stale_document_step_and_user_edit(loaded_extension,
         expect(page.locator('#consent')).not_to_be_checked()
         expect(page.locator('#country')).to_have_value('')
         assert not any(path=='/ext/snapshot' for path,_,_ in requests)
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     if change == 'edit':
@@ -3852,6 +3895,7 @@ def test_t063_partial_progress_survives_failed_retry(loaded_extension, extension
     worker.evaluate('''()=>{globalThis.repairFetch=fetch;let calls=0;globalThis.fetch=(url,...args)=>{
       if(String(url).endsWith('/ext/answers')&&++calls>=2)return Promise.reject(new TypeError('fixture offline'));
       return repairFetch(url,...args);};}''')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')
@@ -3877,6 +3921,7 @@ def test_t063_iframe_bound_repair_after_sidebar_reopens(loaded_extension, extens
     worker.evaluate('id=>autoApplySidebar(id,"open")', tab_id)
     other=loaded_extension[0].new_page()
     other.goto(extension_server[0]+'/job.html')
+    select_analyze(page.frame_locator('#autoapply-sidebar iframe'))
     page.frame_locator('#autoapply-sidebar iframe').locator('#send-structure').click()
     panel=page.frame_locator('#autoapply-sidebar iframe')
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
@@ -3893,6 +3938,7 @@ def test_t063_manual_unchecked_answer_is_preserved(loaded_extension, extension_s
     page, worker, tab_id, panel, requests=t063_page(loaded_extension, extension_server)
     page.locator('#consent').check()
     page.locator('#consent').uncheck()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=15000)
     expect(page.locator('#consent')).not_to_be_checked()
@@ -3923,6 +3969,7 @@ def test_t063_analyze_waits_for_autofill_final_async_guard(loaded_extension, ext
     worker.evaluate('()=>{globalThis.fetch=finalFetch;releaseFinalFill()}')
     worker.evaluate('()=>finalFill')
     assert page.evaluate('actions')==[]
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=10000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 0')
@@ -3937,6 +3984,7 @@ def test_t063_failed_checkbox_does_not_activate_adjacent_navigation(loaded_exten
       const next=document.createElement('button');next.type='button';next.textContent='Next';
       next.onclick=()=>actions.push('unsafe checkbox fallback');e.after(next);
     }''')
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=20000)
     expect(panel.locator('#analysis-summary')).to_contain_text('Filled 4')

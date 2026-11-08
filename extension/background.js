@@ -422,7 +422,7 @@ async function advancePreference(value) {
   return {enabled: Boolean(autoAdvanceProfiles[key])};
 }
 async function clickNext(result, automatic = false) {
-  if (automatic && (cancelledTabs.has(result.tabId) || manualActionTabs.has(result.tabId) || result.fillStage)) return false;
+  if (automatic && (cancelledTabs.has(result.tabId) || manualActionTabs.has(result.tabId) || analysisTasks.has(result.tabId) || result.fillStage)) return false;
   const scanned = await scan(result.tabId);
   if (automatic && cancelledTabs.has(result.tabId)) return false;
   if (automatic && (result.pending.length || result.writing.length || result.summary.errors.length ||
@@ -465,8 +465,8 @@ async function matchAndFill(result, prepare = false) {
     const fields = result.fields.filter(field=>(result.fillStage!=='required' || field.required || field.kind==='file' && /resume|\bcv\b/i.test(field.label)) &&
       (result.fillStage!=='optional' || !field.required) && !/cover.*letter/i.test(field.label) &&
       (!field.section_managed || !field.answered && (field.date_context || field.section_entry || /degree/i.test(field.label)))).map(field => field.options_partial ? {...field, options: []} : field);
-    const response = await api("/ext/answers", {...context(result), url: result.url, fields, allow_ai:false});
-    result.answerRevision=[response.profile_revision,response.facts_revision];
+    const response = fields.length ? await api("/ext/answers", {...context(result), url: result.url, fields, allow_ai:false}) : {answers:[]};
+    if(fields.length)result.answerRevision=[response.profile_revision,response.facts_revision];
     let {answers}=response;
     result.skippedAnswers ||= [];
     for(const answer of answers.filter(a=>a.source==='user_skip')){
@@ -828,7 +828,7 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     result.fillStage='required';
     await matchAndFill(result, true);
     await rescanRevealed(result);
-    result.progress = result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
+    result.progress = result.coverQuestions?.length ? "Answer the cover letter questions below." : "Required answers filled. Continuing remaining stages...";
   } catch (error) { result.error = error.message; result.traceError={error:error.message,stack:error.stack}; }
   finally {
     if(traceTarget)await chrome.scripting.executeScript({target:traceTarget,func:error=>{const api=globalThis.autoApplyContent;if(error)api?.trace("autofill","error",null,error);return api?.endTrace();},args:[result.traceError || null]}).catch(()=>{});
@@ -917,6 +917,33 @@ function validChatAction(action,context){
     action.text.length<=12000 && (field.max_length==null || action.text.length<=field.max_length);
 }
 let skillsRunning=false;
+async function waitForAnalysisWrites(tab, writes) {
+  const owner=activeResults.get(tab.id),epoch=runEpoch;
+  const documents=Object.values(owner?.pageIdentities || {}).map(frame=>frame.documentId);
+  const attribution=JSON.stringify(owner?.matched);
+  const runBinding=run=>JSON.stringify([run?.active,run?.paused,run?.tabId,run?.current?.application_id,run?.current?.run_id]);
+  const initialRun=runBinding((await chrome.storage.session.get('chromeRun')).chromeRun);
+  async function check(documentsToo=false) {
+    if(!owner || owner.url!==tab.url || !documents.length || staleRun(epoch) || cancelledTabs.has(tab.id) || closedTabs.has(tab.id) ||
+       activeResults.get(tab.id)!==owner || JSON.stringify(owner.matched)!==attribution ||
+       (await chrome.tabs.get(tab.id)).url!==tab.url || runBinding((await chrome.storage.session.get('chromeRun')).chromeRun)!==initialRun)
+      throw Error('Application changed while waiting. Analyze page again.');
+    if(documentsToo){
+      const frames=await chrome.scripting.executeScript({target:{tabId:tab.id,documentIds:documents},func:()=>true});
+      if(frames.length!==documents.length || frames.some(frame=>!frame.result || !documents.includes(frame.documentId)))
+        throw Error('Application document changed while waiting. Analyze page again.');
+    }
+  }
+  await check(true);
+  await progress(owner,'Analyze requested. Waiting for current page writes to settle...');
+  const end=Date.now()+10000;
+  while(writingTasks.get(tab.id)===writes){
+    await check();
+    if(Date.now()>=end)throw Error('Writing is still running. Finish or cancel writing, then retry Analyze page.');
+    await delay(100);
+  }
+  await check(true);
+}
 async function action(message) {
   if(message.type==='answer-context-changed'){
     if(!Array.isArray(message.revision) || message.revision.length!==2 || typeof message.revision[0]!=='string' || !Number.isInteger(message.revision[1]))return {};
@@ -1007,19 +1034,23 @@ async function action(message) {
     const tab=message.tabId?await chrome.tabs.get(message.tabId):(await chrome.tabs.query({active:true,currentWindow:true}))[0];
     if(!tab?.id || !/^https?:/.test(tab.url || ''))throw Error('Open an application page first.');
     if(analysisTasks.has(tab.id))return analysisTasks.get(tab.id);
-    if(running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id) || manualActionTabs.size ||
-       activeResults.get(tab.id)?.busy || activeResults.get(tab.id)?.coverBusy || activeResults.get(tab.id)?.skillsBusy ||
-       activeResults.get(tab.id)?.writing?.length && !activeResults.get(tab.id)?.writingSettled)
+    const writes=!message.automatic && writingTasks.get(tab.id);
+    const current=activeResults.get(tab.id);
+    if(running || autofillTasks || skillsRunning || analysisBlockers || manualActionTabs.size ||
+       !writes && (writingTasks.has(tab.id) || current?.busy || current?.coverBusy || current?.skillsBusy || current?.writing?.length && !current.writingSettled))
       throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
     // Stop the idle wait without cancellation or credential invalidation. The
     // token also retires a tick already awaiting a scan; accountQueue drains
     // an in-flight lookup before this explicit action can prepare anything.
     clearTimeout(formWaits.get(tab.id));formWaits.delete(tab.id);formWaitTokens.delete(tab.id);pendingSteps.delete(tab.id);
     const task=(async()=>{
+      // Keep this explicit intent reserved while the owned native tail drains.
+      // No second writer starts, and provider work has a bounded wait.
+      if(writes)await waitForAnalysisWrites(tab,writes);
       // Reserve Analyze while a short run-status poll drains. A status request
       // is not form work and should not randomly force a manual retry.
       for(let wait=0;batchBusy && wait<20;wait++)await delay(50);
-      if(batchBusy || running || autofillTasks || skillsRunning || analysisBlockers)
+      if(batchBusy || running || autofillTasks || skillsRunning || analysisBlockers || writingTasks.has(tab.id))
         throw Error('Application is busy. Wait for filling or writing to finish, then retry Analyze page.');
       const epoch=runEpoch;
       let current=activeResults.get(tab.id),application_id=current?.url===tab.url?current.matched?.application_id:undefined,

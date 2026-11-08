@@ -64,6 +64,12 @@ async function edits(){
     }}}};
   const start=content.indexOf('  const editTimers='),end=content.indexOf("  document.addEventListener('click'",start);
   const api=Function('env','with(env){'+content.slice(start,end)+';return {captureEdit,saveEdit,flushEdits,learn,dirtyAnswers,observedValues};}')(env);
+  api.observedValues.set('one',JSON.stringify(element.value));
+  for(const type of ['blur','focusout','change'])api.learn({isTrusted:true,type,target:element});
+  await api.flushEdits();
+  assert.equal(env.repairEdited.has(element),false,'Programmatic focus and unchanged trusted blur must not protect the widget');
+  assert.equal(api.dirtyAnswers.size,0);assert.equal(writes.length,0);
+  api.observedValues.delete('one');
   api.captureEdit(record);const saving=api.saveEdit('one');
   assert.equal(api.observedValues.has('one'),false,'No optimistic acknowledgment');
   element.value='middle';api.captureEdit(record);element.value='latest';api.captureEdit(record);
@@ -78,8 +84,60 @@ async function edits(){
   for(const value of [false,0,['A','B']]){element.value=value;api.captureEdit(record);await api.flushEdits();assert.deepEqual(writes.at(-1).value,value);}
   const count=writes.length;element.value='synthetic';api.learn({isTrusted:false,target:element});await pause(250);
   assert.equal(writes.length,count);
+  env.extensionFilling=1;element.value='genuine edit';
+  api.learn({isTrusted:true,type:'blur',target:element});
+  assert.equal(api.dirtyAnswers.size,0,'Extension work alone is not user intent');
+  listeners.beforeinput({isTrusted:true,target:element});
+  api.learn({isTrusted:true,type:'change',target:element});
+  assert.equal(env.repairEdited.has(element),true,'A genuine edit during filling wins per field');
+  await api.flushEdits();assert.equal(writes.at(-1).value,'genuine edit');
+  env.extensionFilling=0;
   element.value='stale';api.captureEdit(record);record.element={...element};
-  await assert.rejects(api.flushEdits(),/changed/);assert.equal(writes.length,count);
+  await assert.rejects(api.flushEdits(),/changed/);assert.equal(writes.length,count+1);
+}
+async function analysisWaits(){
+  const start=background.indexOf('async function waitForAnalysisWrites('),end=background.indexOf('async function action(',start);
+  for(const change of ['settle','cancel','navigation','document','run','owner','attribution','timeout']){
+    let clock=0,ticks=0,url='https://fixture.test/application',documentId='doc-1';
+    const owner={url,pageIdentities:{0:{documentId}},matched:{application_id:1,run_id:'run-1'}};
+    const writes={},writingTasks=new Map([[7,writes]]),activeResults=new Map([[7,owner]]),cancelledTabs=new Set();
+    const run={active:true,tabId:7,current:{application_id:1,run_id:'run-1'}};
+    const env={activeResults,writingTasks,cancelledTabs,closedTabs:new Set(),runEpoch:0,staleRun:()=>false,
+      Date:{now:()=>clock},progress:async(r,message)=>{r.progress=message;},
+      chrome:{storage:{session:{get:async()=>({chromeRun:run})}},tabs:{get:async()=>({url})},
+        scripting:{executeScript:async()=>[{documentId,result:true}]}},
+      delay:async ms=>{clock+=ms;if(++ticks!==2)return;
+        if(change==='settle')writingTasks.delete(7);
+        if(change==='cancel')cancelledTabs.add(7);
+        if(change==='navigation')url+='?step=2';
+        if(change==='document'){documentId='doc-2';writingTasks.delete(7);}
+        if(change==='run')run.current.run_id='other-run';
+        if(change==='owner')activeResults.set(7,{...owner});
+        if(change==='attribution')owner.matched.application_id=2;
+      }};
+    const wait=Function('env','with(env){'+background.slice(start,end)+';return waitForAnalysisWrites;}')(env);
+    if(change==='settle')await wait({id:7,url},writes);
+    else await assert.rejects(wait({id:7,url},writes),change==='timeout'?/still running/:/changed/);
+    assert.match(owner.progress,/Analyze requested/);
+    assert.ok(clock<=10000,'Provider waits are bounded');
+  }
+  const cs=background.indexOf('async function clickNext('),ce=background.indexOf('async function matchAndFill(',cs);
+  const click=Function('env','with(env){'+background.slice(cs,ce)+';return clickNext;}')({cancelledTabs:new Set(),manualActionTabs:new Set(),analysisTasks:new Map([[7,{}]]),scan:()=>{throw Error('Unexpected navigation');}});
+  assert.equal(await click({tabId:7},true),false,'Explicit Analyze reserves the page against auto-advance');
+}
+async function emptyMatching(){
+  const start=background.indexOf('async function matchAndFill('),end=background.indexOf('async function loadOptions(',start);
+  const requests=[],filled=[];
+  const env={runEpoch:0,cancelledTabs:new Set(),staleRun:()=>false,context:()=>({}),
+    api:async path=>{requests.push(path);assert.equal(path,'/ext/profile-sections');return {};},
+    chrome:{scripting:{executeScript:async()=>[{frameId:0,result:{fields:[],answers:[{key:'section',status:'RESOLVED',value:'Saved section answer'}],sections:[]}}]}},
+    fill:async(r,answers)=>filled.push(...answers)};
+  const match=Function('env','with(env){'+background.slice(start,end)+';return matchAndFill;}')(env);
+  const result={tabId:7,fillStage:'optional',fields:[{key:'0:email',kind:'email',label:'Email',required:true}],
+    pending:[],summary:{errors:[]},answerRevision:['profile',3]};
+  await match(result);assert.deepEqual(requests,[]);assert.deepEqual(result.answerRevision,['profile',3]);
+  result.fields=[];await match(result,true);
+  assert.deepEqual(requests,['/ext/profile-sections']);assert.equal(filled[0].key,'0:section','Prepared section answers still fill without a matching request');
 }
 async function cancellation(){
   const state={},order=[],activeResults=new Map(),cancelledTabs=new Set();
@@ -141,4 +199,4 @@ async function submission(){
   buttons=[node('Apply')];buttons[0].disabled=true;assert.equal(api.navigationState().kind,'none');
   buttons[0].disabled=false;account=true;assert.equal(api.navigationState().kind,'none');
 }
-Promise.resolve().then(panelEditors).then(edits).then(cancellation).then(submission).then(()=>process.stdout.write('T095 panel drafts/Skip refresh, edits/retries/bindings, required-cover-optional/cancel, and explicit Apply/native validation/no-auto-submit passed\n')).catch(error=>{console.error(error);process.exitCode=1;});
+Promise.resolve().then(panelEditors).then(edits).then(analysisWaits).then(emptyMatching).then(cancellation).then(submission).then(()=>process.stdout.write('T095/T096 drafts, changed-only edits/retries/bindings, bounded Analyze waits, empty matching, required-cover-optional/cancel, and explicit Apply/native validation/no-auto-submit passed\n')).catch(error=>{console.error(error);process.exitCode=1;});

@@ -18,7 +18,7 @@ from playwright.sync_api import expect
 from autoapply.dashboard import Dashboard, DashboardHandler, DashboardServer
 from autoapply.extension_api import resolve_answers
 from autoapply.repair_queue import evidence
-from test_extension import loaded_extension
+from test_extension import loaded_extension, select_analyze
 from test_dashboard import dashboard, http_dashboard, request, offline_descriptions
 from test_extension_api import ext, analysis_payload
 
@@ -98,7 +98,7 @@ def open_fixture(loaded_extension, backend, *, broken=False):
     page.goto(URL)
     tab = worker.evaluate('async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id', URL)
     worker.evaluate('id=>autoApplySidebar(id,"open")', tab)
-    page.frame_locator('#autoapply-sidebar iframe').locator('#send-structure').wait_for()
+    select_analyze(page.frame_locator('#autoapply-sidebar iframe'))
     panel = next(f for f in page.frames if f.url.startswith(f'chrome-extension://{extension_id}/sidepanel.html'))
     return page, worker, tab, panel
 
@@ -120,6 +120,7 @@ def test_analyze_known_lever_fields_resume_and_bounded_busy_recovery(loaded_exte
     page, worker, tab, panel = open_fixture(loaded_extension, backend)
     service, _, state, _ = backend
     state['busy'] = 2
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     expect(page.locator('[name=name]')).to_have_value('Test Student')
@@ -151,6 +152,7 @@ def test_delayed_analysis_preserves_user_and_run_guards(loaded_extension, backen
     state['hold'] = threading.Event()
     if change == 'auth':
         page.locator('form').evaluate("e=>e.innerHTML='<label>Email<input type=email></label><label>Password<input type=password></label><button onclick=actions.push(1)>Sign in</button>'")
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     if change != 'auth':
         for _ in range(100):
@@ -186,6 +188,7 @@ def test_structural_repair_parks_owned_run_once_and_keeps_page(loaded_extension,
     page, worker, tab, panel = open_fixture(loaded_extension, backend, broken=True)
     service, _, state, ids = backend
     own_run(worker, backend, tab)
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#send-structure')).to_be_enabled(timeout=25000)
     worker.evaluate('()=>autoApplyRunTick()')
@@ -294,6 +297,7 @@ def test_late_parking_ack_cannot_advance_changed_or_cancelled_run(loaded_extensi
     service,_,state,_=backend
     own_run(worker,backend,tab)
     state['park_hold']=threading.Event()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     for _ in range(150):
         if state['park_entered'].is_set():break
@@ -322,6 +326,7 @@ def test_analyze_resume_association_and_occupied_upload_guards(loaded_extension,
     elif guard=='hidden':upload.evaluate('e=>e.parentElement.hidden=true')
     elif guard=='ambiguous':page.locator('.application-label').first.evaluate("e=>e.textContent='Supporting document'")
     else:upload.set_input_files({'name':'manual-fixture.pdf','mimeType':'application/pdf','buffer':b'%PDF-1.4 synthetic manual'})
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=20000)
     expect(page.locator('[name=name]')).to_have_value('Test Student')
@@ -337,6 +342,7 @@ def test_exhausted_transport_is_truthful_and_does_not_veto_structural_queue(load
     page,worker,tab,panel=open_fixture(loaded_extension,backend,broken=broken)
     service,_,state,_=backend
     state['busy']=9
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed',timeout=15000)
     assert state['answers']==3
@@ -358,6 +364,11 @@ def test_exhausted_transport_parks_review_error_run_unless_user_paused(loaded_ex
         if request.url.startswith('https://jobs.lever.co/') and request.method not in {'GET', 'HEAD'} else None)
     service, _, state, _ = backend
     current = own_run(worker, backend, tab)
+    # Fault injection belongs to this next run, after the prior optional tail.
+    worker.evaluate('''async id=>{for(let i=0;i<200;i++){
+      const r=(await chrome.storage.session.get('tabResults')).tabResults?.[id];
+      if(r?.writingSettled)return;await new Promise(resolve=>setTimeout(resolve,50));
+    }throw Error('Owned autofill stages did not settle');}''', tab)
     # Exercise the real existing-run error path rather than inventing pause state.
     state['busy'] = 1
     failed = worker.evaluate('v=>autoApplyAutofill(v.tab,v.app)', {'tab':tab,'app':current})
@@ -372,6 +383,7 @@ def test_exhausted_transport_parks_review_error_run_unless_user_paused(loaded_ex
     state['busy'] = 9
     state['posts'].clear()
     state['replies'].clear()
+    select_analyze(panel)
     panel.locator('#send-structure').click()
     expect(panel.locator('#snapshot-status')).to_have_text('Analyzed', timeout=20000)
     worker.evaluate('()=>autoApplyRunTick()')

@@ -7,7 +7,7 @@ const tabId=Number(new URL(location.href).searchParams.get('tabId'))||undefined;
 function selectTab(name){
   for(const tab of document.querySelectorAll('.tabs:not(.subtabs) [role="tab"]')){const selected=tab.id==='tab-'+name;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;element(tab.getAttribute('aria-controls')).hidden=!selected;}
 }
-for(const name of ['fill','answers','chat'])element('tab-'+name).onclick=()=>selectTab(name);
+for(const name of ['fill','answers','chat','analyze'])element('tab-'+name).onclick=()=>selectTab(name);
 function selectChatTab(name){for(const tab of document.querySelectorAll('.subtabs [role="tab"]')){const selected=tab.id==='subtab-'+name;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;element(tab.getAttribute('aria-controls')).hidden=!selected;}}
 for(const name of ['chat','helper'])element('subtab-'+name).onclick=()=>selectChatTab(name);
 for(const tab of document.querySelectorAll('[role="tab"]'))tab.onkeydown=event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const tabs=Array.from(tab.parentElement.querySelectorAll('[role="tab"]'));const index=event.key==='Home'?0:event.key==='End'?tabs.length-1:(tabs.indexOf(tab)+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;tabs[index].click();tabs[index].focus();};
@@ -263,7 +263,7 @@ function renderAnalysis(value){
   element('page-analysis').hidden=false;
   if(value.repair)repairStatus(value.repair);
 }
-chrome.runtime.onMessage.addListener(message=>{if(message.type==='analysis-invalidated' && message.tabId===(tabId || analysisBinding?.tabId || result?.tabId)){clearAnalysis();clearSnapshotStatus();}});
+chrome.runtime.onMessage.addListener(message=>{if(message.type==='analysis-invalidated' && message.tabId===(tabId || analysisBinding?.tabId || result?.tabId)){clearAnalysis();clearSnapshotStatus();element('automatic-analysis').hidden=true;}});
 const snapshotLedger=await chrome.storage.session.get(['snapshotFeedbackSeen','snapshotFeedbackRecovered']);
 const snapshotSeen=new Set(snapshotLedger.snapshotFeedbackSeen || []), snapshotRecovered=new Set(snapshotLedger.snapshotFeedbackRecovered || []);
 const snapshotKey=value=>JSON.stringify([value?.tabId,value?.url,value?.matched?.application_id ?? value?.application_id]);
@@ -295,11 +295,22 @@ function renderSnapshotFeedback(value){
   }
   if(snapshotOwner==='manual' && snapshotError)element('error').textContent=snapshotError;
 }
+function renderAutomaticAnalysis(value){
+  const visible=!value.stalePage && value.recoveryPending!==undefined;
+  element('automatic-analysis').hidden=!visible;
+  if(!visible)return;
+  element('automatic-analysis-status').textContent=value.progress || (value.recoveryPending?'Matching unanswered questions...':'Automatic recovery finished. Review the page.');
+  const findings=element('automatic-analysis-findings');findings.replaceChildren();
+  for(const field of (value.pending || []).slice(0,50)){
+    const item=node('li',''),label=node('strong',field.label);
+    item.append(label,node('p',field.reason || (field.reason_code==='needs_fact'?'Needs an actual saved fact.':'Review this control.')));findings.append(item);
+  }
+}
 function renderFillButton(value) {
   const button=element('autofill');
-  button.textContent=value?.busy || mainBusy ? 'Filling…' : 'Autofill';
+  button.textContent=value?.busy || value?.fillStage && !value.writingSettled && !value.error || mainBusy ? 'Filling…' : 'Autofill';
   const settled=value?.summary && !value.stalePage && !value.busy && !mainBusy && !value.skillsBusy && !value.coverBusy &&
-    (!value.writing?.length || value.writingSettled) && (!value.waiting || value.sign_in) && !value.error;
+    (!value.fillStage || value.writingSettled) && (!value.writing?.length || value.writingSettled) && (!value.waiting || value.sign_in) && !value.error;
   if(settled){const count=document.createElement('span');count.className='fill-count';const n=value.summary.filled || 0;count.textContent=n+' field'+(n===1?'':'s')+' filled';button.append(count);}
 }
 function render(value) {
@@ -308,7 +319,7 @@ function render(value) {
     !(result?.completed || []).some(old=>old.key===answer.key && JSON.stringify(old.value)===JSON.stringify(answer.value)));
   result = value;
   const editing=answerEditorsActive();
-  if(newlyVerified && !editing)selectTab('answers');
+  if(newlyVerified && !editing && element('tab-analyze').getAttribute('aria-selected')!=='true')selectTab('answers');
   loadChat();
   if(value.skills_available!==undefined) showSkills(value.skills_available);
   element("error").textContent = dashboardStarter.handlesConnectionError(value.error) ? '' : value.error || "";
@@ -355,6 +366,7 @@ function render(value) {
   element("applied-status").hidden=!value.applied;
   renderFillButton(value);
   renderSnapshotFeedback(value);
+  renderAutomaticAnalysis(value);
   if(value.saved){element("saved-status").textContent=value.saved;clearTimeout(savedTimer);savedTimer=setTimeout(()=>element("saved-status").textContent="",2000);}
   element("needs-writing").replaceChildren();
   // Expose generated PDF without persisting blob URLs across panel instances.

@@ -10,7 +10,7 @@ from playwright.sync_api import expect
 from autoapply.extension_api import resolve_answers
 from autoapply.dashboard_settings import SettingsRejected
 from test_dashboard import dashboard, offline_descriptions
-from test_extension import loaded_extension
+from test_extension import loaded_extension, select_analyze
 from test_t077_analyze import backend, URL
 from test_t085_answer_repair import repair_profile, field, proposal, save_profile
 
@@ -90,7 +90,7 @@ def open_form(loaded_extension, backend, automatic=False, html=None):
 
 def analyze(page, worker, tab):
     worker.evaluate('id=>autoApplySidebar(id,"open")', tab)
-    page.frame_locator('#autoapply-sidebar iframe').locator('#send-structure').wait_for()
+    select_analyze(page.frame_locator('#autoapply-sidebar iframe'))
     panel = next(f for f in page.frames if '/sidepanel.html' in f.url)
     return panel.evaluate('id=>chrome.runtime.sendMessage({type:"page-snapshot",tabId:id})', tab)
 
@@ -125,6 +125,10 @@ def test_fast_fill_then_one_grounded_batch_exact_options(loaded_extension, backe
         return {'answers':[proposal(f['key'], 'Python (programming)' if f['options'] else 'Python') for f in request['fields']]}
     monkeypatch.setattr(service, 'run_writing', writer)
     page, worker, tab, isolated = open_form(loaded_extension, backend)
+    isolated('scan', {'repair': True})
+    # Native focus()/blur() emits trusted events without a changed answer.
+    page.locator('#tools').evaluate('e=>{e.focus();e.blur();}')
+    assert not [p for path,p in state['posts'] if path=='/ext/remember']
     response = analyze(page, worker, tab)
     assert response.get('ok'), response
     expect(page.locator('#name')).to_have_value('Test Student')
@@ -322,7 +326,7 @@ def test_optional_missing_fact_stays_pending_and_intentional_skip_is_quiet(loade
 def test_automatic_shape_signal_drains_after_inflight_analysis(loaded_extension, backend):
     page,worker,tab,_=open_form(loaded_extension,backend)
     worker.evaluate('id=>autoApplySidebar(id,"open")',tab)
-    page.frame_locator('#autoapply-sidebar iframe').locator('#send-structure').wait_for()
+    select_analyze(page.frame_locator('#autoapply-sidebar iframe'))
     panel=next(f for f in page.frames if '/sidepanel.html' in f.url)
     state=backend[2]
     state['hold']=threading.Event()

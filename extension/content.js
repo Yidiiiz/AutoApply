@@ -213,8 +213,10 @@
     if(!record || !boundRecord(record))return;
     const value=valueOf(record),encoded=JSON.stringify(value);
     if(JSON.stringify(globalThis.autoApplyCredentials?.redact(value) ?? value)!==encoded)return;
-    if(observedValues.get(record.field.key)===encoded && !dirtyAnswers.has(record.field.key))return;
+    const draft=dirtyAnswers.get(record.field.key);
+    if(draft?.encoded===encoded || observedValues.get(record.field.key)===encoded && !draft)return;
     dirtyAnswers.set(record.field.key,{record,value,encoded});
+    return true;
   }
   function learn(event) {
     if(!event.isTrusted || repairSynthetic || globalThis.autoApplyCredentials?.active()) return;
@@ -222,8 +224,10 @@
     const record=Array.from(records.values()).find(r=>r.members.includes(target)||r.element.contains(target));
     if(!record || extensionFilling && !userControls.has(target) || globalThis.autoApplyCredentials?.sensitive(target) ||
        ['file','password','hidden'].includes(record.field.kind)||robotOnly(target)||!interactiveVisible(record.element)) return;
+    // Focus changes from option discovery also produce trusted blur events.
+    // Protect and persist only a changed value, after the binding/privacy checks.
+    if(!captureEdit(record))return;
     for(const member of record.members)repairEdited.add(member);
-    captureEdit(record);
     clearTimeout(editTimers.get(record.field.key));
     editTimers.set(record.field.key,setTimeout(()=>{
       editTimers.delete(record.field.key);captureEdit(record);
