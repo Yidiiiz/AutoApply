@@ -12,6 +12,7 @@ from .models import Answer, AnswerResolution, Question, now
 from .profile_rules import parse_profile_date
 
 from .concepts import LABELS, question_text, concept
+from . import question_rules
 
 
 def scope_for(label, app):
@@ -235,6 +236,8 @@ def standard_answer(q, app, profile):
 
 
 def validate_answer(q, value):
+    if q.kind == 'checkbox' and len(q.options) <= 1 and type(value) is bool:
+        return
     if q.kind == "multiselect":
         if not isinstance(value, list) or not value and q.required:
             raise ValueError("Select one or more exact options as a JSON list")
@@ -625,6 +628,25 @@ class AnswerResolver:
             return None
         if policy == 'DO_NOT_ANSWER':
             return None
+        if question_rules.skipped(self._settings, q, descriptor, app):
+            return None
+        # Explicit writing edits are exact posting answers, including textareas
+        # that happen to carry a canonical fact label. They never alter that fact.
+        if q.kind == 'textarea':
+            row = self._memory.get((normalize(q.label), q.scope))
+            data = json.loads(row.get('provenance') or '{}') if row else {}
+            provenance = data.get('provenance', {})
+            if (row and row.get('source') == 'USER_PROVIDED'
+                    and row.get('question_signature') == descriptor.signature
+                    and provenance.get('explicit_extension_edit') is True
+                    and provenance.get('canonical_profile_revision') == self._revision[0]):
+                value = json.loads(row['answer'])
+                try:
+                    validate_answer(q, value)
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    return Answer(value, 'verified_memory', provenance={'memory_id': row['id']})
         if policy != 'REQUIRE_USER':
             from .dropdowns import ordered_locations, ORDERED_LOCATIONS_SETTING
             handled, located = job_location_answer(q, app, profile, ordered_locations(
@@ -702,7 +724,7 @@ class AnswerResolver:
         # An explicit canonical personal site wins stale generic Website memory
         # and the legacy portfolio alias. GitHub/LinkedIn remain separate facts.
         if policy != 'REQUIRE_USER' and mapped_key in {'links.personal_website', 'links.portfolio'} and q.kind in {'text', 'url', 'textarea'}:
-            website = fact(self.snapshot.original_facts or profile, 'links.personal_website')
+            website = fact(profile, 'links.personal_website')
             if website:
                 return Answer(website, 'profile:links.personal_website', evidence=['links.personal_website'])
         row = self._memory.get((normalize(q.label), q.scope))

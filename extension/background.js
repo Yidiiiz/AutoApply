@@ -226,6 +226,8 @@ async function fill(result, values, files = {}, repairBindings) {
         return {filled:done.filled,completed:done.completed,pending,writing:[],skipped:0,errors:[],fill_ms:0};
       }, args: [local, files,binding?.token ?? null]});
     if(!frame || documentId && frame.documentId!==documentId)throw Error('Application changed. Run autofill again.');
+    if(local.some(answer=>answer.cover_token && coverRequests.get(result.tabId)?.token!==answer.cover_token ||
+        answer.cover_token && coverRequests.get(result.tabId)?.cancelled))return;
     const summary = frame.result;
     result.timings.fill_ms = (result.timings.fill_ms || 0) + summary.fill_ms;
     result.summary.filled += summary.filled;
@@ -244,14 +246,84 @@ async function fill(result, values, files = {}, repairBindings) {
 
 async function progress(result, text) { result.progress = text; await report(result); }
 
-async function coverLetter(result, answers) {
+const answerWrites=new Map();
+function serializeAnswer(tabId,key,operation){
+  const id=tabId+':'+key,prior=answerWrites.get(id);
+  const task=(prior || Promise.resolve()).catch(()=>{}).then(operation);
+  answerWrites.set(id,task);
+  task.finally(()=>{if(answerWrites.get(id)===task)answerWrites.delete(id);}).catch(()=>{});
+  return task;
+}
+async function boundField(result,field,operation='fieldState'){
+  const frameId=Number(field.key.split(':')[0]),key=field.key.slice(field.key.indexOf(':')+1);
+  const documentId=result.pageIdentities?.[frameId]?.documentId;
+  if(!documentId || (await chrome.tabs.get(result.tabId)).url!==result.url)throw Error('Application changed. Run Autofill again.');
+  const [frame]=await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[documentId]},
+    func:(key,expected,operation)=>globalThis.autoApplyContent[operation](key,expected),
+    args:[key,{url:result.url,label:field.label,control_identity:field.control_identity},operation]});
+  if(frame?.documentId!==documentId)throw Error('Question changed. Run Autofill again.');
+  return frame.result;
+}
+async function rememberBound(result,field,value){
+  const state=await boundField(result,field);
+  const equal=JSON.stringify(state.value)===JSON.stringify(value) || field.kind==='number' && String(state.value)===String(value);
+  if(!equal || !state.valid && value!==false)throw Error('The page did not retain a valid answer. Your draft is kept; review the question.');
+  const saved=await api('/ext/remember',{...field,...context(result),value});
+  if(!saved?.ok)throw Error('Answer was not saved. Your draft is kept.');
+  const after=await boundField(result,field);
+  if(JSON.stringify(after.value)!==JSON.stringify(state.value))throw Error('Answer changed while saving. Save the latest edit.');
+  result.skippedAnswers=(result.skippedAnswers || []).filter(f=>f.key!==field.key);
+  result.saved='Saved';result.error='';return {ok:true};
+}
+
+const coverRequests=new Map();
+const coverBinding=result=>JSON.stringify([result.url,result.pageIdentities?.[0]?.documentId]);
+async function cancelCover(result,reason='Cancelled by you'){
+  const request=coverRequests.get(result.tabId);
+  if(request){request.cancelled=true;request.cancel();}
+  if(request)await chrome.scripting.executeScript({target:{tabId:result.tabId,documentIds:[result.pageIdentities[0].documentId]},
+    func:token=>globalThis.autoApplyContent?.cancelCoverUpload(token),args:[request.token]}).catch(()=>{});
+  const {coverCancellations={}}=await chrome.storage.session.get('coverCancellations');
+  coverCancellations[result.tabId]=coverBinding(result);
+  await chrome.storage.session.set({coverCancellations});
+  result.coverBusy=false;result.coverProgress=reason+'. Optional answers continue.';
+  return report(result);
+}
+async function coverLetter(result, answers, retry=false) {
   if (cancelledTabs.has(result.tabId)) return;
+  let fields=result.fields.filter(f=>/cover.*letter/i.test(f.label) && !f.answered && ['file','textarea'].includes(f.kind));
+  const available=[];
+  for(const field of fields){const state=await boundField(result,field);if(!state.value)available.push(field);}
+  fields=available;
+  if(fields.length){
+    const preferences=await api('/ext/answers',{...context(result),fields,allow_ai:false});
+    fields=fields.filter(f=>!preferences.answers.some(a=>a.key===f.key && (a.source==='user_skip' || a.reason_code==='optional_skip')));
+  }
+  if(!fields.length){result.coverProgress='No empty cover letter field on this page.';return;}
+  const {coverCancellations={}}=await chrome.storage.session.get('coverCancellations');
+  if(!retry && coverCancellations[result.tabId]===coverBinding(result))return;
+  if(retry){delete coverCancellations[result.tabId];await chrome.storage.session.set({coverCancellations});}
+  const previous=coverRequests.get(result.tabId);if(previous){previous.cancelled=true;previous.cancel();}
+  const request={token:crypto.randomUUID(),binding:coverBinding(result),cancelled:false};
+  const cancelled=new Promise(resolve=>request.cancel=()=>resolve(null));
+  coverRequests.set(result.tabId,request);
+  const current=async()=>!request.cancelled && coverRequests.get(result.tabId)===request &&
+    !cancelledTabs.has(result.tabId) && activeResults.get(result.tabId)===result &&
+    coverBinding(result)===request.binding && (await chrome.tabs.get(result.tabId)).url===result.url;
   result.coverBusy = true;
   result.coverProgress = "Writing cover letter...";
   await report(result);
   if (cancelledTabs.has(result.tabId)) return;
-  const file = await api("/ext/cover-letter", {...context(result), ...(answers ? {answers} : {})});
-  if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
+  try {
+  const textOnly=fields.every(f=>f.kind==='textarea');
+  const file = await Promise.race([textOnly ? api('/ext/write',{...context(result),question:fields[0].label,max_length:fields[0].max_length}) :
+    api("/ext/cover-letter", {...context(result), ...(answers ? {answers} : {})}),cancelled]);
+  if (!file || !await current()) return;
+  if(textOnly){
+    await fill(result,[{key:fields[0].key,status:'RESOLVED',value:file.answer,source:'AI',cover_token:request.token}]);
+    if(await current())result.coverProgress=(await boundField(result,fields[0])).value===file.answer?'Cover letter answer filled.':'Your existing cover letter was kept.';
+    return;
+  }
   if (file.questions) {
     result.coverQuestions = file.questions;
     result.coverAnswers = answers || [];
@@ -259,10 +331,12 @@ async function coverLetter(result, answers) {
   } else {
     result.coverQuestions = [];
     result.coverFile = file;
-    const fields = result.fields.filter(field => field.kind === "file" && /cover/i.test(field.label) && !field.answered);
-    if (fields.length) await fill(result, fields.map(field => ({key: field.key, status: "FILE", value: "cover_letter"})), {cover_letter: file});
+    const uploads=fields.filter(f=>f.kind==='file');
+    if (uploads.length && await current()) await fill(result, uploads.map(field => ({key: field.key, status: "FILE", value: "cover_letter",cover_token:request.token})), {cover_letter: file});
+    if(!await current())return;
     result.coverProgress = fields.length && !result.pending.some(field => fields.some(upload => upload.key === field.key)) ? "Cover letter attached" : fields.length ? "Cover letter attachment needs review" : "Cover letter ready to download.";
   }
+  } finally {if(coverRequests.get(result.tabId)===request){coverRequests.delete(result.tabId);result.coverBusy=false;}}
 }
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -348,7 +422,7 @@ async function advancePreference(value) {
   return {enabled: Boolean(autoAdvanceProfiles[key])};
 }
 async function clickNext(result, automatic = false) {
-  if (automatic && cancelledTabs.has(result.tabId)) return false;
+  if (automatic && (cancelledTabs.has(result.tabId) || manualActionTabs.has(result.tabId) || result.fillStage)) return false;
   const scanned = await scan(result.tabId);
   if (automatic && cancelledTabs.has(result.tabId)) return false;
   if (automatic && (result.pending.length || result.writing.length || result.summary.errors.length ||
@@ -388,10 +462,16 @@ async function matchAndFill(result, prepare = false) {
     }
     // Search menus can expose only a first page. Keep those choices for prompts,
     // but let profile matching resolve answers beyond that page as before.
-    const fields = result.fields.filter(field=>!field.section_managed || !field.answered && (field.date_context || field.section_entry || /degree/i.test(field.label))).map(field => field.options_partial ? {...field, options: []} : field);
+    const fields = result.fields.filter(field=>(result.fillStage!=='required' || field.required || field.kind==='file' && /resume|\bcv\b/i.test(field.label)) &&
+      (result.fillStage!=='optional' || !field.required) && !/cover.*letter/i.test(field.label) &&
+      (!field.section_managed || !field.answered && (field.date_context || field.section_entry || /degree/i.test(field.label)))).map(field => field.options_partial ? {...field, options: []} : field);
     const response = await api("/ext/answers", {...context(result), url: result.url, fields, allow_ai:false});
     result.answerRevision=[response.profile_revision,response.facts_revision];
     let {answers}=response;
+    result.skippedAnswers ||= [];
+    for(const answer of answers.filter(a=>a.source==='user_skip')){
+      const field=fields.find(f=>f.key===answer.key);if(field && !result.skippedAnswers.some(f=>f.key===field.key))result.skippedAnswers.push(field);
+    }
     if (cancelledTabs.has(result.tabId)) return;
     answers.push(...sectionAnswers.filter(answer=>!fields.some(field=>field.key===answer.key)));
     const deferred=new Set(fields.filter(f=>f.kind==='combobox' && !f.options_partial && !f.options.length && !f.options_observed).map(f=>f.key));
@@ -402,7 +482,7 @@ async function matchAndFill(result, prepare = false) {
     // Native known answers settle first; one existing grounded batch handles the
     // remaining eligible set using actual discovered offers and minimal facts.
     const eligible=new Set(answers.filter(a=>deferred.has(a.key) || a.reason_code==='reasoning_pending' ||
-      !['RESOLVED','FILE'].includes(a.status) && !['optional_skip','policy_requires_user','unsupported_field','unusable_label','needs_writing'].includes(a.reason_code) &&
+      !['RESOLVED','FILE'].includes(a.status) && !['user_skip','optional_skip','policy_requires_user','unsupported_field','unusable_label','needs_writing'].includes(a.reason_code) &&
       ['combobox','select','radio','checkbox'].includes(fields.find(f=>f.key===a.key)?.kind)).map(a=>a.key));
     const remaining=[],bindings=new Map();
     for(const frameId of new Set([...eligible].map(key=>Number(key.split(':')[0])))) {
@@ -462,6 +542,10 @@ async function rescanRevealed(result) {
     result.pageIdentities = scanned.pageIdentities;
     if (!added.length) continue;
     const all = result.fields;
+    const stage=result.fillStage;
+    if(stage==='optional' && added.some(f=>f.required)){
+      result.fields=added.filter(f=>f.required);result.fillStage='required';await matchAndFill(result);result.fillStage=stage;
+    }
     result.fields = added;
     await matchAndFill(result);
     result.fields = all;
@@ -741,9 +825,9 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     if (result.matched.title) result.page.title = result.matched.title;
     for (const field of result.fields.filter(field=>field.attached_file)) result.completed.push({...field,value:field.attached_file,source:'already-attached'});
     await progress(result, "Matching profile answers...");
+    result.fillStage='required';
     await matchAndFill(result, true);
     await rescanRevealed(result);
-    try {await fillMatchedSkills(result);}catch(error){result.summary.errors.push("Skills: "+error.message);}
     result.progress = result.coverQuestions?.length ? "Answer the cover letter questions below." : "Autofill finished. Review the page.";
   } catch (error) { result.error = error.message; result.traceError={error:error.message,stack:error.stack}; }
   finally {
@@ -751,7 +835,7 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
     running = false; result.busy = false;
   }
   await report(result);
-  if (!cancelledTabs.has(result.tabId) && !result.error && result.writing?.length) {
+  if (!cancelledTabs.has(result.tabId) && !result.error && !result.waiting && !result.sign_in) {
     const task = continueWriting(result).then(()=>advanceAfterWriting(result)).catch(error => {
       result.summary.errors.push(error.message);
       return report(result);
@@ -769,7 +853,10 @@ async function autofillCurrent(tabId, application, advanceCount = 0) {
 
 async function continueWriting(result) {
   if (cancelledTabs.has(result.tabId)) return;
-  for (const field of [...result.writing].filter(field => field.kind !== "file")) {
+  const attempted=new Set();
+  async function writing(required){
+  for(let pass=0;pass<3;pass++)for (const field of [...result.writing].filter(field => field.kind !== "file" && Boolean(field.required)===required && !/cover.*letter/i.test(field.label) && !attempted.has(field.key))) {
+    attempted.add(field.key);
     if (!result.writing.some(item => item.key === field.key)) continue;
     if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
     result.writingProgress = 'Writing: ' + field.label + '...';
@@ -787,13 +874,25 @@ async function continueWriting(result) {
     if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
     await report(result);
   }
+  }
+  result.fillStage='required';
+  await progress(result,'Required answers: attempting writing and attachments...');
+  await writing(true);
   if (cancelledTabs.has(result.tabId) || activeResults.get(result.tabId) !== result) return;
-  if (result.writing.some(field => field.kind === "file" && /cover/i.test(field.label))) {
+  if (result.fields.some(field => ['file','textarea'].includes(field.kind) && /cover.*letter/i.test(field.label) && !field.answered)) {
     try { await coverLetter(result); }
     catch (error) { result.coverProgress = 'Cover letter error: ' + error.message; result.summary.errors.push(result.coverProgress); }
-    finally { result.coverBusy = false; }
     if (activeResults.get(result.tabId) === result) await report(result);
   }
+  if(cancelledTabs.has(result.tabId) || activeResults.get(result.tabId)!==result)return;
+  result.fillStage='optional';
+  await progress(result,'Optional answers: matching fields and skills...');
+  await matchAndFill(result);await rescanRevealed(result);
+  await writing(true);
+  try {await fillMatchedSkills(result);}catch(error){result.summary.errors.push('Skills: '+error.message);}
+  await writing(false);
+  result.fillStage=undefined;
+  await progress(result,`Autofill finished. ${result.completed.length} answers retained; ${result.pending.filter(f=>f.required).length} required questions need review.`);
 }
 
 async function advanceAfterWriting(result) {
@@ -830,7 +929,13 @@ async function action(message) {
     }
     await saveAutomaticRecovery();return {ok:true};
   }
-  if(analysisTasks.size && ['autofill','autofill-skills','chat-replace','fill-answer','cover-letter','next-page','manual-submit','page-context','load-options'].includes(message.type))
+  if(message.type==='cancel-cover-letter'){
+    const {tabResults={}}=await chrome.storage.session.get('tabResults');
+    const current=activeResults.get(message.tabId)||tabResults[message.tabId];
+    if(!current)throw Error('Open an application first.');
+    return cancelCover(current);
+  }
+  if(analysisTasks.size && ['autofill','autofill-skills','chat-replace','cover-letter','next-page','page-context','load-options'].includes(message.type))
     throw Error('Application is busy analyzing. Wait and retry.');
   if(message.type==='skill-selection') {
     const id=message.tabId || (await chrome.tabs.query({active:true,currentWindow:true}))[0]?.id;
@@ -1206,17 +1311,32 @@ async function action(message) {
     return report(current);
   }
   if (message.type === 'manual-submit') {
-    for(let wait=0;batchBusy && wait<20;wait++)await delay(50);
-    if(running || autofillTasks || skillsRunning || batchBusy || analysisTasks.size)throw Error('Wait for autofill to finish.');
-    const epoch=runEpoch,scanned=await scan(message.tabId);
+    const epoch=runEpoch,{tabResults:initialTabs={}}=await chrome.storage.session.get('tabResults');
+    const initial=activeResults.get(message.tabId)||initialTabs[message.tabId];
+    const documentId=initial?.pageIdentities?.[0]?.documentId;
+    if(!initial || !documentId || initial.url!==message.expected?.url || initial.submitting)throw Error('Application changed or submission is already pending.');
+    if(initial.coverBusy)await cancelCover(initial,'Cancelled for your Submit request');
+    const end=Date.now()+120000;
+    if(running || writingTasks.has(message.tabId) || analysisTasks.size){initial.progress='Submit requested. Waiting for current page writes to settle...';await report(initial);}
+    while(running || autofillTasks || skillsRunning || batchBusy || analysisTasks.size || writingTasks.has(message.tabId)){
+      if(staleRun(epoch) || cancelledTabs.has(message.tabId) || closedTabs.has(message.tabId) ||
+         (await chrome.tabs.get(message.tabId)).url!==initial.url)throw Error('Submit cancelled because the application changed.');
+      if(Date.now()>end)throw Error('Submit is still waiting for page writes. Review the page and retry.');
+      await delay(100);
+    }
+    const flushed=await chrome.scripting.executeScript({target:{tabId:message.tabId,documentIds:[documentId]},func:()=>globalThis.autoApplyContent.flushEdits()});
+    if(!flushed[0]?.result?.ok)throw Error('Your edits could not be saved. Review them before submitting.');
+    await Promise.all([...answerWrites].filter(([key])=>key.startsWith(message.tabId+':')).map(([,task])=>task));
+    const scanned=await scan(message.tabId);
+    if(scanned.pageIdentities?.[0]?.documentId!==documentId)throw Error('Submit cancelled because the document changed.');
     const {tabResults={},autofillTabs={},chromeRun={},chromeRunPaused=false}=await chrome.storage.session.get(['tabResults','autofillTabs','chromeRun','chromeRunPaused']);
     const current=activeResults.get(scanned.tabId)||tabResults[scanned.tabId];
     const authorized=autofillTabs[scanned.tabId];
     const ownsRun=chromeRun.tabId===scanned.tabId && chromeRun.current?.application_id===current?.matched?.application_id &&
       chromeRun.current?.run_id===current?.matched?.run_id && current?.matched?.application_id!=null &&
       authorized?.matched?.application_id===current.matched.application_id && authorized?.matched?.run_id===current.matched.run_id;
-    if(staleRun(epoch) || chromeRunPaused || (chromeRun.active || chromeRun.current) && !ownsRun || !current || current.busy || current.coverBusy || current.skillsBusy || current.waiting || current.submitting ||
-       current.writing?.length || cancelledTabs.has(scanned.tabId) || scanned.url!==current.url ||
+    if(staleRun(epoch) || chromeRunPaused || (chromeRun.active || chromeRun.current) && !ownsRun || !current || current.waiting || current.submitting ||
+       cancelledTabs.has(scanned.tabId) || scanned.url!==current.url ||
        scanned.next_action?.kind!=='submit' || message.expected?.url!==scanned.url ||
        message.expected?.step!==scanned.next_action.step || current.next_action?.step!==scanned.next_action.step)
       throw Error('Application changed or is busy. Review the employer page and run Autofill again.');
@@ -1258,25 +1378,35 @@ async function action(message) {
     if(await clickNext(current) && !running)return autofill(current.tabId,current.matched);
     return current;
   }
-  if (running || analysisTasks.size) throw new Error("Application is busy. Wait and retry.");
+  if ((running || analysisTasks.size) && !['fill-answer','reveal-field','skip-answer','restore-answer'].includes(message.type)) throw new Error("Application is busy. Wait and retry.");
   const {lastResult, tabResults={}} = await chrome.storage.session.get(['lastResult','tabResults']);
   const stored=message.tabId?tabResults[message.tabId]:lastResult;
   const result=activeResults.get(stored?.tabId) || stored;
   if (result?.tabId) activeResults.set(result.tabId, result);
-  if(analysisTasks.size)throw Error('Application is busy analyzing. Wait and retry.');
+  if(analysisTasks.size && !['fill-answer','reveal-field','skip-answer','restore-answer'].includes(message.type))throw Error('Application is busy analyzing. Wait and retry.');
   if (!result?.page) throw new Error("Run autofill on an application first.");
   if (message.type === 'load-options') {
     await loadOptions(result, message.key);
+  } else if (message.type === 'reveal-field') {
+    const field=result.fields.find(f=>f.key===message.key);
+    if(!field || message.url!==result.url || message.control_identity!==field.control_identity)throw Error('Question changed. Reopen the answer.');
+    return boundField(result,field,'revealField');
   } else if (message.type === "fill-answer") {
     if(message.url && message.url!==result.url || message.label && !result.fields.some(field=>field.key===message.key && field.label===message.label))throw new Error("Application changed. Open the answer helper again.");
-    await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, source: message.source === "AI" ? "AI" : "you"}]);
     const field = result.fields.find(field => field.key === message.key);
-    if (message.remember && field && !["textarea","file"].includes(field.kind)) {
-      await api("/ext/remember", {...field, ...context(result), url: result.url, value: message.value});
-      result.saved = "Saved";
-    }
-    await rescanRevealed(result);
-    if ((await advancePreference()).enabled && await clickNext(result,true)) return autofill(result.tabId,result.matched);
+    if(!field || message.control_identity!==field.control_identity || message.url!==result.url)throw Error('Question changed. Reopen the answer.');
+    await serializeAnswer(result.tabId,field.key,async()=>{
+      await boundField(result,field);
+      // Protect the control before waiting for an overlapping automatic writer.
+      await boundField(result,field,'protectField');
+      const deadline=Date.now()+120000;
+      while(running || analysisTasks.size){
+        if(Date.now()>deadline || cancelledTabs.has(result.tabId))throw Error('Save is waiting for page writes. Your draft is kept; retry when they settle.');
+        await delay(100);
+      }
+      await fill(result, [{key: message.key, status: "RESOLVED", value: message.value, force: true, verify_settled:true, source:message.remember?'you':message.source || 'you'}]);
+      if(message.remember)await rememberBound(result,field,message.value);
+    });
   } else if (message.type === 'undo-applied') {
     await retireSubmissionProof(result.tabId);
     // An HTTP write already accepted before Undo must settle first, so the
@@ -1287,13 +1417,25 @@ async function action(message) {
     result.progress='';result.trackingError='';result.trackingNote='Tracking undone. Site submission is unchanged.';
     const {autofillTabs={}}=await chrome.storage.session.get('autofillTabs');
     if(autofillTabs[result.tabId]){delete autofillTabs[result.tabId].applied;delete autofillTabs[result.tabId].submitAt;autofillTabs[result.tabId].undone=true;await chrome.storage.session.set({autofillTabs});}
-  } else if (message.type === "skip-answer") {
+  } else if (['skip-answer','restore-answer'].includes(message.type)) {
+    const field=result.fields.find(f=>f.key===message.key);
+    if(!field || message.url!==result.url || message.control_identity!==field.control_identity)throw Error('Question changed. Run Autofill again.');
+    await boundField(result,field);
+    if(message.type==='skip-answer')await boundField(result,field,'protectField');
+    const saved=await api('/ext/skip',{...field,...context(result),restore:message.type==='restore-answer'});
+    if(!saved?.ok)throw Error('Skip preference was not saved.');
+    result.skippedAnswers=(result.skippedAnswers||[]).filter(f=>f.key!==field.key);
+    if(message.type==='restore-answer'){
+      result.pending.push(field);await boundField(result,field,'restoreField');
+    }else result.skippedAnswers.push(field);
     result.pending = result.pending.filter(field => field.key !== message.key);
+    if(message.type==='restore-answer')result.pending.push(field);
+    result.writing=result.writing.filter(f=>f.key!==field.key);
     result.summary.needs_input = result.pending.map(field => field.label);
   } else if (message.type === "cover-letter") {
     if (result.coverBusy) return result;
     running = true; result.busy = true;
-    try { await coverLetter(result, message.answers); }
+    try { await coverLetter(result, message.answers,true); }
     catch (error) { result.error = error.message; result.coverProgress = "Cover letter error: " + error.message; }
     finally { running = false; result.busy = false; result.coverBusy = false; }
   }
@@ -1347,7 +1489,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     refreshRunStatus().then(respond, error => respond({error: error.message}));
     return true;
   }
-  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference", "answer-context-changed"].includes(message.type)) return;
+  if (!["skill-selection", "skills-available", "autofill-skills", "cancel-skills", "skills-status", "autofill", "page-context", "chat-context", "chat-replace", "fill-answer", "skip-answer", "restore-answer", "reveal-field", "cancel-cover-letter", "cover-letter", "undo-applied", "next-page", "manual-submit", "retry-submission-tracking", "load-options", "auto-advance-preference", "cancel-form-wait", "page-snapshot", "snapshot-preference", "answer-context-changed"].includes(message.type)) return;
   if(message.type==='page-snapshot'){
     const bound=Number(new URL(sender.url).searchParams.get('tabId'));
     if(bound && message.tabId!==bound){respond({error:'Application binding changed. Reopen the sidebar.'});return;}
@@ -1844,6 +1986,23 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   }
   if(message.type==='sidebar-ready' || message.type==='account-state-changed')scheduleAutoAccount(tabId);
   if(message.type==='sidebar-state' && sender.frameId===0){showSidebar(tabId,message.state).catch(console.error);return;}
+  if(message.type==='native-submit'){
+    if(sender.frameId!==0 || sender.url?.startsWith(chrome.runtime.getURL('')) || message.expected?.url!==sender.tab.url)return;
+    if(manualActionTabs.has(tabId)){respond({error:'Submission is already pending.'});return;}
+    manualActionTabs.add(tabId);
+    (async()=>{
+      const {tabResults={}}=await chrome.storage.session.get('tabResults');
+      const current=activeResults.get(tabId)||tabResults[tabId];
+      if(current?.pageIdentities?.[0]?.documentId!==sender.documentId)throw Error('Application changed. Review the page before submitting.');
+      return action({type:'manual-submit',tabId,expected:message.expected});
+    })().then(respond,error=>respond({error:error.message})).finally(()=>manualActionTabs.delete(tabId));
+    return true;
+  }
+  if(message.type==='user-answer-error'){
+    const current=activeResults.get(tabId);
+    if(current && current.url===sender.tab.url){current.error=String(message.error||'Answer could not be saved.').slice(0,1000);report(current).catch(()=>{});}
+    return;
+  }
   if(message.type==='sidebar-control'&&sender.url?.startsWith(chrome.runtime.getURL(''))){showSidebar(tabId,message.state).then(()=>respond({ok:true}));return true;}
   if(!['ask-ai','sidebar-ready','sidebar-state','user-answer','submit-intent','submission-confirmation'].includes(message.type)||sender.url?.startsWith(chrome.runtime.getURL('')))return;
   const submissionMessage=['submit-intent','submission-confirmation'].includes(message.type);
@@ -1869,17 +2028,25 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     }
     const authorized=autofillTabs[tabId],result=activeResults.get(tabId) || tabResults[tabId];
     if(message.type==='user-answer'){
-      if(!result||result.url!==sender.tab.url||running)return;
-      const key=sender.frameId+':'+message.key,field=result.fields.find(field=>field.key===key);
-      if(!field||['file','password','hidden'].includes(field.kind))return;
+      if(!result||result.url!==sender.tab.url||message.url!==result.url)throw Error('Application changed. Retry your edit.');
+      return serializeAnswer(tabId,sender.frameId+':'+message.key,async()=>{
+      const [frame]=await chrome.scripting.executeScript({target:{tabId,documentIds:[sender.documentId]},
+        func:(key,expected)=>globalThis.autoApplyContent.fieldState(key,expected),
+        args:[message.key,{url:message.url,label:message.label,control_identity:message.control_identity}]});
+      if(frame?.documentId!==sender.documentId)throw Error('Question changed. Retry your edit.');
+      const key=sender.frameId+':'+message.key,field={...frame.result.field,key};
+      if(['file','password','hidden'].includes(field.kind))throw Error('This field cannot be saved.');
+      result.pageIdentities ||= {};result.pageIdentities[sender.frameId]={documentId:sender.documentId};
+      const old=result.fields.find(f=>f.key===key);if(old)Object.assign(old,field);else result.fields.push(field);
+      await rememberBound(result,field,message.value);
       const answer={...field,value:message.value,source:'you'};
       result.completed=(result.completed||[]).filter(item=>item.key!==key);result.completed.push(answer);
       result.pending=result.pending.filter(item=>item.key!==key);
       result.writing=result.writing.filter(item=>item.key!==key);
       result.summary.needs_input=result.pending.map(item=>item.label);
       result.summary.needs_writing=result.writing.map(item=>item.label);
-      if(field.kind!=='textarea'&&message.value!==''&&message.value!==null){await api('/ext/remember',{...field,...context(result),url:result.url,value:message.value});result.saved='Saved';}
-      await report(result);return;
+      await report(result);return {ok:true};
+      });
     }
     if(!authorized||sender.frameId!==0||cancelledTabs.has(tabId) || staleRun(epoch) || chromeRunPaused ||
        (chromeRun?.active || chromeRun?.current) && (chromeRun.tabId!==tabId ||

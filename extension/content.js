@@ -173,26 +173,67 @@
     if (field.kind==='combobox') return comboSelection(element) || clean(comboInput(element)?.value);
     return element.isContentEditable || !('value' in element) ? element.textContent : element.value;
   }
-  const editTimers=new Map(), observedValues=new Map();
+  const editTimers=new Map(), observedValues=new Map(), dirtyAnswers=new Map(), editWrites=new Map(), userControls=new WeakSet();
+  const cancelledCoverUploads=new Set();
+  for(const type of ['beforeinput','pointerdown'])document.addEventListener(type,event=>{
+    if(event.isTrusted && !repairSynthetic)userControls.add(native.eventTarget(event));
+  },true);
+  function boundRecord(record) {
+    const current=records.get(record.field.key);
+    return current && current.element===record.element && record.pageUrl===location.href &&
+      record.element===record.bindingElement && record.members.every((member,index)=>member===record.bindingMembers?.[index]) &&
+      record.element.isConnected && record.labelAtScan===label(record.element) &&
+      current.field.control_identity===record.field.control_identity && !robotOnly(record.element);
+  }
+  async function saveEdit(key) {
+    if(editWrites.has(key))return editWrites.get(key);
+    const task=(async()=>{
+      while(dirtyAnswers.has(key)){
+        const draft=dirtyAnswers.get(key);
+        if(!boundRecord(draft.record))throw Error('Question changed. Edit the current question again.');
+        let response;
+        for(let attempt=0;attempt<3;attempt++){
+          try{response=await chrome.runtime.sendMessage({type:'user-answer',key,value:draft.value,
+            url:location.href,label:draft.record.field.label,control_identity:draft.record.field.control_identity});
+            if(!response?.ok)throw Error(response?.error || 'Answer was not saved.');break;
+          }catch(error){if(dirtyAnswers.get(key)!==draft)break;if(attempt===2)throw error;await pause(200*(attempt+1));}
+        }
+        if(dirtyAnswers.get(key)===draft){observedValues.set(key,draft.encoded);dirtyAnswers.delete(key);}
+      }
+      return {ok:true};
+    })().finally(()=>editWrites.delete(key));
+    editWrites.set(key,task);return task;
+  }
+  async function flushEdits() {
+    for(const [key,timer] of editTimers){clearTimeout(timer);editTimers.delete(key);captureEdit(records.get(key));}
+    await Promise.all([...dirtyAnswers.keys()].map(saveEdit));
+    return {ok:true};
+  }
+  function captureEdit(record) {
+    if(!record || !boundRecord(record))return;
+    const value=valueOf(record),encoded=JSON.stringify(value);
+    if(JSON.stringify(globalThis.autoApplyCredentials?.redact(value) ?? value)!==encoded)return;
+    if(observedValues.get(record.field.key)===encoded && !dirtyAnswers.has(record.field.key))return;
+    dirtyAnswers.set(record.field.key,{record,value,encoded});
+  }
   function learn(event) {
-    if(extensionFilling || !event.isTrusted || globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(event.target)) return;
+    if(!event.isTrusted || repairSynthetic || globalThis.autoApplyCredentials?.active()) return;
     const target=native.eventTarget(event);
     const record=Array.from(records.values()).find(r=>r.members.includes(target)||r.element.contains(target));
-    if(!record || ['file','password','hidden'].includes(record.field.kind)||!interactiveVisible(record.element)) return;
-    const value=valueOf(record), encoded=JSON.stringify(value);
-    if(JSON.stringify(globalThis.autoApplyCredentials?.redact(value) ?? value)!==encoded)return;
-    if(observedValues.get(record.field.key)===encoded) return;
+    if(!record || extensionFilling && !userControls.has(target) || globalThis.autoApplyCredentials?.sensitive(target) ||
+       ['file','password','hidden'].includes(record.field.kind)||robotOnly(target)||!interactiveVisible(record.element)) return;
+    for(const member of record.members)repairEdited.add(member);
+    captureEdit(record);
     clearTimeout(editTimers.get(record.field.key));
     editTimers.set(record.field.key,setTimeout(()=>{
-      if(globalThis.autoApplyCredentials?.active() || globalThis.autoApplyCredentials?.sensitive(record.element))return;
-      observedValues.set(record.field.key,encoded);
-      chrome.runtime.sendMessage({type:'user-answer',key:record.field.key,value}).catch(()=>{});
-    },400));
+      editTimers.delete(record.field.key);captureEdit(record);
+      saveEdit(record.field.key).catch(error=>chrome.runtime.sendMessage({type:'user-answer-error',error:error.message}).catch(()=>{}));
+    },200));
   }
-  document.addEventListener('change',learn,true); document.addEventListener('blur',learn,true);
+  for(const type of ['change','blur','focusout'])document.addEventListener(type,learn,true);
   document.addEventListener('click',event=>{
     const button=native.closest(native.eventTarget(event),'button,input[type="submit"],[role="button"]');
-    if(event.isTrusted && button && visible(button) && (/^(submit(?: application)?|apply(?: now| application)?)$/i.test(clean(button.textContent||button.value)))) {
+    if(event.isTrusted && button && visible(button)) {
       if(button===navigationButton(true))announceSubmission();
     }
   },true);
@@ -331,7 +372,7 @@
         if(!allowed.has(answer.key))continue;
         const record=records.get(answer.key);
         if(editedRecord(record))continue;
-        repairSession.outcomes.set(record.element,answer.status==='OPTIONAL_SKIP' && answer.reason_code==='optional_skip'?'optional_skip':'unresolved');
+        repairSession.outcomes.set(record.element,answer.status==='OPTIONAL_SKIP' && ['optional_skip','user_skip'].includes(answer.reason_code)?'optional_skip':'unresolved');
         repairSession.reasons.set(record.element,answer.reason_code || 'needs_fact');
         const resume=answer.status==='FILE' && answer.value==='resume' && record.field.kind==='file' &&
           analyzeResume(record.element);
@@ -1067,7 +1108,7 @@
   function observeNativeEdits(){
     for(const {root} of native.discover())if(root!==document && !learningRoots.has(root)){
       learningRoots.add(root);
-      for(const type of ['change','blur'])root.addEventListener(type,event=>{if(!event.composed)learn(event);},true);
+      for(const type of ['change','blur','focusout'])root.addEventListener(type,event=>{if(!event.composed)learn(event);},true);
     }
   }
   async function scan({repair = false} = {}) {
@@ -1117,12 +1158,12 @@
       if(cc305Group(element)){kind='radio';fieldLabel='Disability status';}
       container=questionContainer(container);
       fields.push({key, label: fieldLabel.slice(0,2000), kind, required: members.some(member => member.required || member.getAttribute("aria-required") === "true") || container?.getAttribute("aria-required") === "true" || /\*|\brequired\b/i.test([element.getAttribute('aria-label'), text(container?.querySelector('legend,label.control-label,[data-automation-id="formLabel"]')), text(element.closest('[data-automation-id^="formField"]')?.querySelector('label,legend,[data-automation-id="formLabel"]')), Array.from(element.labels || []).map(text).join(' ')].join(' ')),
-        options, multiple: kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
+        options, multiple: kind==='select' && element.multiple || kind==='checkbox' && members.length>1 && !options.every(o=>/^(yes|no)$/i.test(o)) || isPrompt(element) || element.getAttribute("data-automation-id") === "multiSelectInput" ||
           element.getAttribute("aria-multiselectable") === "true", ...(kind === "combobox" ? {options_partial: remoteAutocomplete(element)} : {}),
         section, ...(dateContext?{date_context:dateContext.context,date_part:dateContext.part}:{}),
         ...sectionEntry(element), placeholder: element.placeholder || '', max_length: element.maxLength >= 0 ? element.maxLength : null});
       for(const member of members)controlRoots.set(member,member.getRootNode());
-      records.set(key, {element, members, pageUrl:location.href, labelAtScan:label(element),
+      records.set(key, {element, members, bindingElement:element,bindingMembers:[...members],pageUrl:location.href, labelAtScan:label(element),
         choiceQuestionAtScan:['radio','checkbox'].includes(kind) ? choiceQuestion(element) : null, field: fields[fields.length - 1]});
       // A dataset key can be copied onto a replacement step. Bind completion
       // history to the actual controls and logical question within this document.
@@ -1132,7 +1173,7 @@
       }),kind,fields[fields.length - 1].label]);
       fields[fields.length - 1].answered = occupied(records.get(key));
       if (kind === 'file' && fields[fields.length - 1].answered) fields[fields.length - 1].attached_file = valueOf(records.get(key));
-      observedValues.set(key,JSON.stringify(valueOf(records.get(key))));
+      if(!dirtyAnswers.has(key) && !observedValues.has(key))observedValues.set(key,JSON.stringify(valueOf(records.get(key))));
     }
     // Preserve composite section dates while rescanning conditional controls.
     for (const [key, old] of previousRecords) {
@@ -1477,6 +1518,7 @@
     for (const answer of answers) {
       checkRepair();
       const record = refreshRecord(records.get(answer.key));
+      if(answer.cover_token && cancelledCoverUploads.has(answer.cover_token))continue;
       const canFill=native.read(()=>{
       if(record?.members.some(member=>robotOnly(member) || !answer.force && repairEdited.has(member)))return false;
       if (!record || record.pageUrl && record.pageUrl!==location.href ||
@@ -1504,6 +1546,7 @@
       if (answer.status === "NEEDS_WRITING") { unresolved(true); continue; }
       if (answer.status === "NEEDS_INPUT") { unresolved(false); continue; }
       if (answer.status === "OPTIONAL_SKIP") {
+        if(answer.reason_code==='user_skip'){summary.skipped++;continue;}
         // A select-only widget with no matching saved choice stays available in Fill.
         if (selectOnlyControl(element) || element.getRootNode()!==document && element.matches('input,textarea') && !['radio','checkbox'].includes(field.kind)) unresolved(false);
         else summary.skipped++;
@@ -1545,7 +1588,8 @@
           let stableSince=0,errorSince=0,retainedControl;
           const asynchronous=Boolean(workdayUploadGroup(element) || native.closest(element,'spl-dropzone,[data-upload],[aria-busy]'));
           const outcome = await waitFor(() => native.read(() => {
-            if(location.href!==pageUrl || repairCancellation!==cancellation || editedRecord(record) || !container.isConnected)return {error:'Application or answer changed.'};
+            if(location.href!==pageUrl || repairCancellation!==cancellation || editedRecord(record) || !container.isConnected ||
+               answer.cover_token && cancelledCoverUploads.has(answer.cover_token))return {error:'Application, cover letter or answer changed.'};
             checkRepair();
             const controls=container===element?[element]:uploadNodes(container,'input[type="file"]');
             const current=controls.length===1?controls[0]:null;
@@ -1577,12 +1621,23 @@
           }
           if (!ok) { unresolved(false); continue; }
         } else if (field.kind === "select") {
+          if(element.multiple){
+            const wanted=Array.isArray(answer.value)?answer.value:[answer.value];
+            const options=Array.from(element.options).filter(option=>!option.disabled && option.value!=='');
+            const selected=wanted.map(value=>fieldChoice(element,options,value,option=>option.text));
+            if(selected.some(option=>!option)){unresolved(false);continue;}
+            for(const option of options)nativeSet(option,'selected',selected.includes(option));
+            events(element);
+            if(!await retainedNative(record,current=>Array.from(current.element.selectedOptions).length===selected.length &&
+                Array.from(current.element.selectedOptions).every(option=>wanted.includes(clean(option.text))))){unresolved(false);continue;}
+          }else{
           const option = fieldChoice(element, Array.from(element.options).filter(option => !option.disabled && option.value !== ""), answer.value, option => option.text);
           if (!option) { unresolved(false); continue; }
           nativeSet(element, "value", option.value);
           events(element);
           if (answer.batch_settlement ? record.element.value!==option.value : !await retainedNative(record,current=>current.element.value===option.value &&
               Array.from(current.element.selectedOptions).some(selected=>!selected.disabled && text(selected)===text(option)))) {unresolved(false);continue;}
+          }
         } else if (yesNoProxy(element)) {
           const proxy=yesNoProxy(element),choice=proxy.choices.find(el=>normal(text(el))===normal(answer.value));
           if(!choice || !noSubmitProxyChoice(choice)){unresolved(false);continue;}
@@ -1637,7 +1692,8 @@
         trace("field","verified",element,{verified:true,...(field.kind!=="file"?{value:answer.value,observed:valueOf(record)}:{})});
         mark(record, "#888888");
         summary.filled++;
-        const value=valueOf(record); observedValues.set(field.key,JSON.stringify(value));
+        const value=valueOf(record); if(!dirtyAnswers.has(field.key))observedValues.set(field.key,JSON.stringify(value));
+        if(answer.force && answer.source==='you')for(const member of record.members)repairEdited.add(member);
         summary.completed.push({...field,value,source:answer.source||"AI"});
       } catch(error){trace("field","error",element,{error:error.message,stack:error.stack});unresolved(false);}
     }
@@ -2315,9 +2371,9 @@
     if(final && (signInPage() || globalThis.autoApplyCredentials?.incomplete()))return;
     const step=workdayState()?.step || '';
     const candidates=Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"],[role="button"]')).filter(node=>{
-      const caption=clean(node.textContent || node.value);
+      const caption=clean(node.getAttribute('aria-label') || clean(node.getAttribute('aria-labelledby')).split(' ').map(id=>text(native.byId(node,id))).join(' ') || node.textContent || node.value);
       if(!interactiveVisible(node))return false;
-      if(final)return /^(submit|submit application)$/i.test(caption) &&
+      if(final)return /^(submit|submit application|send application|apply(?: now| application)?)$/i.test(caption) &&
         (/review/i.test(step) || node.getAttribute('data-automation-id')==='pageFooterNextButton' ||
          applicationWritingScope(node.form || writingScope(node)));
       // Workday reuses pageFooterNextButton for both Continue and Submit.
@@ -2337,17 +2393,56 @@
     const entry=!final && !navigationButton() && applicationEntry();
     return {kind:final?'submit':navigationButton()?'next':entry?'entry':'none',...(entry?{label:clean(entry.getAttribute('aria-label') || entry.textContent)}:{}),url:location.href,step:workdayState()?.step || ''};
   }
-  async function manualSubmit(expected) {
+  async function manualSubmit(expected, nativeIntent=false) {
+    await flushEdits();
     const state=navigationState(), errors=validationErrors();
     if(!expected || expected.url!==state.url || expected.step!==state.step || state.kind!=='submit' ||
-       errors.length || signInPage() || (await scan()).fields.some(f=>f.required&&!f.answered))
+       signInPage())
       return {clicked:false,errors,message:'Application changed or needs review. Use the employer page.'};
     const button=navigationButton(true),fresh=navigationState();
     if(!button || fresh.url!==state.url || fresh.step!==state.step || fresh.kind!=='submit')return {clicked:false,errors:[],message:'Submit is unavailable. Use the employer page.'};
-    armSubmission(); button.click();
+    if(nativeIntent)announceSubmission();else armSubmission();
+    button.click();
     detectConfirmation();
     return {clicked:true,errors:validationErrors()};
   }
+  function fieldState(key, expected) {
+    const record=records.get(key);
+    if(!record || !boundRecord(record) || expected?.url!==location.href ||
+       expected.control_identity!==record.field.control_identity || expected.label!==record.field.label)
+      throw Error('Question changed. Run Autofill again.');
+    return {field:record.field,value:valueOf(record),valid:!record.members.some(node=>node.getAttribute('aria-invalid')==='true' || node.validity && !node.validity.valid)};
+  }
+  function revealField(key, expected) {
+    fieldState(key,expected);
+    const record=records.get(key),node=record.element;
+    node.scrollIntoView({block:'center',behavior:'smooth'});
+    const animation=node.animate?.([{outline:'2px solid #b8b0df'},{outline:'2px solid transparent'}],{duration:1200});
+    return {ok:true};
+  }
+  function protectField(key,expected){
+    fieldState(key,expected);
+    for(const member of records.get(key).members)repairEdited.add(member);
+    repairRevision++;return {ok:true};
+  }
+  function restoreField(key,expected){
+    fieldState(key,expected);
+    for(const member of records.get(key).members)repairEdited.delete(member);
+    return {ok:true};
+  }
+  let enterSubmitting=false;
+  document.addEventListener('keydown',event=>{
+    if(!event.isTrusted || event.key!=='Enter' || event.isComposing || event.keyCode===229 || event.repeat ||
+       event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || enterSubmitting)return;
+    const target=native.eventTarget(event),button=navigationButton(true);
+    if(!button || native.closest(target,'textarea,input,select,[contenteditable]:not([contenteditable="false"]),#autoapply-sidebar,.autoapply-ask-ai') ||
+       native.query('[role="listbox"],[role="menu"],[aria-expanded="true"]').some(visible) ||
+       !(target===button || target===document.body || target===document.documentElement))return;
+    event.preventDefault();enterSubmitting=true;
+    chrome.runtime.sendMessage({type:'native-submit',expected:navigationState()}).then(value=>{
+      if(value?.error)chrome.runtime.sendMessage({type:'user-answer-error',error:value.error}).catch(()=>{});
+    }).catch(error=>chrome.runtime.sendMessage({type:'user-answer-error',error:error.message}).catch(()=>{})).finally(()=>{enterSubmitting=false;});
+  },true);
   async function nextPage(requireComplete = false) {
     const errors = validationErrors();
     if (requireComplete && errors.length) return {clicked: false, errors};
@@ -2381,7 +2476,7 @@
     const applicationHeading = node => visible(node) && /\b(?:job application|application (?:form|questions)|apply (?:for|to) (?:this|the|our)|your application)\b/i.test(text(node));
     const heading = nodes(headingSelector).some(applicationHeading);
     const finalApply = nodes('button,input[type="submit"],[role="button"]').filter(visible)
-      .some(node => /^(?:submit application|send application|apply(?: now)?)$/i.test(clean(node.textContent || node.value)));
+      .some(node => /^(?:submit application|send application|apply(?: now)?)$/i.test(clean(node.getAttribute('aria-label') || node.textContent || node.value)));
     if (heading && (contact || resume) || resume && contact && finalApply) return true;
     // Generic employer forms often put their heading immediately before the form.
     // Keep that association local and require strong evidence within this form.
@@ -2730,6 +2825,8 @@
     }
   }
   globalThis.autoApplyContent.syncWritingButtons=scheduleWritingButtons;
+  Object.assign(globalThis.autoApplyContent,{fieldState,revealField,flushEdits,protectField,restoreField,
+    cancelCoverUpload:token=>{if(cancelledCoverUploads.size>40)cancelledCoverUploads.clear();cancelledCoverUploads.add(token);}});
   globalThis[singleton]=globalThis.autoApplyContent;
   if(window===window.top) {
     chrome.runtime.sendMessage({type:'sidebar-ready'}).catch(()=>{});

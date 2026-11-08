@@ -92,7 +92,7 @@ def _question(field):
             or any(v is not None and (type(v) is not int or not 0 <= v <= 500) for v in (minimum_choices, maximum_choices))
             or minimum_choices is not None and maximum_choices is not None and minimum_choices > maximum_choices):
         raise SettingsRejected('Invalid field kind, options, required, key or max_length')
-    if kind == 'checkbox' and len(options) > 1 and field.get('multiple') is True:
+    if kind in {'checkbox', 'select', 'combobox'} and field.get('multiple') is True and (kind != 'checkbox' or len(options) > 1):
         kind = 'multiselect'
     # This observed public label is a brand, not a camelCase machine identifier.
     label = 'Linkedin' if field['label'].strip() == 'LinkedIn' else field['label']
@@ -983,6 +983,13 @@ def resolve_answers(dashboard, payload):
         result = []
         pending = []
         for q, field in zip(questions, fields):
+            if q.kind == 'textarea':
+                q.scope = 'application:' + str(app.get('canonical_url') or app.get('id'))
+            from .field_mapping import describe
+            descriptor = describe(q, app, profile)
+            if question_rules.skipped(resolver._settings, q, descriptor, app):
+                result.append(dict(key=q.key, value=None, source='user_skip', status='OPTIONAL_SKIP', reason_code='user_skip'))
+                continue
             from .question_keywords import date_part_label, unusable_label, robot_only
             if robot_only(q.label) or robot_only(field.get("data-automation-id")) or robot_only(field.get("name")):
                 result.append(dict(key=q.key, value=None, source="", status="OPTIONAL_SKIP"))
@@ -1143,6 +1150,10 @@ def remember(dashboard, payload):
     if q.kind == 'file':
         raise SettingsRejected('File answers cannot be remembered')
     value = payload.get('value')
+    if q.kind == 'number' and type(value) in (int, float):
+        value = str(value)
+    if value == '' or value is None:
+        raise SettingsRejected('Blank answers are not saved facts. Enter an answer or choose Skip.')
     try:
         answers.validate_answer(q, value)
     except (ValueError, TypeError) as exc:
@@ -1150,13 +1161,21 @@ def remember(dashboard, payload):
     with dashboard.settings.mutex, dashboard.connection(writable=True) as db:
         app = _application(db, payload)
         _unprotected(app)
+        if payload.get('application_id') is not None and not _same_posting(app['canonical_url'], payload.get('url')):
+            raise SettingsRejected('Application URL does not match the current posting', status=409)
         resolver = answers.AnswerResolver(dashboard.config, db)
         resolution = resolver.resolve_result(q, app)
         descriptor = resolution.descriptor
+        # Writing belongs to this posting, never to a cross-company profile fact.
+        if q.kind == 'textarea':
+            from .field_mapping import describe
+            q.scope = 'application:' + str(app.get('canonical_url') or app.get('id'))
+            descriptor = describe(q, app, resolver.snapshot.facts)
         q.scope, q.semantic_key, q.policy = descriptor.scope, descriptor.semantic_key, descriptor.policy
         provenance = dict(signature=descriptor.signature, profile_revision=resolution.profile_revision,
                           field=dict(label=q.label, kind=q.kind, options=q.options),
-                          provenance=dict(canonical_profile_revision=dashboard.config.profile_snapshot().revision))
+                          provenance=dict(canonical_profile_revision=dashboard.config.profile_snapshot().revision,
+                                          explicit_extension_edit=True))
         # Same verified store and signatures as Database.save_answer; no receipts,
         # lifecycle transitions or history exports are needed for extension input.
         db.conn.execute('BEGIN IMMEDIATE')
@@ -1171,11 +1190,50 @@ def remember(dashboard, payload):
                        (descriptor.semantic_key, descriptor.signature, json.dumps(provenance), stored['id']))
             db.set_setting('known_answer_signature:' + str(stored['id']), answer_signature(q.label, q.kind, q.options))
             question_rules.remember(db, dashboard.config, q, value, stored['id'])
+            db.execute('DELETE FROM settings WHERE key=?', (question_rules.skip_key(q, descriptor, app),))
+            from .concepts import REGISTRY, canonical_key
+            spec = REGISTRY.get(descriptor.semantic_key)
+            # A label must independently identify one ordinary canonical fact.
+            if (spec and spec.profile_path and not spec.special_policy and spec.factual_fallback
+                    and descriptor.scope == 'global' and q.kind != 'textarea'
+                    and canonical_key(q.label) == spec.key and value not in ('', None, [])
+                    and not re.search(r'\b(?:and|or|not|unable|cannot|never|consent|agree|terms|certify|attest)\b', normalize(q.label))):
+                typed = value
+                if spec.answer_type == 'boolean' and type(typed) is not bool:
+                    typed = {'yes': True, 'no': False}.get(normalize(typed))
+                if spec.profile_path == 'skills' and isinstance(typed, str):
+                    typed = [part.strip() for part in typed.split(',') if part.strip()]
+                compatible = (type(typed) is bool if spec.answer_type == 'boolean' else
+                              isinstance(typed, list) and all(isinstance(v, str) for v in typed)
+                              if spec.profile_path == 'skills' else isinstance(typed, str))
+                if typed is not None and compatible:
+                    db.set_setting('verified_fact:' + spec.profile_path,
+                                   dict(value=typed, source='USER_PROVIDED', question_id=stored['id']))
             db.conn.execute('COMMIT')
         except BaseException:
             db.conn.execute('ROLLBACK')
             raise
     return dict(ok=True)
+
+
+def skip_answer(dashboard, payload):
+    q = _question(payload)
+    restore = payload.get('restore', False)
+    if type(restore) is not bool:
+        raise SettingsRejected('restore must be a boolean')
+    with dashboard.settings.mutex, dashboard.connection(writable=True) as db:
+        app = _application(db, payload)
+        _unprotected(app)
+        if payload.get('application_id') is not None and not _same_posting(app['canonical_url'], payload.get('url')):
+            raise SettingsRejected('Application URL does not match the current posting', status=409)
+        resolver = answers.AnswerResolver(dashboard.config, db)
+        descriptor = resolver.resolve_result(q, app).descriptor
+        key = question_rules.skip_key(q, descriptor, app)
+        if restore:
+            db.execute('DELETE FROM settings WHERE key=?', (key,))
+        else:
+            db.set_setting(key, dict(source='USER_PROVIDED'))
+    return dict(ok=True, skipped=not restore)
 
 
 def resume(dashboard, payload):
@@ -1659,6 +1717,7 @@ ROUTES = {('GET', '/ext/repairs'): lambda d, p: d.repairs.status(),
           ('POST', '/ext/skills/plan'): skill_plan, ('POST', '/ext/snapshot'): snapshot, ('GET', '/ext/profile-sections'): profile_sections, ('GET', '/ext/ping'): ping, ('POST', '/ext/match'): match,
           ('POST', '/ext/applied'): applied, ('POST', '/ext/unapplied'): unapplied,
           ('POST', '/ext/answers'): resolve_answers, ('POST', '/ext/remember'): remember,
+          ('POST', '/ext/skip'): skip_answer,
           ('POST', '/ext/write'): write, ('POST', '/ext/chat'): chat,
           ('POST', '/ext/cover-letter'): cover_letter,
           ('GET', '/ext/resume'): resume, ('GET', '/ext/run/next'): run_next,

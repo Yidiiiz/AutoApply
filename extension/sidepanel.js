@@ -65,14 +65,79 @@ async function perform(message) {
   render(response);
   return response;
 }
+const editorSaves=new Set();
+let savingEditors=0;
+function answerEditorsActive(){
+  const active=document.activeElement;
+  return savingEditors || active?.matches('input,textarea,select,[contenteditable="true"]') && active.closest('#needs-input,.answer-card.editing,#cover-questions') || document.querySelector('.answer-card.dirty,.prompt.dirty');
+}
+function fieldBinding(field){return {key:field.key,url:result.url,label:field.label,control_identity:field.control_identity};}
+function reveal(field){return send({type:'reveal-field',...fieldBinding(field)}).then(value=>{if(value?.error)throw Error(value.error);});}
+function editorValue(input,field){
+  if(field.kind==='checkbox' && (field.options||[]).length<=1)return input.value==='true';
+  return input.multiple?Array.from(input.selectedOptions,o=>o.value):input.value;
+}
+function autosaveEditor(input,field,status,saveButton,customSave){
+  const binding=fieldBinding(field);let dirty=false,task,revision=0;
+  const row=()=>input.closest('.prompt,.answer-card');
+  input.addEventListener('focus',()=>{if(!field.generated)reveal(field).catch(error=>status.textContent=error.message);});
+  const markDirty=()=>{dirty=true;revision++;row()?.classList.add('editing','dirty');};
+  input.addEventListener('input',markDirty);
+  input.addEventListener('change',markDirty);
+  async function save(){
+    if(task)return task;
+    if(!dirty)return;
+    savingEditors++;
+    task=(async()=>{
+      while(dirty){
+        const version=revision,value=editorValue(input,field);
+        status.textContent='Saving...';saveButton.disabled=true;
+        if(customSave)await customSave(value);
+        else {const response=await send({type:'fill-answer',...binding,value,remember:true});if(response?.error)throw Error(response.error);result=response;}
+        if(version===revision)dirty=false;
+      }
+      status.textContent='Saved';
+    })().catch(error=>{dirty=true;row()?.classList.add('dirty');status.textContent=error.message;throw error;}).finally(()=>{
+      savingEditors--;editorSaves.delete(task);task=undefined;saveButton.disabled=false;
+      if(!dirty){row()?.classList.remove('dirty');if(document.activeElement!==input){row()?.classList.remove('editing');render(result);}}
+    });
+    editorSaves.add(task);return task;
+  }
+  input.addEventListener('focusout',()=>save().then(()=>{if(!dirty && !task && document.activeElement!==input){row()?.classList.remove('editing');render(result);}}).catch(()=>{}));
+  saveButton.onclick=()=>{dirty=true;return save().catch(()=>{});};
+}
+async function saveGeneratedAnswer(field,value){
+  const key=field.key.slice(3),appKey=applicationKey();
+  const current=histories[key] || {versions:[{answer:field.value}],index:0};
+  const updated={...current,versions:current.versions.slice()};
+  updated.versions[updated.index]={...updated.versions[updated.index],answer:value,
+    words:value.split(/\s+/).filter(Boolean).length,chars:value.length,warning:''};
+  const stored=await chrome.storage.session.get(['applicationAnswers','tabResults','lastResult']);
+  if(applicationKey()!==appKey || key!==appKey+':'+field.label)throw Error('Application changed. Reopen the draft.');
+  const applicationAnswers=stored.applicationAnswers || {};
+  const answers=(applicationAnswers[appKey] || result.aiAnswers || []).map(item=>item.label===field.label?{...item,value}:item);
+  applicationAnswers[appKey]=answers;
+  const update=snapshot=>{
+    const owner=String(snapshot?.matched?.application_id || snapshot?.url?.replace(/\/apply(?:\/.*)?$/i,'').split(/[?#]/)[0] || '');
+    return owner===appKey?{...snapshot,aiAnswers:answers}:snapshot;
+  };
+  const tabResults=Object.fromEntries(Object.entries(stored.tabResults || {}).map(([id,snapshot])=>[id,update(snapshot)]));
+  const answerHistory={...histories,[key]:updated};
+  await chrome.storage.session.set({answerHistory,applicationAnswers,tabResults,
+    ...(stored.lastResult?{lastResult:update(stored.lastResult)}:{})});
+  histories=answerHistory;
+  if(applicationKey()===appKey)result={...result,aiAnswers:answers};
+  renderAnswer();
+}
 function inputFor(field) {
   let input;
   if (["select", "radio", "combobox", "checkbox"].includes(field.kind)) {
     input = document.createElement("select");
-    const options = field.options || [];
+    const standalone=field.kind==='checkbox' && (field.options||[]).length<=1;
+    const options = standalone ? ['true','false'] : field.options || [];
     input.multiple = field.multiple || field.kind === "checkbox" && options.length > 1;
     if (!input.multiple) { const blank = node("option", options.length ? "Choose an answer" : "No options available — check the page"); blank.value = ""; input.append(blank); }
-    for (const value of options) { const option = node("option", value); option.value = value; input.append(option); }
+    for (const value of options) { const option = node("option", standalone ? value==='true'?'Yes':'No' : value); option.value = value; input.append(option); }
     input.disabled = !options.length;
   } else {
     input = document.createElement(field.kind === "textarea" ? "textarea" : "input");
@@ -95,13 +160,8 @@ function prompts() {
     else {
       const input = inputFor(field), status = node("p", "");
       row.append(input);
-      const save = button("Save", async event => {
-        const value = input.multiple ? Array.from(input.selectedOptions, option => option.value) : input.value;
-        if (input.value === "") { status.textContent = "Enter an answer or choose Skip."; return; }
-        event.target.disabled = true;
-        try { await perform({type: "fill-answer", key: field.key, value, remember: true}); }
-        catch (error) { status.textContent = error.message; event.target.disabled = false; }
-      });
+      const save = button('Save',()=>{});
+      autosaveEditor(input,field,status,save);
       save.disabled = input.disabled;
       actions.append(save);
 
@@ -114,9 +174,14 @@ function prompts() {
       }
       row.append(actions, status);
     }
-    actions.append(button("Skip", () => perform({type: "skip-answer", key: field.key}).catch(showError)));
+    actions.append(button("Skip", () => perform({type: "skip-answer", ...fieldBinding(field)}).catch(showError)));
     if (!actions.parentElement) row.append(actions);
     element("needs-input").append(row);
+  }
+  for(const field of result?.skippedAnswers || []){
+    const row=node('div','');row.className='prompt';row.append(node('p',field.label+' — skipped'),
+      button('Undo Skip',()=>perform({type:'restore-answer',...fieldBinding(field)}).catch(showError)));
+    element('needs-input').append(row);
   }
 
   element("cover-questions").replaceChildren();
@@ -147,7 +212,8 @@ function completedAnswers(){
       const edit=button('✎',()=>{
         const input=inputFor(field);if(input.multiple){for(const option of input.options)option.selected=(Array.isArray(field.value)?field.value:[field.value]).includes(option.value);}else input.value=String(field.value??'');
         const status=node('p','');
-        const save=button('Save',async()=>{save.disabled=true;try{const value=input.multiple?Array.from(input.selectedOptions,o=>o.value):input.value;if(field.generated){const k=field.key.slice(3);const h=histories[k] ||= {versions:[{answer:field.value}],index:0};h.versions[h.index]={...h.versions[h.index],answer:value,words:value.split(/\s+/).filter(Boolean).length,chars:value.length};await chrome.storage.session.set({answerHistory:histories});const stored=result?.aiAnswers?.find(item=>item.label===field.label);if(stored){stored.value=value;const {applicationAnswers={}}=await chrome.storage.session.get("applicationAnswers");applicationAnswers[applicationKey()]=result.aiAnswers;await chrome.storage.session.set({applicationAnswers});}completedAnswers();}else await perform({type:'fill-answer',key:field.key,value,remember:field.kind!=='textarea',source:field.source==='AI'?'AI':'you'});}catch(error){status.textContent=error.message;save.disabled=false;}});
+        const save=button('Save',()=>{});
+        autosaveEditor(input,field,status,save,field.generated?value=>saveGeneratedAnswer(field,value):undefined);
         actions.className='inline-actions';card.classList.add('editing');actions.replaceChildren(save,button('Cancel',completedAnswers));details.replaceChildren(label,input);card.replaceChildren(details,actions,status);input.focus();
       });edit.setAttribute('aria-label','Edit');edit.title='Edit answer';edit.className='edit-answer icon-button';actions.append(edit);card.append(actions);
     }
@@ -241,7 +307,8 @@ function render(value) {
   const newlyVerified=(value.completed || []).some(answer=>answer.source!=='you' &&
     !(result?.completed || []).some(old=>old.key===answer.key && JSON.stringify(old.value)===JSON.stringify(answer.value)));
   result = value;
-  if(newlyVerified)selectTab('answers');
+  const editing=answerEditorsActive();
+  if(newlyVerified && !editing)selectTab('answers');
   loadChat();
   if(value.skills_available!==undefined) showSkills(value.skills_available);
   element("error").textContent = dashboardStarter.handlesConnectionError(value.error) ? '' : value.error || "";
@@ -263,7 +330,8 @@ function render(value) {
   else if(element("skills-progress").textContent==="Adding skills…")element("skills-progress").textContent="Skills need review";
   const account=value.sign_in && value.accountMode,final=!account && value.next_action?.kind==='submit';
   element('next-page').textContent=value.submitting?'Submitting...':account?(account==='signup'?'Create account':'Sign in'):final?'Submit':value.next_action?.kind==='entry'?value.next_action.label:'Next page';
-  element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || account && busy || final && (busy || value.waiting));
+  element('next-page').disabled=Boolean(value.submitting || value.siteConfirmed || account && busy || final && value.waiting);
+  element('next-page').title=final?'Submit to the employer. Enter also submits while this button is focused.':'';
   element('auto-advance').disabled=Boolean(account) || final || !autoPreferenceReady;
   element('auto-advance').parentElement.title=final?'Final submission requires your explicit click':'Keep Auto enabled for following pages; stops for validation and final submission';
   element('submission-status').hidden=!value.siteConfirmed;
@@ -271,6 +339,7 @@ function render(value) {
   element('retry-tracking').hidden=!value.trackingError;
   element('cancel-form-wait').hidden = !value.waiting;
   element("cover-letter").disabled = Boolean(value.busy || value.coverBusy);
+  element('cancel-cover-letter').hidden=!value.coverBusy;
   element("cover-progress").textContent = value.coverBusy || value.coverQuestions?.length || /error|needs review/i.test(value.coverProgress || "") ? value.coverProgress || "" : "";
   element("writing-progress").textContent = /^Writing:/.test(value.writingProgress || "") && !value.writing?.length ? "" : /^Answer filled:/.test(value.writingProgress || "") ? "" : value.writingProgress || "";
   element("results").hidden = !value.summary;
@@ -282,7 +351,7 @@ function render(value) {
   const sectionText=(value.sections||[]).map(s=>(s.message || s.name[0].toUpperCase()+s.name.slice(1))+(s.message?'':s.total!==undefined?' '+s.added+'/'+s.total:': '+s.added+' added'+(s.skipped?' / '+s.skipped+' not in list':''))).join(' · ');
   element('section-results').textContent='';
   element('answer-section-results').textContent=sectionText;
-  prompts(); completedAnswers();
+  if(!editing){prompts(); completedAnswers();}
   element("applied-status").hidden=!value.applied;
   renderFillButton(value);
   renderSnapshotFeedback(value);
@@ -427,7 +496,7 @@ for (const [id, delta] of [["previous", -1], ["next", 1]]) element(id).onclick =
   history().index += delta; renderAnswer(); completedAnswers(); await chrome.storage.session.set({answerHistory: histories});
 };
 element("copy").onclick = () => navigator.clipboard.writeText(element("answer").value).then(() => { element("ai-status").textContent = "Copied."; }, showError);
-element("fill-answer").onclick = () => perform({type: "fill-answer", key: source.key, value: element("answer").value, source:"AI", url:source.url, label:source.label}).catch(showError);
+element("fill-answer").onclick = () => perform({type: "fill-answer", key: source.key, value: element("answer").value, source:"AI", url:source.url, label:source.label,control_identity:source.control_identity}).catch(showError);
 element("send").onclick = chat;
 element("chat-input").onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); chat(); } };
 element("clear-chat").onclick = async () => { messages = [];lastDraft=undefined;await saveChat();renderMessages(); element("chat-status").textContent = ""; };
@@ -469,9 +538,11 @@ element('next-page').onclick=async event=>{
   if(!event.isTrusted)return;
   const final=!result?.sign_in && result?.next_action?.kind==='submit';
   element('next-page').disabled=true;
-  try{await perform({type:final?'manual-submit':'next-page',tabId:result?.tabId,expected:result?.next_action});}
+  try{document.activeElement?.blur();await Promise.all([...editorSaves]);await perform({type:final?'manual-submit':'next-page',tabId:result?.tabId,expected:result?.next_action});}
   catch(error){render(result);showError(error);}
 };
+element('next-page').onkeydown=event=>{if(event.key==='Enter' && (event.isComposing || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey))event.preventDefault();};
+element('cancel-cover-letter').onclick=()=>perform({type:'cancel-cover-letter'}).catch(showError);
 element('retry-tracking').onclick=()=>perform({type:'retry-submission-tracking'}).catch(showError);
 element('cancel-form-wait').onclick=()=>perform({type:'cancel-form-wait'}).catch(showError);
 element('auto-advance').onchange=()=>send({type:'auto-advance-preference',enabled:element('auto-advance').checked}).then(value=>{if(value.error)throw Error(value.error);}).catch(showError);

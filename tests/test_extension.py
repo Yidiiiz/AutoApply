@@ -358,7 +358,7 @@ def extension_server(config, db):
     requests = []
     run = {"items": [], "index": 0}
     skill_aliases = {"ecmascript": "JavaScript"}
-    gates = {name: threading.Event() for name in ("write", "cover", "chat")}
+    gates = {name: threading.Event() for name in ("write", "cover", "chat", "remember")}
     for gate in gates.values():
         gate.set()
     canned = {
@@ -435,6 +435,8 @@ def extension_server(config, db):
                 for name in payload.get("release", []):
                     gates[name].set()
                 run.update(auto_cover=payload.get("auto_cover", run.get("auto_cover", False)), t057_chat=payload.get("t057_chat",run.get("t057_chat",False)))
+                if 'remember_failures' in payload:
+                    run['remember_failures'] = payload['remember_failures']
                 self.response(200, {"ok": True})
             elif self.path == "/ext/fixture-start":
                 base = f"http://127.0.0.1:{self.server.server_port}"
@@ -482,9 +484,9 @@ def extension_server(config, db):
             elif self.path == "/ext/profile-sections":
                 self.response(200, {"experience": [], "projects": [], "education": [], "skills": [], "links": {}})
             elif self.path == "/ext/ping":
-                self.response(200, {"ok": True, "profile_name": "Fixture Student"})
+                self.response(200, {"ok": True, "name": "AutoApply", "profile_name": "Fixture Student"})
             elif self.path == "/ext/match":
-                self.response(200, {"application_id": 42, "company": "Fixture Company", "title": "Fixture Intern"})
+                self.response(200, {**({} if '/interactions/' in payload.get('url', '') else {"application_id": 42}), "company": "Fixture Company", "title": "Fixture Intern"})
             elif self.path == "/ext/resume":
                 self.response(200, {"filename": "fixture-resume.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
             elif self.path == "/ext/write":
@@ -493,7 +495,19 @@ def extension_server(config, db):
                 self.response(200, {"answer": answer, "words": len(answer.split()), "chars": len(answer)})
             elif self.path == '/ext/snapshot' and payload.get('diagnostic', {}).get('reason') == 'page_analysis':
                 self.response(200, snapshot(analysis_dashboard, payload))
-            elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember", "/ext/snapshot"}:
+            elif self.path in {'/ext/remember', '/ext/skip'} and '/interactions/' in payload.get('url', ''):
+                from autoapply.extension_api import remember, skip_answer
+                if self.path == '/ext/remember':
+                    gates['remember'].wait(15)
+                    if run.get('remember_failures', 0):
+                        run['remember_failures'] -= 1
+                        self.response(503, dict(error='Fixture remember transport failed'))
+                        return
+                try:
+                    self.response(200, (remember if self.path == '/ext/remember' else skip_answer)(analysis_dashboard, payload))
+                except Exception as error:
+                    self.response(400, dict(error=str(error)))
+            elif self.path in {"/ext/applied", "/ext/unapplied", "/ext/remember", "/ext/snapshot", '/ext/skip'}:
                 self.response(200, {"ok": True})
             elif self.path == "/ext/chat":
                 gates["chat"].wait(15)
@@ -517,6 +531,10 @@ def extension_server(config, db):
                 else:
                     self.response(200, {"filename": "fixture-cover.pdf", "mime": "application/pdf", "base64": base64.b64encode(RESUME).decode()})
             elif self.path == "/ext/answers":
+                if '/interactions/' in payload.get('url', ''):
+                    from autoapply.extension_api import resolve_answers
+                    self.response(200, resolve_answers(analysis_dashboard, payload))
+                    return
                 answers = []
                 for field in payload["fields"]:
                     label = field["label"]

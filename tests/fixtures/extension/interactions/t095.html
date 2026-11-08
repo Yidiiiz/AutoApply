@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Synthetic final application</title>
+<style>body{font:16px system-ui;max-width:700px;padding:24px}label{display:block;margin:18px 0}input,textarea,select{display:block}#spacer{height:1000px}</style>
+<h1>Job application</h1>
+<form id="application" action="/blocked-employer-write" method="post">
+  <label>First name<input id="first" name="first_name" required></label>
+  <label>Email<input id="email" name="email" type="email" required></label>
+  <label>Resume<input id="resume" name="resume" type="file" required></label>
+  <label>Why this role?<textarea id="required-writing" required></textarea></label>
+  <label>Referral source<select id="referral" required><option value="">Choose</option><option>Friend</option><option>Other</option></select></label>
+  <label>Employment subsidiary<input id="subsidiary" required></label>
+  <label>Current visa status<input id="visa" required></label>
+  <label>Cover letter<input id="cover" type="file"></label>
+  <div id="spacer"></div>
+  <label>Website<input id="website" type="url"></label>
+  <label>Years using a fixture tool<input id="years" type="number"></label>
+  <label><input id="consent" type="checkbox">Contact consent</label>
+  <label>Favorite fixture editor<select id="editor"><option value="">Choose</option><option>A</option><option>B</option></select></label>
+  <button id="apply" type="button" aria-label="Apply" class="btn btn--rectangle">Apply</button>
+  <div id="feedback" role="alert"></div>
+</form>
+<script>
+window.clicks=0;window.order=[];window.posts=0;
+application.addEventListener('submit',event=>{event.preventDefault();posts++;});
+application.addEventListener('change',event=>order.push(event.target.id));
+apply.addEventListener('click',()=>{clicks++;feedback.textContent=application.checkValidity()?'Fixture confirmation withheld':'Required information missing';application.reportValidity();});
+</script></html>

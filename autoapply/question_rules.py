@@ -6,6 +6,29 @@ from .field_mapping import normalize
 
 VERSION = 'experience-v1'
 PREFIX = 'known_answer_signature:reusable:'
+SKIP_PREFIX = 'known_answer_signature:skip:'
+
+
+def skip_key(q, descriptor, app):
+    """Exact preference, with conservative application scope for sensitive wording."""
+    import hashlib
+    import json
+    from .field_mapping import answer_signature
+    sensitive = re.search(r'\b(?:employ\w*|compan\w*|legal|consent|agree\w*|terms|privacy|visa|'
+                          r'citizen\w*|sponsor\w*|authoriz\w*|disab\w*|gender|race|veteran|'
+                          r'government|referr\w*|conflict\w*|salary|compensation|cover|why|'
+                          r'attest\w*|certif\w*|financial|ownership|relative\w*|medical|health|restriction\w*)\b', normalize(q.label))
+    from .concepts import REGISTRY
+    spec = REGISTRY.get(descriptor.semantic_key)
+    scoped = sensitive or q.kind in {'textarea', 'file'} or descriptor.policy == 'REQUIRE_USER' or spec and spec.special_policy
+    scope = str(app.get('canonical_url') or app.get('id') or '') if scoped else 'global'
+    return SKIP_PREFIX + hashlib.sha256(json.dumps([
+        answer_signature(q.label, q.kind, q.options), descriptor.semantic_key,
+        descriptor.policy, scope]).encode()).hexdigest()
+
+
+def skipped(settings, q, descriptor, app):
+    return settings.get(skip_key(q, descriptor, app), {}).get('source') == 'USER_PROVIDED'
 SUBJECTS = {
     'git': ('git', 'version control using git', 'git version control'),
     'version_control': ('version control tools such as git', 'version control', 'version control tools'),
